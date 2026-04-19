@@ -8,6 +8,8 @@ export interface ReceiptData {
   timestamp?: number;
   prompt?: string;
   parentId?: string;
+  /** Multi-line ASCII fork / chain line(s) for display */
+  forkLines?: string;
 }
 
 export class ReceiptCard {
@@ -19,27 +21,39 @@ export class ReceiptCard {
 
   mount(el: HTMLElement): void {
     const time = this.receipt.timestamp
-      ? new Date(this.receipt.timestamp).toLocaleString()
-      : "pending";
-    const tree = this.receipt.parentId
-      ? `└─ ${this.receipt.id.slice(0, 8)}`
-      : `● ${this.receipt.id.slice(0, 8)}`;
+      ? new Date(this.receipt.timestamp).toLocaleString(undefined, {
+          year: "numeric",
+          month: "2-digit",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+        })
+      : "·· pending ··";
+    const forkBlock =
+      this.receipt.forkLines?.trim() ?? this.defaultForkLines();
     const modelLabel = this.receipt.model ?? "unknown";
-    const hashDisplay = this.receipt.hash ?? "pending";
+    const hashDisplay = this.receipt.hash ?? "PENDING_DIGEST";
     const promptPreview = this.receipt.prompt
-      ? `<p class="receipt-prompt">${this.escapeHtml(this.receipt.prompt.slice(0, 120))}…</p>`
+      ? `<p class="receipt-prompt">${this.escapeHtml(this.receipt.prompt.slice(0, 140))}${this.receipt.prompt.length > 140 ? "…" : ""}</p>`
       : "";
 
-    const card = document.createElement("div");
+    const card = document.createElement("article");
     card.className = "receipt-card";
     card.innerHTML = `
-      <div class="receipt-tree">${tree}</div>
-      <div class="receipt-meta">
-        <span class="receipt-model">${this.escapeHtml(modelLabel)}</span>
-        <span class="receipt-time">${time}</span>
+      <div class="receipt-card__ribbon">
+        <span>SIGNED RECEIPT · LOCAL VAULT</span>
+        <span class="receipt-card__ribbon-end">IMMUTABLE</span>
       </div>
-      <pre class="receipt-hash">${this.escapeHtml(hashDisplay)}</pre>
-      ${promptPreview}
+      <div class="receipt-card__body">
+        <pre class="receipt-tree">${this.escapeHtml(forkBlock)}</pre>
+        <div class="receipt-meta">
+          <span class="receipt-model">${this.escapeHtml(modelLabel)}</span>
+          <span class="receipt-time">${this.escapeHtml(time)}</span>
+        </div>
+        <div class="receipt-digest-label">OUTPUT DIGEST</div>
+        <pre class="receipt-hash">${this.escapeHtml(hashDisplay)}</pre>
+        ${promptPreview}
+      </div>
     `;
 
     card.addEventListener("click", () => {
@@ -49,6 +63,15 @@ export class ReceiptCard {
     el.appendChild(card);
   }
 
+  private defaultForkLines(): string {
+    const short = this.receipt.id.slice(0, 10);
+    if (!this.receipt.parentId) {
+      return `● GENESIS LINE\n   id  ${short}`;
+    }
+    const p = this.receipt.parentId.slice(0, 10);
+    return `└─ FORK (child of parent chain)\n   id  ${short}\n   ←  ${p}`;
+  }
+
   private escapeHtml(str: string): string {
     return str
       .replace(/&/g, "&amp;")
@@ -56,4 +79,19 @@ export class ReceiptCard {
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;");
   }
+}
+
+/** Build richer fork graph text from a flat receipt list (newest-first or any order). */
+export function buildForkLines(receipt: Receipt, all: Receipt[]): string {
+  const idS = receipt.id.slice(0, 10);
+  if (!receipt.parentId) {
+    return `● ROOT\n   ${idS}`;
+  }
+  const parent = all.find((r) => r.id === receipt.parentId);
+  const p = receipt.parentId.slice(0, 10);
+  if (!parent) {
+    return `└─ FORK\n   ${idS}\n   ←  ${p}  (parent not loaded)`;
+  }
+  const pp = parent.id.slice(0, 10);
+  return `└─ FORK\n   ${idS}\n   ←  ${p}  [parent ${pp}]`;
 }

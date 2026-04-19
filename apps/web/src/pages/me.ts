@@ -1,7 +1,7 @@
 // apps/web/src/pages/me.ts
 import { getReceipts } from "../state/vault.js";
 import type { Receipt } from "../state/vault.js";
-import { ReceiptCard } from "../components/ReceiptCard.js";
+import { ReceiptCard, buildForkLines } from "../components/ReceiptCard.js";
 
 export async function mountMe(container: HTMLElement): Promise<() => void> {
   container.innerHTML = `
@@ -28,7 +28,8 @@ export async function mountMe(container: HTMLElement): Promise<() => void> {
       for (const receipt of sorted) {
         const item = document.createElement("div");
         item.className = "receipt-item";
-        const card = new ReceiptCard(receipt);
+        const forkLines = buildForkLines(receipt, sorted);
+        const card = new ReceiptCard({ ...receipt, forkLines });
         card.mount(item);
         list.appendChild(item);
       }

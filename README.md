@@ -46,7 +46,7 @@ ONE CLICK  →  here.now  →  LIVE URL
     ↓
 SHARE  →  fork graph grows  →  network effect compounds
     ↓
-PAID ROOM?  →  Tempo stablecoin  →  85% to host, 15% to platform
+PAID ROOM?  →  Tempo stablecoin  →  80% to host, 20% to FF
 ```
 
 ---
@@ -137,17 +137,17 @@ Black on white. JetBrains Mono. One font everywhere. No color. No exceptions.
 git clone https://github.com/Ghostmonday/fatedfortress-v2.git
 cd fatedfortress-v2
 
-# Install dependencies
-npm install
+# Build the web SPA (outputs to apps/web/dist/)
+npx vite build apps/web
 
-# Build the Fortress Worker (with reproducible hash)
-npm run build:worker
+# Build the Fortress Worker (IIFE output for sandboxed iframe)
+npx vite build apps/worker
 
 # Compute and record the worker hash (required before first deploy)
 node scripts/verify-worker-hash.mjs --build
 
-# Start dev server
-npm run dev
+# Start web dev server
+npx vite apps/web
 
 # Run security proof (requires Playwright)
 node scripts/verify-key-never-exfiltrates.mjs --url http://localhost:5173
@@ -156,8 +156,8 @@ node scripts/verify-key-never-exfiltrates.mjs --url http://localhost:5173
 ### Deploying
 
 ```bash
-# Publish to here.now (requires here CLI: npm install -g @here)
-node scripts/publish.mjs --env production
+# Publish to here.now
+HERENOW_TOKEN=your_token node scripts/publish.mjs --env production
 ```
 
 ---
@@ -201,7 +201,7 @@ No primary database. here.now is the filesystem. CRDT is the state.
 | Receipts are tamper-evident | SHA-256 output hash + Ed25519 signature, hash-chained |
 | No key exfiltration | Automated Playwright proof: sentinel key + all encoding variants checked on every network request and postMessage |
 
-See [SECURITY.md](SECURITY.md) for the full security model.
+See `apps/worker/src/keystore.ts`, `apps/worker/src/budget.ts`, and the inline security comments throughout the codebase for the full security model.
 
 ---
 
@@ -233,7 +233,7 @@ See [SECURITY.md](SECURITY.md) for the full security model.
 
 FatedFortress is open to contributors. The codebase is designed for modular, parallel development — each adapter, component, and protocol piece is self-contained with its own test scaffold.
 
-Read [AGENTS.md](AGENTS.md) for the development protocol and coding standards before submitting PRs.
+Read the `apps/web`, `apps/worker`, and `apps/relay` directories for the development protocol and coding standards before submitting PRs.
 
 ---
 

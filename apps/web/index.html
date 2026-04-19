@@ -28,8 +28,23 @@
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/src/styles/global.css">
 </head>
-<body>
+<body class="ff-body">
   <div id="app"></div>
+  <!-- Keystore worker iframe mounts into #ff-keystore-slot (see worker-bridge). -->
+  <footer class="ff-keystore-boundary" aria-label="Cryptographic trust boundary">
+    <div class="ff-keystore-boundary__inner">
+      <span class="ff-keystore-boundary__glyph" aria-hidden="true">┄</span>
+      <span class="ff-keystore-boundary__label">
+        <span class="ff-keystore-boundary__kbd">KEYSTORE</span>
+        <span class="ff-keystore-boundary__sep">·</span>
+        isolated iframe worker
+        <span class="ff-keystore-boundary__sep">·</span>
+        keys never touch main thread memory
+      </span>
+      <span class="ff-keystore-boundary__glyph" aria-hidden="true">┄</span>
+    </div>
+    <div id="ff-keystore-slot" class="ff-keystore-slot" aria-hidden="true"></div>
+  </footer>
   <script type="module" src="/src/main.ts"></script>
 </body>
 </html>

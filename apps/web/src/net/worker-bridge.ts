@@ -70,8 +70,11 @@ export class WorkerBridge {
     const setupIframe = () => {
       this.workerIframe = document.createElement("iframe");
       this.workerIframe.src = `${WORKER_ORIGIN}/worker.html`;
-      this.workerIframe.style.display = "none";
-      document.body.appendChild(this.workerIframe);
+      this.workerIframe.title = "Fortress keystore worker";
+      this.workerIframe.className = "ff-keystore-iframe";
+      const slot =
+        document.getElementById("ff-keystore-slot") ?? document.body;
+      slot.appendChild(this.workerIframe);
     };
 
     if (document.body) {
