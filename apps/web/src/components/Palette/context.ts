@@ -102,13 +102,13 @@ export function buildPaletteContext(sources: PaletteContextSources): PaletteCont
   }
 
   return {
-    currentPage:      sources.currentPage,
+    currentPage:       sources.currentPage,
     currentRoomId,
     currentRoomAccess,
     focusedReceiptId,
-    currentModel:     sources.currentModel,
-    keyValidated:     sources.keyValidated,
-    fuelLevel:        sources.fuelLevel,
-    herenowLinked:    sources.herenowLinked,
+    currentModel:      sources.currentModel,
+    keyValidated:      sources.keyValidated,
+    fuelLevel:         sources.fuelLevel,
+    herenowLinked:     sources.herenowLinked,
   };
 }
