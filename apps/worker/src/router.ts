@@ -7,7 +7,7 @@ import {
   type ProviderId,
   type EncryptedKeyBlob,
 } from "./keystore.js";
-import { handleGenerate, inFlight } from "./generate.js";
+import { handleGenerate } from "./generate.js";
 import {
   mintToken,
   verifyToken,
@@ -28,6 +28,8 @@ export type InboundMessage =
   | { type: "INIT_QUOTA";   roomId: string; quotaPerUser: number;            requestId: string }
   | { type: "FUEL_GAUGE";   roomId: string;                                  requestId: string }
   | { type: "TERMINATE" };
+
+export type RequestMessage = Exclude<InboundMessage, { type: "TERMINATE" }>;
 
 export type OutboundMessage =
   | { type: "CHUNK";  requestId: string; chunk: string }
@@ -56,8 +58,8 @@ export function assertValidProvider(provider: string): asserts provider is Provi
   }
 }
 
-export async function dispatchMessage(msg: InboundMessage): Promise<void> {
-  const requestId = (msg as Record<string, unknown>).requestId as string;
+export async function dispatchMessage(msg: RequestMessage): Promise<void> {
+  const requestId = msg.requestId;
 
   switch (msg.type) {
     case "STORE_KEY": {
@@ -88,13 +90,8 @@ export async function dispatchMessage(msg: InboundMessage): Promise<void> {
     }
 
     case "GENERATE": {
-      if (inFlight.has(requestId)) {
-        throw new FFError("DuplicateRequest", "A request with this ID is already in progress");
-      }
       assertValidProvider(msg.provider);
-      const controller = new AbortController();
-      inFlight.set(requestId, controller);
-      await handleGenerate(msg, requestId, controller, send);
+      await handleGenerate(msg, requestId, send);
       return;
     }
 
@@ -119,10 +116,6 @@ export async function dispatchMessage(msg: InboundMessage): Promise<void> {
     case "FUEL_GAUGE": {
       const state = getFuelState(msg.roomId);
       send({ type: "FUEL", requestId, state });
-      return;
-    }
-
-    case "TERMINATE": {
       return;
     }
 

@@ -46,17 +46,7 @@ import {
   type PublicKeyBase58,
 } from "@fatedfortress/protocol";
 
-// ---------------------------------------------------------------------------
-// External: hash-wasm Argon2id
-// Bundled at the worker origin (keys.fatedfortress.com) via Vite.
-// The import path is hash-pinned in vite.config.ts via rollup manualChunks.
-// hash-wasm ships ESM + WASM; Vite resolves to the ESM entry automatically.
-// ---------------------------------------------------------------------------
 import { argon2id } from "hash-wasm";
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
 
 export type ProviderId =
   | "openai"
@@ -90,10 +80,6 @@ export interface SigningKeyPair {
   publicKeyBase58: PublicKeyBase58;
 }
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
 const ARGON2_PARAMS = { m: 65536, t: 3, p: 1, hashLen: 32 } as const;
 
 /** AES-GCM IV length. 12 bytes is the NIST-recommended size for GCM. */
@@ -102,19 +88,11 @@ const AES_IV_BYTES = 12;
 /** Argon2id salt length. Must be >= 16; 32 is the recommended size. */
 const ARGON2_SALT_BYTES = 32;
 
-// ---------------------------------------------------------------------------
-// In-memory state — session lifetime only, wiped by doCleanup() in worker.ts
-// ---------------------------------------------------------------------------
-
 /** Raw API key strings. Only accessible inside this file via getRawKey(). */
 const rawKeys = new Map<ProviderId, string>();
 
 /** Lazily initialised once per worker session. */
 let _signingKeyPair: SigningKeyPair | null = null;
-
-// ---------------------------------------------------------------------------
-// Internal: key derivation
-// ---------------------------------------------------------------------------
 
 /**
  * Derives a non-extractable AES-256-GCM CryptoKey from a passphrase + salt
@@ -147,10 +125,6 @@ async function deriveWrappingKey(
     ["encrypt", "decrypt"]
   );
 }
-
-// ---------------------------------------------------------------------------
-// Public API — key storage
-// ---------------------------------------------------------------------------
 
 /**
  * Stores a raw API key in the session-scoped in-memory store.
@@ -257,17 +231,13 @@ export async function decryptAndLoadKey(
 
 /**
  * Wipes all in-memory keys and the signing keypair.
- * Called by worker.ts `doCleanup()` on TERMINATE, beforeunload, and pagehide.
+ * Called by worker.ts `teardownSession()` on TERMINATE, beforeunload, and pagehide.
  * After this call, hasKey() returns false for all providers.
  */
-export function clearAllKeys(): void {
+export function teardownKeystore(): void {
   rawKeys.clear();
   _signingKeyPair = null;
 }
-
-// ---------------------------------------------------------------------------
-// Public API — Ed25519 identity signing key
-// ---------------------------------------------------------------------------
 
 /**
  * Returns (lazily generating on first call) the Ed25519 signing keypair
@@ -301,12 +271,6 @@ export async function getSigningKey(): Promise<SigningKeyPair> {
 
   return _signingKeyPair;
 }
-
-// ---------------------------------------------------------------------------
-// Base58 encoding (Bitcoin alphabet)
-// Ed25519 public keys are 32 bytes → 43–44 base58 characters.
-// This matches the format expected by budget.ts and the protocol receipt schema.
-// ---------------------------------------------------------------------------
 
 const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 

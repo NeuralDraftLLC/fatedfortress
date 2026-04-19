@@ -4,7 +4,7 @@
 
 import type { ParseResult, PaletteContext } from "@fatedfortress/protocol";
 import { tokenizeWithStems } from "./tokenizer.js";
-import { scorers } from "./scorers.js";
+import { scorers, type ScoredIntent } from "./scorers.js";
 
 const CONFIDENCE_THRESHOLD = 0.82;
 const AMBIGUITY_MARGIN = 0.15;

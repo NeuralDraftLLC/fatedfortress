@@ -24,9 +24,7 @@ import {
   base64urlEncode,
 } from "@fatedfortress/protocol";
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
+const ONE_HOUR_MS = 3_600_000;
 
 export interface QuotaState {
   /** Max tokens granted per participant per hour */
@@ -46,10 +44,6 @@ export interface MintTokenOptions {
   tokensToGrant: number;
 }
 
-// ---------------------------------------------------------------------------
-// In-memory state — cleared on worker termination
-// ---------------------------------------------------------------------------
-
 /** Per-room quota state */
 const quotaState = new Map<string, QuotaState>();
 
@@ -59,10 +53,6 @@ const quotaState = new Map<string, QuotaState>();
  * (16 random bytes = 2^128 collision space).
  */
 const seenNonces = new Set<string>();
-
-// ---------------------------------------------------------------------------
-// Quota management
-// ---------------------------------------------------------------------------
 
 /**
  * Initializes or resets quota state for a room.
@@ -88,7 +78,7 @@ export function getRemainingQuota(
   if (!state) return 0;
 
   const now = Date.now();
-  if (now - state.windowStart > 3_600_000) {
+  if (now - state.windowStart > ONE_HOUR_MS) {
     state.consumed.clear();
     state.windowStart = now;
   }
@@ -112,10 +102,6 @@ export function consumeQuota(
   const current = state.consumed.get(participantPubkey) ?? 0;
   state.consumed.set(participantPubkey, current + tokensUsed);
 }
-
-// ---------------------------------------------------------------------------
-// Token minting — HOST side
-// ---------------------------------------------------------------------------
 
 /**
  * Mints a signed budget token for a participant.
@@ -157,10 +143,6 @@ export async function mintBudgetToken(
   return { ...tokenData, id, signature };
 }
 
-// ---------------------------------------------------------------------------
-// Token verification — runs in host worker when participant presents a token
-// ---------------------------------------------------------------------------
-
 /**
  * Verifies a budget token before allowing a provider call.
  *
@@ -179,24 +161,22 @@ export async function verifyAndConsumeToken(
     throw new FFError("BudgetTokenForged", "Received object is not a valid BudgetToken shape");
   }
 
-  if (rawToken.roomId !== roomId) {
+  const token = rawToken as BudgetToken;
+
+  if (token.roomId !== roomId) {
     throw new FFError(
       "BudgetTokenForged",
-      `Token roomId mismatch: expected ${roomId}, got ${rawToken.roomId}`
+      `Token roomId mismatch: expected ${roomId}, got ${token.roomId}`
     );
   }
 
-  const result = await verifyBudgetToken(rawToken, {
+  const result = await verifyBudgetToken(token, {
     hostPubkeyFromDoc,
     seenNonces, // passed by reference — mutated on success inside verifyBudgetToken
   });
 
   return result.tokensGranted;
 }
-
-// ---------------------------------------------------------------------------
-// Fuel gauge — serializable state snapshot for UI
-// ---------------------------------------------------------------------------
 
 export interface FuelGaugeState {
   roomId: string;
@@ -231,7 +211,7 @@ export function getFuelGaugeState(roomId: string): FuelGaugeState {
  * does not fire on iframe windows. worker.ts owns the lifecycle and
  * calls this explicitly before the iframe is removed from the DOM.
  */
-export function cleanup(): void {
+export function teardownBudget(): void {
   quotaState.clear();
   seenNonces.clear();
 }

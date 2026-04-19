@@ -23,10 +23,6 @@ import type {
   RoomAccess,
 } from "@fatedfortress/protocol";
 
-// ---------------------------------------------------------------------------
-// Schema types — v1 (immutable)
-// ---------------------------------------------------------------------------
-
 export interface RoomMeta {
   id: RoomId;
   name: string;
@@ -58,10 +54,6 @@ export interface PresenceEntry {
   lastSeenAt: number;
 }
 
-// ---------------------------------------------------------------------------
-// Document handle — all access goes through this shape
-// ---------------------------------------------------------------------------
-
 export interface FortressRoomDoc {
   meta: Y.Map<RoomMeta[keyof RoomMeta]>;
   participants: Y.Array<ParticipantEntry>;
@@ -72,10 +64,6 @@ export interface FortressRoomDoc {
   /** The raw Y.Doc — for transport (y-webrtc) and persistence (OPFS/IndexedDB) */
   doc: Y.Doc;
 }
-
-// ---------------------------------------------------------------------------
-// Factory
-// ---------------------------------------------------------------------------
 
 export function createRoomDoc(initialMeta?: Partial<RoomMeta>): FortressRoomDoc {
   const doc = new Y.Doc();
@@ -111,10 +99,6 @@ export function createRoomDoc(initialMeta?: Partial<RoomMeta>): FortressRoomDoc 
   return { meta, participants, output, receiptIds, templates, presence, doc };
 }
 
-// ---------------------------------------------------------------------------
-// Typed read accessors — always use these, never read Y.Map directly
-// ---------------------------------------------------------------------------
-
 export const getRoomId     = (r: FortressRoomDoc): RoomId      => r.meta.get("id")     as RoomId;
 export const getRoomName   = (r: FortressRoomDoc): string       => (r.meta.get("name")  as string) ?? "Untitled Room";
 export const getRoomAccess = (r: FortressRoomDoc): RoomAccess   => (r.meta.get("access") as RoomAccess) ?? "free";
@@ -127,10 +111,6 @@ export const getReceiptIds = (r: FortressRoomDoc): ReceiptId[]  => r.receiptIds.
 export const getTemplates  = (r: FortressRoomDoc): string[]     => r.templates.toArray();
 export const getPresence   = (r: FortressRoomDoc): PresenceEntry[] => Array.from(r.presence.values());
 export const getParticipants = (r: FortressRoomDoc): ParticipantEntry[] => r.participants.toArray();
-
-// ---------------------------------------------------------------------------
-// Typed write mutators — all wrapped in doc.transact()
-// ---------------------------------------------------------------------------
 
 export function setMeta(
   room: FortressRoomDoc,
@@ -192,16 +172,12 @@ export function removePresence(room: FortressRoomDoc, pubkey: PublicKeyBase58): 
  */
 export function addParticipant(room: FortressRoomDoc, participant: ParticipantEntry): void {
   room.doc.transact(() => {
-    const exists = room.participants.toArray().some((p) => p.pubkey === participant.pubkey);
+    const exists = room.participants.toArray().some((p: ParticipantEntry) => p.pubkey === participant.pubkey);
     if (!exists) {
       room.participants.push([participant]);
     }
   });
 }
-
-// ---------------------------------------------------------------------------
-// Serialization — for here.now publish and OPFS persistence
-// ---------------------------------------------------------------------------
 
 /** Serializes the full doc state as a binary update for transport/storage */
 export function serializeDoc(room: FortressRoomDoc): Uint8Array {

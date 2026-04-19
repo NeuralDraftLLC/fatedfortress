@@ -2,18 +2,30 @@ import { FFError, hashOutput } from "@fatedfortress/protocol";
 import { hasKey, getRawKey, type ProviderId } from "./keystore.js";
 import type { InboundMessage, OutboundMessage } from "./router.js";
 
-export const inFlight = new Map<string, AbortController>();
+const activeGenerations = new Map<string, AbortController>();
+
+export function abortAllGenerations(): void {
+  for (const controller of activeGenerations.values()) {
+    controller.abort();
+  }
+  activeGenerations.clear();
+}
 
 export async function handleGenerate(
   msg: Extract<InboundMessage, { type: "GENERATE" }>,
   requestId: string,
-  controller: AbortController,
   send: (msg: OutboundMessage) => void
 ): Promise<void> {
+  if (activeGenerations.has(requestId)) {
+    throw new FFError("DuplicateRequest", "A request with this ID is already in progress");
+  }
+
   if (!hasKey(msg.provider as ProviderId)) {
-    inFlight.delete(requestId);
     throw new FFError("NoKeyStored", `No key stored for provider: ${msg.provider}`);
   }
+
+  const controller = new AbortController();
+  activeGenerations.set(requestId, controller);
 
   try {
     const adapterModule = await import(
@@ -43,6 +55,6 @@ export async function handleGenerate(
       send({ type: "DONE", requestId, outputHash });
     }
   } finally {
-    inFlight.delete(requestId);
+    activeGenerations.delete(requestId);
   }
 }

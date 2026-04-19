@@ -86,11 +86,26 @@ export interface PaletteContextSources {
  *   - focusedReceiptId: explicit > last receipt in current room > null
  */
 export function buildPaletteContext(sources: PaletteContextSources): PaletteContext {
+  const currentRoomId: RoomId | null = sources.roomDoc
+    ? getRoomId(sources.roomDoc)
+    : null;
+
+  const currentRoomAccess: RoomAccess | null = sources.roomDoc
+    ? getRoomAccess(sources.roomDoc)
+    : null;
+
+  let focusedReceiptId = sources.focusedReceiptId;
+
+  if (!focusedReceiptId && sources.roomDoc) {
+    const ids = getReceiptIds(sources.roomDoc);
+    focusedReceiptId = ids[ids.length - 1] ?? null;
+  }
+
   return {
     currentPage:       sources.currentPage,
-    currentRoomId:     sources.roomDoc ? getRoomId(sources.roomDoc) : null,
-    currentRoomAccess: sources.roomDoc ? getRoomAccess(sources.roomDoc) : null,
-    focusedReceiptId:  sources.focusedReceiptId ?? (sources.roomDoc ? getReceiptIds(sources.roomDoc).at(-1) ?? null : null),
+    currentRoomId,
+    currentRoomAccess,
+    focusedReceiptId,
     currentModel:      sources.currentModel,
     keyValidated:      sources.keyValidated,
     fuelLevel:         sources.fuelLevel,

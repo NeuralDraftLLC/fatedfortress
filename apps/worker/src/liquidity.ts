@@ -5,7 +5,7 @@ import {
   verifyAndConsumeToken,
   initQuota,
   getFuelGaugeState,
-  cleanup as cleanupBudget,
+  teardownBudget,
   type FuelGaugeState,
 } from "./budget.js";
 import { getSigningKey } from "./keystore.js";
@@ -41,6 +41,6 @@ export function getFuelState(roomId: string): FuelGaugeState {
   return getFuelGaugeState(roomId);
 }
 
-export function cleanupLiquidity(): void {
-  cleanupBudget();
+export function teardownLiquidity(): void {
+  teardownBudget();
 }

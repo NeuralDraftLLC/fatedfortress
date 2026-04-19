@@ -6,18 +6,15 @@
  */
 
 import { FF_ORIGIN } from "@fatedfortress/protocol";
-import { clearAllKeys } from "./keystore.js";
-import { cleanupLiquidity } from "./liquidity.js";
-import { inFlight } from "./generate.js";
+import { teardownKeystore } from "./keystore.js";
+import { teardownLiquidity } from "./liquidity.js";
+import { abortAllGenerations } from "./generate.js";
 import { dispatchMessage, send, sendError, type InboundMessage } from "./router.js";
 
-function doCleanup(): void {
-  for (const [, controller] of inFlight) {
-    controller.abort();
-  }
-  inFlight.clear();
-  clearAllKeys();
-  cleanupLiquidity();
+function teardownSession(): void {
+  abortAllGenerations();
+  teardownKeystore();
+  teardownLiquidity();
 }
 
 window.addEventListener("message", async (event: MessageEvent) => {
@@ -27,23 +24,23 @@ window.addEventListener("message", async (event: MessageEvent) => {
   if (!msg || typeof msg.type !== "string") return;
 
   if (msg.type === "TERMINATE") {
-    doCleanup();
+    teardownSession();
     send({ type: "OK", requestId: "__terminate__", payload: { terminated: true } });
     return;
   }
 
-  const requestId = (msg as Record<string, unknown>).requestId as string | undefined;
+  const requestId = (msg as any).requestId as string | undefined;
   if (!requestId || typeof requestId !== "string") return;
 
   try {
-    await dispatchMessage(msg);
+    await dispatchMessage(msg as any);
   } catch (err) {
     sendError(requestId, err);
   }
 });
 
-window.addEventListener("beforeunload", doCleanup);
-window.addEventListener("unload", doCleanup);
+window.addEventListener("beforeunload", teardownSession);
+window.addEventListener("unload", teardownSession);
 window.addEventListener("pagehide", (e: PageTransitionEvent) => {
-  if (!e.persisted) doCleanup();
+  if (!e.persisted) teardownSession();
 });
