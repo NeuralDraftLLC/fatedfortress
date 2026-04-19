@@ -40,58 +40,48 @@ const MODEL_ALIASES: Record<string, ModelRef> = {
 };
 
 export function extractCategory(raw: string[]): RoomCategory | null {
-  for (const t of raw) {
-    if (CATEGORY_MAP[t]) return CATEGORY_MAP[t];
-  }
-  return null;
+  const match = raw.find((t) => CATEGORY_MAP[t] !== undefined);
+  return match ? CATEGORY_MAP[match] : null;
 }
 
 export function extractAccess(raw: string[]): RoomAccess | null {
-  const paidWords  = ["paid", "charge", "priced", "premium"] as const;
-  const freeWords  = ["free", "open", "public", "unpaid"]   as const;
-  if (paidWords.some((w) => raw.includes(w)))  return "paid";
+  const paidWords = ["paid", "charge", "priced", "premium"];
+  const freeWords = ["free", "open", "public", "unpaid"];
+  if (paidWords.some((w) => raw.includes(w))) return "paid";
   if (freeWords.some((w) => raw.includes(w))) return "free";
   return null;
 }
 
 export function extractPrice(raw: string[]): number | null {
-  for (const t of raw) {
+  const match = raw.find((t) => {
     const n = parseFloat(t);
-    if (!isNaN(n) && n > 0 && n < 10_000) return n;
-  }
-  return null;
+    return !isNaN(n) && n > 0 && n < 10_000;
+  });
+  return match ? parseFloat(match) : null;
 }
 
 export function extractRoomId(raw: string[]): RoomId | null {
-  const match = raw.find((t) => /^rm_[a-zA-Z0-9]{6,}$/.test(t));
-  return match ? (match as RoomId) : null;
+  return (raw.find((t) => /^rm_[a-zA-Z0-9]{6,}$/.test(t)) as RoomId) ?? null;
 }
 
 export function extractReceiptId(raw: string[]): ReceiptId | null {
-  const match = raw.find((t) => /^rcp_[a-f0-9]{8,}$/.test(t));
-  return match ? (match as ReceiptId) : null;
+  return (raw.find((t) => /^rcp_[a-f0-9]{8,}$/.test(t)) as ReceiptId) ?? null;
 }
 
 export function extractModel(raw: string[]): { model: ModelRef | null; rawModelName: string } {
-  // 1. Two-token combos first (most specific)
   for (let i = 0; i < raw.length - 1; i++) {
     const combined = `${raw[i]}-${raw[i + 1]}`;
     if (MODEL_ALIASES[combined]) {
       return { model: MODEL_ALIASES[combined], rawModelName: combined };
     }
   }
-  // 2. Single token exact alias
-  for (const token of raw) {
-    if (MODEL_ALIASES[token]) {
-      return { model: MODEL_ALIASES[token], rawModelName: token };
-    }
-  }
-  // 3. Provider name only (ambiguous — which model of that provider?)
-  for (const token of raw) {
-    if (PROVIDER_MAP[token]) {
-      return { model: null, rawModelName: token };
-    }
-  }
+
+  const aliasMatch = raw.find((t) => MODEL_ALIASES[t] !== undefined);
+  if (aliasMatch) return { model: MODEL_ALIASES[aliasMatch], rawModelName: aliasMatch };
+
+  const providerMatch = raw.find((t) => PROVIDER_MAP[t] !== undefined);
+  if (providerMatch) return { model: null, rawModelName: providerMatch };
+
   return { model: null, rawModelName: "" };
 }
 

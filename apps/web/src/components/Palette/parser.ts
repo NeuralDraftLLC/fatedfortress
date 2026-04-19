@@ -12,7 +12,6 @@ const MIN_VIABLE = 0.45;
 const MAX_CANDIDATES = 4;
 
 export function parse(input: string, context: PaletteContext): ParseResult {
-  // FIX: hard input length guard before tokenizing
   if (!input || input.trim().length === 0) {
     return {
       kind: "error",
@@ -30,15 +29,16 @@ export function parse(input: string, context: PaletteContext): ParseResult {
   }
 
   // Score all intent scorers, catching individual failures
-  const results: ScoredIntent[] = scorers
-    .map((scorer) => {
+  const results = scorers
+    .reduce<ScoredIntent[]>((acc, scorer) => {
       try {
-        return scorer(raw, stems, context);
+        const result = scorer(raw, stems, context);
+        if (result !== null) acc.push(result);
       } catch {
-        return null; // individual scorer failure never breaks the Palette
+        // individual scorer failure never breaks the Palette
       }
-    })
-    .filter((r): r is ScoredIntent => r !== null)
+      return acc;
+    }, [])
     .sort((a, b) => b.score - a.score);
 
   if (results.length === 0) {
