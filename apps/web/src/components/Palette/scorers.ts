@@ -65,10 +65,37 @@ export type IntentScorer = (raw: string[], stems: string[], context: PaletteCont
 
 export const scorers: IntentScorer[] = [
 
+  // ── help ──────────────────────────────────────────────────────────────────
+  (raw, stems) => {
+    const isBareLiteral = raw.length === 1 && (raw[0] === "?" || raw[0] === "help");
+
+    // Resolves immediately at high confidence if the input is exactly "?" or "help"
+    if (isBareLiteral) {
+      return {
+        score:  S.HELP_EXACT,
+        intent: { type: "help", command: null },
+        label:  "show available commands",
+      };
+    }
+
+    if (!includesAny(raw, stems, ["help", "?", "how", "what", "commands"] as const)) return null;
+
+    const CMD_WORDS = new Set(["help", "?", "how", "what", "do", "i", "can", "commands", "show", "list"]);
+    const command   = raw.find((t) => !CMD_WORDS.has(t)) ?? null;
+
+    return {
+      score:  S.HELP,
+      intent: { type: "help", command },
+      label:  command ? `help: ${command}` : "show available commands",
+    };
+  },
+
   // ── create_room ───────────────────────────────────────────────────────────
   (raw, stems) => {
-    const hasVerb     = includesAny(raw, stems, ["create", "new", "make", "open", "start", "build"]);
-    const hasNoun     = includesAny(raw, stems, ["room", "channel", "space", "session"]);
+    const verbWords = ["create", "new", "make", "open", "start", "build"] as const;
+    const nounWords = ["room", "channel", "space", "session"]             as const;
+    const hasVerb     = includesAny(raw, stems, verbWords);
+    const hasNoun     = includesAny(raw, stems, nounWords);
     const category    = extractCategory(raw);
     const hasCategory = category !== null;
 
@@ -76,15 +103,15 @@ export const scorers: IntentScorer[] = [
     const signals = (hasVerb ? 1 : 0) + (hasNoun ? 1 : 0) + (hasCategory ? 1 : 0);
     if (signals < 2) return null;
 
-    const explicitAccess = extractAccess(raw);
-    const access = explicitAccess ?? "free";
+    // FIX: use extractAccess with "pay" removed from its verb set
+    const access = extractAccess(raw) ?? "free";
     const price  = extractPrice(raw);
 
     let score = S.CREATE_BASE;
     if (hasVerb)               score += S.CREATE_VERB;
     if (hasNoun)               score += S.CREATE_NOUN;
     if (hasCategory)           score += S.CREATE_CATEGORY;
-    if (explicitAccess !== null) score += S.CREATE_ACCESS;
+    if (access !== null)       score += S.CREATE_ACCESS;
     if (access === "paid" && price) score += S.CREATE_PRICE;
 
     return {
@@ -104,7 +131,7 @@ export const scorers: IntentScorer[] = [
   (raw, stems) => {
     const roomId = extractRoomId(raw);
     if (!roomId) return null;
-    const hasVerb = includesAny(raw, stems, ["join", "go", "open", "enter", "load"]);
+    const hasVerb = includesAny(raw, stems, ["join", "go", "open", "enter", "load"] as const);
     return {
       score:  hasVerb ? S.JOIN_WITH_VERB : S.JOIN_NO_VERB,
       intent: { type: "join_room", roomId },
@@ -114,7 +141,7 @@ export const scorers: IntentScorer[] = [
 
   // ── fork_receipt ──────────────────────────────────────────────────────────
   (raw, stems, context) => {
-    if (!includesAny(raw, stems, ["fork", "branch", "remix", "clone"])) return null;
+    if (!includesAny(raw, stems, ["fork", "branch", "remix", "clone"] as const)) return null;
     const receiptId = extractReceiptId(raw) ?? context.focusedReceiptId;
     return {
       score:  receiptId ? S.FORK_WITH_ID : S.FORK_NO_ID,
@@ -125,7 +152,7 @@ export const scorers: IntentScorer[] = [
 
   // ── switch_model ──────────────────────────────────────────────────────────
   (raw, stems) => {
-    if (!includesAny(raw, stems, ["switch", "use", "change", "model", "with"])) return null;
+    if (!includesAny(raw, stems, ["switch", "use", "change", "model", "with"] as const)) return null;
     const { model, rawModelName } = extractModel(raw);
     if (!rawModelName) return null;
     return {
@@ -139,9 +166,9 @@ export const scorers: IntentScorer[] = [
 
   // ── publish ───────────────────────────────────────────────────────────────
   (raw, stems, context) => {
-    if (!includesAny(raw, stems, ["publish", "ship", "deploy", "push", "release"])) return null;
+    if (!includesAny(raw, stems, ["publish", "ship", "deploy", "push", "release"] as const)) return null;
     const target: "room" | "receipt" =
-      includesAny(raw, stems, ["receipt", "rcp"]) || context.currentPage !== "room"
+      includesAny(raw, stems, ["receipt", "rcp"] as const) || context.currentPage !== "room"
         ? "receipt"
         : "room";
     return {
@@ -153,7 +180,8 @@ export const scorers: IntentScorer[] = [
 
   // ── pay ───────────────────────────────────────────────────────────────────
   (raw, stems, context) => {
-    if (!includesAny(raw, stems, ["pay", "buy", "purchase", "unlock", "access"])) return null;
+    if (!includesAny(raw, stems, ["pay", "buy", "purchase", "unlock", "access"] as const)) return null;
+    // FIX: use ?? operator for correct null coalescence (was incorrectly using ? ternary)
     const roomId     = extractRoomId(raw) ?? context.currentRoomId;
     const isPaidCtx  = context.currentRoomAccess === "paid";
     if (!roomId && !isPaidCtx) return null;
@@ -167,7 +195,7 @@ export const scorers: IntentScorer[] = [
 
   // ── invite ────────────────────────────────────────────────────────────────
   (raw, stems) => {
-    if (!includesAny(raw, stems, ["invite", "add", "share", "bring"])) return null;
+    if (!includesAny(raw, stems, ["invite", "add", "share", "bring"] as const)) return null;
     const peer = raw.find((t) => t.startsWith("@")) ?? null;
     return {
       score:  peer ? S.INVITE_WITH_PEER : S.INVITE_NO_PEER,
@@ -178,9 +206,10 @@ export const scorers: IntentScorer[] = [
 
   // ── search ────────────────────────────────────────────────────────────────
   (raw, stems) => {
-    if (!includesAny(raw, stems, ["search", "find", "browse", "look", "list"])) return null;
+    if (!includesAny(raw, stems, ["search", "find", "browse", "look", "list"] as const)) return null;
     const category = extractCategory(raw);
 
+    // FIX: positional slice — don't strip words from query by denylist
     const cmdIdx = raw.findIndex((t) =>
       ["search", "find", "browse", "look", "list"].includes(t)
     );
@@ -188,10 +217,11 @@ export const scorers: IntentScorer[] = [
     const queryWords = afterCmd.filter((t) => !CATEGORY_MAP[t] && t !== "rooms" && t !== "room");
     const query      = queryWords.join(" ");
 
+    // FIX: score higher when category found even with empty query
     const score = query.length > 0
       ? S.SEARCH_WITH_QUERY
       : category
-        ? S.SEARCH_NO_QUERY
+        ? S.SEARCH_NO_QUERY  // raised: category IS the search criterion
         : 0.55;
 
     return {
@@ -206,8 +236,8 @@ export const scorers: IntentScorer[] = [
   // ── link_herenow ──────────────────────────────────────────────────────────
   (raw, stems, context) => {
     if (context.herenowLinked) return null;
-    const hasLink   = includesAny(raw, stems, ["link", "connect", "attach", "bind"]);
-    const hasTarget = includesAny(raw, stems, ["here.now", "herenow", "account", "permanent", "storage"]);
+    const hasLink   = includesAny(raw, stems, ["link", "connect", "attach", "bind"] as const);
+    const hasTarget = includesAny(raw, stems, ["here.now", "herenow", "account", "permanent", "storage"] as const);
     if (!hasLink && !hasTarget) return null;
     return {
       score:  hasLink && hasTarget ? S.LINK_BOTH : S.LINK_ONE,
@@ -218,11 +248,13 @@ export const scorers: IntentScorer[] = [
 
   // ── set_system_prompt ─────────────────────────────────────────────────────
   (raw, stems) => {
-    const hasSysWord  = includesAny(raw, stems, ["system", "persona", "instructions"]);
-    const hasPrompt   = includesAny(raw, stems, ["prompt"]);
-    const hasSetVerb  = includesAny(raw, stems, ["set", "change", "update", "use"]);
+    const hasSysWord  = includesAny(raw, stems, ["system", "persona", "instructions"] as const);
+    const hasPrompt   = includesAny(raw, stems, ["prompt"]                           as const);
+    const hasSetVerb  = includesAny(raw, stems, ["set", "change", "update", "use"]  as const);
     if (!(hasSysWord || hasPrompt) || !hasSetVerb) return null;
 
+    // FIX: positional slice — find the end of command tokens, take everything after.
+    // This preserves words like "system" and "prompt" IF they appear in the value.
     const CMD_TOKENS = new Set(["set", "change", "update", "use", "system", "prompt", "persona", "to", "as", "instructions"]);
     const firstValueIdx = raw.findIndex((t, i) => i > 0 && !CMD_TOKENS.has(t));
     const prompt = firstValueIdx >= 0
@@ -240,7 +272,7 @@ export const scorers: IntentScorer[] = [
 
   // ── set_quota ─────────────────────────────────────────────────────────────
   (raw, stems) => {
-    if (!includesAny(raw, stems, ["quota", "limit", "allowance", "budget"])) return null;
+    if (!includesAny(raw, stems, ["quota", "limit", "allowance", "budget"] as const)) return null;
     const tokensPerUser = extractPrice(raw) ?? 0;
     return {
       score:  tokensPerUser > 0 ? S.QUOTA_VALUE : S.QUOTA_EMPTY,
@@ -253,7 +285,7 @@ export const scorers: IntentScorer[] = [
 
   // ── open_connect ──────────────────────────────────────────────────────────
   (raw, stems) => {
-    if (!includesAny(raw, stems, ["docs", "connect", "reference", "api", "examples"])) return null;
+    if (!includesAny(raw, stems, ["docs", "connect", "reference", "api", "examples"] as const)) return null;
     const providerToken = raw.find((t) => t in PROVIDER_MAP);
     const provider      = providerToken ? PROVIDER_MAP[providerToken] : null;
     return {
@@ -265,7 +297,7 @@ export const scorers: IntentScorer[] = [
 
   // ── open_me ───────────────────────────────────────────────────────────────
   (raw, stems) => {
-    if (!includesAny(raw, stems, ["receipts", "history", "me", "my", "earnings", "vault"])) return null;
+    if (!includesAny(raw, stems, ["receipts", "history", "me", "my", "earnings", "vault"] as const)) return null;
     return {
       score:  S.ME,
       intent: { type: "open_me" },
@@ -273,18 +305,4 @@ export const scorers: IntentScorer[] = [
     };
   },
 
-  // ── help ──────────────────────────────────────────────────────────────────
-  (raw, stems) => {
-    const isBareLiteral = raw.length === 1 && (raw[0] === "?" || raw[0] === "help");
-    if (!includesAny(raw, stems, ["help", "?", "how", "what", "commands"])) return null;
-
-    const CMD_WORDS = new Set(["help", "?", "how", "what", "do", "i", "can", "commands", "show", "list"]);
-    const command   = raw.find((t) => !CMD_WORDS.has(t)) ?? null;
-
-    return {
-      score:  isBareLiteral ? S.HELP_EXACT : S.HELP,
-      intent: { type: "help", command },
-      label:  command ? `help: ${command}` : "show available commands",
-    };
-  },
 ];

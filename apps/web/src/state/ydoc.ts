@@ -77,22 +77,16 @@ export function createRoomDoc(initialMeta?: Partial<RoomMeta>): FortressRoomDoc 
 
   if (initialMeta) {
     doc.transact(() => {
-      const defaults: RoomMeta = {
-        id:           initialMeta.id
-                      ?? (`rm_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}` as RoomId),
-        name:         initialMeta.name         ?? "Untitled Room",
-        description:  initialMeta.description  ?? "",
-        category:     initialMeta.category     ?? "general",
-        access:       initialMeta.access       ?? "free",
-        price:        initialMeta.price        ?? null,
-        currency:     initialMeta.currency     ?? null,
-        systemPrompt: initialMeta.systemPrompt ?? "",
-        createdAt:    initialMeta.createdAt    ?? Date.now(),
-        schemaVersion: 1,
-      };
-      for (const [k, v] of Object.entries(defaults)) {
-        meta.set(k, v as RoomMeta[keyof RoomMeta]);
-      }
+      meta.set("id", initialMeta.id ?? (`rm_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}` as RoomId));
+      meta.set("name", initialMeta.name ?? "Untitled Room");
+      meta.set("description", initialMeta.description ?? "");
+      meta.set("category", initialMeta.category ?? "general");
+      meta.set("access", initialMeta.access ?? "free");
+      meta.set("price", initialMeta.price ?? null);
+      meta.set("currency", initialMeta.currency ?? null);
+      meta.set("systemPrompt", initialMeta.systemPrompt ?? "");
+      meta.set("createdAt", initialMeta.createdAt ?? Date.now());
+      meta.set("schemaVersion", 1);
     });
   }
 
@@ -117,8 +111,10 @@ export function setMeta(
   patch: Partial<Omit<RoomMeta, "id" | "createdAt" | "schemaVersion">>
 ): void {
   room.doc.transact(() => {
-    for (const [k, v] of Object.entries(patch)) {
-      room.meta.set(k, v as RoomMeta[keyof RoomMeta]);
+    for (const k in patch) {
+      if (Object.prototype.hasOwnProperty.call(patch, k)) {
+        room.meta.set(k, patch[k as keyof typeof patch] as RoomMeta[keyof RoomMeta]);
+      }
     }
   });
 }
