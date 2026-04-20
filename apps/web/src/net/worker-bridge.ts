@@ -12,6 +12,23 @@
 
 import { type RoomId, FFError } from "@fatedfortress/protocol";
 
+/** Shape of a demo-mode grant returned by the relay registry. */
+export interface DemoGrant {
+  token: string;
+  provider: "openai" | "anthropic" | "google" | "minimax" | "groq" | "openrouter";
+  maxTokens: number;
+  expiresAt: number;
+  rateLimitResetAt: number;
+}
+
+/** Per-IP rate limit exceeded on the relay side. */
+export class DemoRateLimitError extends Error {
+  constructor(public resetAt: number) {
+    super(`Demo key rate-limited until ${new Date(resetAt).toISOString()}`);
+    this.name = "DemoRateLimitError";
+  }
+}
+
 const WORKER_ORIGIN = typeof __WORKER_ORIGIN__ !== "undefined"
   ? __WORKER_ORIGIN__
   : "https://keys.fatedfortress.com";
@@ -269,5 +286,62 @@ export class WorkerBridge {
       },
       REQUEST_TIMEOUT_MS
     );
+  }
+
+  /**
+   * PRIORITY 1 · Consumes one demo-key grant from the relay registry.
+   *
+   * Flow:
+   *   1. Bridge posts CONSUME_DEMO_TOKEN to the worker iframe
+   *   2. w_router proxies to r_reg /demo/consume (origin attestation added server-side)
+   *   3. r_reg checks per-IP rate limit, mints a signed token, returns it
+   *   4. Token is kept in-memory only — never persisted
+   *
+   * @throws DemoRateLimitError if the user's IP has exhausted the free demo quota
+   */
+  public async consumeDemoToken(
+    provider: DemoGrant["provider"],
+    roomId: string,
+  ): Promise<DemoGrant> {
+    const requestId = crypto.randomUUID();
+    const response = await this.requestWithTimeout<{ ok: boolean; data?: DemoGrant; error?: { code: string; message: string; resetAt?: number } }>(
+      requestId,
+      () => {
+        this.workerIframe?.contentWindow?.postMessage(
+          { type: "CONSUME_DEMO_TOKEN", provider, roomId, requestId },
+          WORKER_ORIGIN
+        );
+      },
+      8_000,
+    );
+
+    if (!response.ok) {
+      if (response.error?.code === "DEMO_RATE_LIMITED") {
+        throw new DemoRateLimitError(response.error.resetAt ?? Date.now() + 3_600_000);
+      }
+      throw new Error(response.error?.message ?? "Failed to consume demo token");
+    }
+    return response.data!;
+  }
+
+  /**
+   * PRIORITY 1 · Checks if a demo grant is still available for this IP without consuming it.
+   * Used to show a "Try demo" badge on RoomCard only when actually usable.
+   */
+  public async checkDemoAvailable(
+    provider: DemoGrant["provider"],
+  ): Promise<{ available: boolean; resetAt?: number }> {
+    const requestId = crypto.randomUUID();
+    const response = await this.requestWithTimeout<{ ok: boolean; data?: { available: boolean; resetAt?: number } }>(
+      requestId,
+      () => {
+        this.workerIframe?.contentWindow?.postMessage(
+          { type: "CHECK_DEMO_AVAILABLE", provider, requestId },
+          WORKER_ORIGIN
+        );
+      },
+      4_000,
+    );
+    return response.ok && response.data ? response.data : { available: false };
   }
 }

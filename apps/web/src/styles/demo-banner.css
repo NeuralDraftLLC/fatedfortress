@@ -1,0 +1,192 @@
+/* apps/web/src/styles/demo-banner.css — NEW FILE */
+
+.ff-demo-banner {
+  position: fixed;
+  inset-inline: 0;
+  top: 0;
+  z-index: 1000;
+  background: var(--ff-paper);
+  border-bottom: 1px solid var(--ff-border);
+  box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.08);
+  padding: 8px 16px;
+  font-size: 12px;
+  color: var(--ff-ink);
+}
+
+.ff-demo-banner-blocked {
+  background: #fff8f0;
+  border-color: var(--ff-danger);
+}
+
+.ff-demo-banner-content {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 960px;
+  margin-inline: auto;
+}
+
+.ff-demo-banner-icon {
+  font-size: 16px;
+  color: var(--ff-term-fg);
+  flex-shrink: 0;
+}
+
+.ff-demo-banner-blocked .ff-demo-banner-icon {
+  color: var(--ff-danger);
+}
+
+.ff-demo-banner-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.ff-demo-banner-text strong {
+  font-weight: 700;
+}
+
+.ff-demo-banner-cta {
+  padding: 4px 10px;
+  background: var(--ff-ink);
+  color: #fff;
+  border: 1px solid var(--ff-ink);
+  font-size: 11px;
+  font-weight: 700;
+  font-family: inherit;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-block;
+}
+
+.ff-demo-banner-cta:hover {
+  background: #222;
+}
+
+.ff-demo-banner-dismiss {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid var(--ff-border);
+  color: var(--ff-muted);
+  font-size: 14px;
+  cursor: pointer;
+  flex-shrink: 0;
+  font-family: inherit;
+}
+
+.ff-demo-banner-dismiss:hover {
+  background: var(--ff-ink);
+  color: #fff;
+  border-color: var(--ff-ink);
+}
+
+/* ── Consent Modal (Priority 2) ──────────────────────────────── */
+.ff-consent-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ff-consent-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(28, 28, 28, 0.72);
+  backdrop-filter: blur(4px);
+}
+
+.ff-consent-modal-content {
+  position: relative;
+  max-width: 480px;
+  width: calc(100% - 32px);
+  background: var(--ff-paper);
+  border: 2px solid var(--ff-border);
+  padding: 24px;
+}
+
+.ff-consent-modal-content h2 {
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  margin: 0 0 12px;
+  color: var(--ff-ink);
+}
+
+.ff-consent-modal-content p {
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 0 0 10px;
+  color: var(--ff-ink);
+}
+
+.ff-consent-modal-content p strong {
+  font-weight: 700;
+}
+
+.ff-text-muted {
+  color: var(--ff-muted);
+  font-size: 11px;
+}
+
+.ff-consent-modal-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+.ff-consent-modal-actions button {
+  padding: 6px 12px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  border-radius: 0;
+  font-family: inherit;
+}
+
+.ff-consent-modal-actions button[data-action="leave"],
+.ff-consent-modal-actions button[data-action="spectate"] {
+  background: #fff;
+  border: 1px solid var(--ff-border);
+  color: var(--ff-ink);
+}
+
+.ff-consent-modal-actions button[data-action="leave"]:hover,
+.ff-consent-modal-actions button[data-action="spectate"]:hover {
+  background: var(--ff-paper);
+}
+
+.ff-consent-modal-actions .ff-primary {
+  background: var(--ff-ink);
+  border: 1px solid var(--ff-ink);
+  color: #fff;
+}
+
+.ff-consent-modal-actions .ff-primary:hover {
+  background: #222;
+}
+
+@media (max-width: 600px) {
+  .ff-consent-modal-actions {
+    flex-direction: column-reverse;
+  align-items: stretch;
+  gap: 6px;
+  margin-top: 12px;
+  margin-bottom: 0;
+  margin-left: 0;
+  margin-right: 0;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  max-width: 100%;
+}
+
+  .ff-consent-modal-actions button {
+    width: 100%;
+    text-align: center;
+  }
+}

@@ -257,3 +257,211 @@ export function getIdentity(): Identity {
     name: getMyDisplayName(),
   };
 }
+
+// ─── PRIORITY 3: Identity Export / Import ─────────────────────────────────────
+
+const EXPORT_MAGIC = "FFID1";
+const PBKDF2_ITERATIONS = 600_000; // OWASP 2026 recommendation
+const SALT_BYTES = 16;
+const IV_BYTES = 12;
+
+export interface IdentityExport {
+  magic: typeof EXPORT_MAGIC;
+  version: 1;
+  saltB64: string;
+  ivB64: string;
+  ciphertextB64: string;
+  pubkey: string;
+  exportedAt: number;
+}
+
+/**
+ * Exports the current device's Ed25519 keypair as a PBKDF2/AES-GCM-encrypted envelope.
+ * The raw seed never appears on disk or network unencrypted.
+ *
+ * Usage:
+ *   const envelope = await exportIdentity("my strong passphrase");
+ *   downloadAsFile("fated-fortress-identity.json", JSON.stringify(envelope));
+ */
+export async function exportIdentity(passphrase: string): Promise<IdentityExport> {
+  if (passphrase.length < 12) {
+    throw new Error("Passphrase must be at least 12 characters");
+  }
+
+  const db = await openIdentityDB();
+  const stored = await idbGet<StoredIdentity>(db, IDENTITY_KEY);
+
+  if (!stored?.wrappedPrivKey || !stored?.deviceSeed) {
+    throw new Error("No identity found on this device");
+  }
+
+  // Reconstruct the raw PKCS#8 private key from the wrapped form
+  const wrapIvBytes = b64urlDecode(stored.wrapIv);
+  const wrappedKeyBytes = b64urlDecode(stored.wrappedPrivKey);
+  const deviceSeedBytes = b64urlDecode(stored.deviceSeed);
+
+  // Derive the device-unique master key from the stored seed
+  const masterKeyMaterial = await crypto.subtle.importKey(
+    "raw",
+    deviceSeedBytes,
+    { name: "HKDF" },
+    false,
+    ["deriveKey"],
+  );
+  const masterKey = await crypto.subtle.deriveKey(
+    {
+      name: "HKDF",
+      hash: "SHA-256",
+      salt: new Uint8Array(0),
+      info: new TextEncoder().encode("fatedfortress-identity-v2"),
+    },
+    masterKeyMaterial,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["unwrapKey"],
+  );
+
+  // Unwrap the PKCS#8 private key
+  const rawPrivateKey = await crypto.subtle.unwrapKey(
+    "pkcs8",
+    wrappedKeyBytes,
+    masterKey,
+    { name: "AES-GCM", iv: wrapIvBytes },
+    { name: "Ed25519" },
+    false,
+    ["sign"],
+  );
+
+  // Export raw private key bytes for encryption
+  const exportedKeyBytes = new Uint8Array(
+    await crypto.subtle.exportKey("pkcs8", rawPrivateKey),
+  );
+
+  // Build the export envelope
+  const salt = crypto.getRandomValues(new Uint8Array(SALT_BYTES));
+  const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
+  const wrappingKey = await derivePbkdf2Key(passphrase, salt);
+
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    wrappingKey,
+    exportedKeyBytes,
+  );
+
+  return {
+    magic: EXPORT_MAGIC,
+    version: 1,
+    saltB64: b64urlEncode(salt),
+    ivB64: b64urlEncode(iv),
+    ciphertextB64: b64urlEncode(new Uint8Array(ciphertext)),
+    pubkey: stored.pubkey,
+    exportedAt: Date.now(),
+  };
+}
+
+/**
+ * Imports an identity from an encrypted envelope. Overwrites any existing identity
+ * on this device after confirmation — the caller should warn the user.
+ */
+export async function importIdentity(
+  envelope: IdentityExport,
+  passphrase: string,
+): Promise<{ pubkey: string }> {
+  if (envelope.magic !== EXPORT_MAGIC) {
+    throw new Error("Not a valid Fated Fortress identity export");
+  }
+  if (envelope.version !== 1) {
+    throw new Error(`Unsupported export version: ${envelope.version}`);
+  }
+
+  const salt = b64urlDecode(envelope.saltB64);
+  const iv = b64urlDecode(envelope.ivB64);
+  const ciphertext = b64urlDecode(envelope.ciphertextB64);
+  const wrappingKey = await derivePbkdf2Key(passphrase, salt);
+
+  let rawPrivateKeyBytes: ArrayBuffer;
+  try {
+    rawPrivateKeyBytes = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv },
+      wrappingKey,
+      ciphertext,
+    );
+  } catch {
+    throw new Error("Incorrect passphrase or corrupted export file");
+  }
+
+  // Import the PKCS#8 bytes back into a non-extractable CryptoKey
+  const privateKey = await crypto.subtle.importKey(
+    "pkcs8",
+    rawPrivateKeyBytes,
+    { name: "Ed25519" },
+    false,
+    ["sign"],
+  );
+
+  // Re-wrap for IndexedDB storage using the same device-key wrapping scheme
+  const deviceSeedBytes = crypto.getRandomValues(new Uint8Array(32));
+  const masterKeyMaterial = await crypto.subtle.importKey(
+    "raw",
+    deviceSeedBytes,
+    { name: "HKDF" },
+    false,
+    ["deriveKey"],
+  );
+  const masterKey = await crypto.subtle.deriveKey(
+    {
+      name: "HKDF",
+      hash: "SHA-256",
+      salt: new Uint8Array(0),
+      info: new TextEncoder().encode("fatedfortress-identity-v2"),
+    },
+    masterKeyMaterial,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["wrapKey"],
+  );
+  const wrapIv = crypto.getRandomValues(new Uint8Array(12));
+  const wrappedKeyBytes = await crypto.subtle.wrapKey(
+    "pkcs8",
+    privateKey,
+    masterKey,
+    { name: "AES-GCM", iv: wrapIv },
+  );
+
+  // Persist to IndexedDB using existing idbPut (2-arg: db, key, value)
+  const db = await openIdentityDB();
+  await idbPut(db, IDENTITY_KEY, {
+    pubkey: envelope.pubkey,
+    wrappedPrivKey: b64urlEncode(new Uint8Array(wrappedKeyBytes)),
+    wrapIv: b64urlEncode(wrapIv),
+    deviceSeed: b64urlEncode(deviceSeedBytes),
+  } as StoredIdentity);
+
+  // Update in-memory cache
+  setCachedIdentity(envelope.pubkey, privateKey);
+
+  return { pubkey: envelope.pubkey };
+}
+
+/** PBKDF2-SHA256 key derivation for the export passphrase wrapper. */
+async function derivePbkdf2Key(passphrase: string, salt: Uint8Array): Promise<CryptoKey> {
+  const material = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(passphrase),
+    { name: "PBKDF2" },
+    false,
+    ["deriveKey"],
+  );
+  return crypto.subtle.deriveKey(
+    {
+      name: "PBKDF2",
+      salt,
+      iterations: PBKDF2_ITERATIONS,
+      hash: "SHA-256",
+    },
+    material,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"],
+  );
+}

@@ -100,10 +100,11 @@ function relayUrl(roomId: RoomId, peerId: string, spectate: boolean): string {
   return u.toString();
 }
 
-function waitOpen(ws: WebSocket): Promise<void> {
+function waitOpen(ws: WebSocket, timeoutMs = 5000): Promise<void> {
   return new Promise((resolve, reject) => {
-    ws.addEventListener("open", () => resolve(), { once: true });
-    ws.addEventListener("error", () => reject(new Error("ws error")), { once: true });
+    const t = setTimeout(() => reject(new Error("ws open timeout")), timeoutMs);
+    ws.addEventListener("open", () => { clearTimeout(t); resolve(); }, { once: true });
+    ws.addEventListener("error", () => { clearTimeout(t); reject(new Error("ws error")); }, { once: true });
   });
 }
 

@@ -12,7 +12,7 @@ compatibility_date = "2024-11-01"
 name = "RELAY"
 class_name = "RelayDO"
 
-# P3.1: Uncomment when DO-to-DO routing is implemented
-# [[durable_objects.bindings]]
-# name = "RELAY_NAMESPACE"
-# class_name = "RelayDO"
+# Global lobby registry — tracks active rooms for GET /rooms
+[[durable_objects.bindings]]
+name = "RELAY_REGISTRY"
+class_name = "RelayRegistryDO"

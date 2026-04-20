@@ -657,6 +657,124 @@ button:focus-visible {
   padding: 8px 10px;
 }
 
+/* ── Lobby hero ─────────────────────────────────────────────────── */
+.lobby-hero {
+  padding: 24px 10px 16px;
+  border-bottom: 2px solid var(--ff-border);
+}
+
+.lobby-hero h1 {
+  font-size: 22px;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  margin: 0 0 4px;
+  line-height: 1;
+}
+
+.lobby-hero__sub {
+  color: var(--ff-muted);
+  margin: 0 0 16px;
+  font-size: 12px;
+}
+
+.lobby-hero__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+/* Empty state ──────────────────────────────────────────────────── */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 16px;
+  text-align: center;
+  gap: 12px;
+}
+
+.empty-state__icon {
+  font-size: 40px;
+  line-height: 1;
+  opacity: 0.3;
+}
+
+.empty-state__title {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--ff-ink);
+  margin: 0;
+}
+
+.empty-state__sub {
+  font-size: 11px;
+  color: var(--ff-muted);
+  margin: 0;
+  max-width: 280px;
+  line-height: 1.5;
+}
+
+.empty-state__arrow {
+  font-size: 22px;
+  color: var(--ff-danger);
+  line-height: 1;
+  animation: bounce-arrow 1.4s ease-in-out infinite;
+}
+
+@keyframes bounce-arrow {
+  0%, 100% { transform: translateY(0); }
+  50%       { transform: translateY(6px); }
+}
+
+.empty-state__cta {
+  margin-top: 4px;
+}
+
+/* ── Demo banner ──────────────────────────────────────────────── */
+.demo-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--ff-ink);
+  color: #fff;
+  padding: 7px 12px;
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  border-bottom: 1px solid #000;
+}
+
+.demo-banner__text {
+  flex: 1;
+}
+
+.demo-banner__link {
+  color: #c8f59a;
+  text-decoration: underline;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.demo-banner__link:hover {
+  color: #fff;
+}
+
+.demo-banner__dismiss {
+  background: transparent;
+  border: none;
+  color: rgba(255, 255, 255, 0.6);
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 2px;
+}
+
+.demo-banner__dismiss:hover {
+  color: #fff;
+}
+
 /* ── Room card ─────────────────────────────────────────── */
 .room-card {
   border: 2px solid var(--ff-border);
@@ -714,6 +832,21 @@ button:focus-visible {
 
 .price-badge.free {
   background: #1a5c28;
+}
+
+/* ── Room card — lobby grid ─────────────────────────────────────── */
+.room-card-fuel {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.room-counts {
+  font-size: 10px;
+  color: var(--ff-muted);
+  margin-bottom: 6px;
+  letter-spacing: 0.02em;
 }
 
 .room-actions {

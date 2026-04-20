@@ -95,9 +95,13 @@ async function route(path: string) {
   }
 
   const [, page] = path.match(/^\/(\w+)/) ?? [];
-  const mountFn = (page && router[page as keyof typeof router])
-    ? router[page as keyof typeof router]
-    : router.table;
+  // Root "/" explicitly redirects to /table so the lobby is the default landing screen.
+  if (path === "/" || !page || !(page in router)) {
+    window.history.replaceState({}, "", "/table");
+    currentUnmount = null;
+    return;
+  }
+  const mountFn = router[page as keyof typeof router];
 
   try {
     const unmount = await mountFn();

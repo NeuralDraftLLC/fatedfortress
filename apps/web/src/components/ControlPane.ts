@@ -45,9 +45,11 @@ export class ControlPane {
   private abortController: AbortController | null = null;
   /** Bound `ff:fuel` handler — same reference required for removeEventListener (#12). */
   private _fuelListener: ((e: Event) => void) | null = null;
+  private demoMode: boolean;
 
-  constructor(doc: FortressRoomDoc) {
+  constructor(doc: FortressRoomDoc, demoMode = false) {
     this.doc = doc;
+    this.demoMode = demoMode;
     this.container = document.createElement("div");
     this.container.className = "control-pane";
   }
@@ -56,7 +58,16 @@ export class ControlPane {
     const templates = getTemplates(this.doc);
     const roomId = getRoomId(this.doc);
 
+    const demoBanner = this.demoMode
+      ? `<div class="demo-banner" id="demo-banner">
+          <span class="demo-banner__text">You're on a demo key &middot; Add yours to unlock full generation</span>
+          <a href="/connect" class="demo-banner__link">Add key</a>
+          <button class="demo-banner__dismiss" id="demo-banner-dismiss" aria-label="Dismiss">&times;</button>
+        </div>`
+      : "";
+
     this.container.innerHTML = `
+      ${demoBanner}
       <div class="control-section">
         <label>MODEL</label>
         <select id="model-select">
@@ -116,6 +127,12 @@ export class ControlPane {
         const promptEl = this.container.querySelector("#prompt-input") as HTMLTextAreaElement;
         if (promptEl) promptEl.value = tmpl;
       });
+    });
+
+    // Demo banner dismiss
+    this.container.querySelector("#demo-banner-dismiss")?.addEventListener("click", () => {
+      const banner = this.container.querySelector("#demo-banner");
+      if (banner) banner.remove();
     });
 
     // Start fuel polling
@@ -185,17 +202,19 @@ export class ControlPane {
             generateBtn.style.display = "inline-block";
             abortBtn.style.display = "none";
 
-            // Save receipt
-            try {
-              await saveReceipt({
-                id: `rcp_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`,
-                hash,
-                model: `${provider}/${model}`,
-                timestamp: Date.now(),
-                prompt: prompt.slice(0, 200),
-              });
-            } catch (e) {
-              console.warn("[ControlPane] failed to save receipt:", e);
+            // Receipts require a real user key — skip in demo mode.
+            if (!this.demoMode) {
+              try {
+                await saveReceipt({
+                  id: `rcp_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`,
+                  hash,
+                  model: `${provider}/${model}`,
+                  timestamp: Date.now(),
+                  prompt: prompt.slice(0, 200),
+                });
+              } catch (e) {
+                console.warn("[ControlPane] failed to save receipt:", e);
+              }
             }
           },
           onError: (code, message) => {

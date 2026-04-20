@@ -6,13 +6,21 @@ import {
   setActiveRoomDoc,
   getParticipants,
   setMeta,
+  needsKeyPolicyConsent,
+  recordKeyPolicyConsent,
+  getRoomId,
 } from "../state/ydoc.js";
 import {
   joinRoom as signalingJoin,
   upsertPresence,
   removePresence,
 } from "../net/signaling.js";
-import { WorkerBridge } from "../net/worker-bridge.js";
+import {
+  WorkerBridge,
+  DemoRateLimitError,
+  type DemoGrant,
+} from "../net/worker-bridge.js";
+import { mountDemoKeyBanner, mountKeyPromptBanner } from "../components/DemoKeyBanner.js";
 import { ControlPane } from "../components/ControlPane.js";
 import { OutputPane } from "../components/OutputPane.js";
 import { SpectatorChatView } from "../components/SpectatorChat.js";
@@ -22,6 +30,137 @@ import { showSplitModal, executePayment } from "../net/tempo.js";
 import { publishToHereNow, linkHereNowUrl } from "../net/herenow.js";
 import { checkHostPresence, cleanupRoomState } from "../state/presence.js";
 import type { PaymentIntent } from "@fatedfortress/protocol";
+
+// ─── PRIORITY 1: Demo Key Entry ────────────────────────────────────────────────
+
+/** In-memory demo grant for this session. Never persisted. */
+let activeDemoGrant: DemoGrant | null = null;
+
+export function getActiveDemoGrant(): DemoGrant | null {
+  if (activeDemoGrant && activeDemoGrant.expiresAt < Date.now()) {
+    activeDemoGrant = null;
+  }
+  return activeDemoGrant;
+}
+
+/**
+ * Determines how the user enters the room:
+ *   own-key  → has their own key stored, proceed normally
+ *   demo     → no key but demo grant obtained successfully
+ *   blocked  → no key and demo quota exhausted or network failed
+ */
+export async function resolveEntryMode(args: {
+  doc: FortressRoomDoc;
+  activeProvider: DemoGrant["provider"];
+  roomId: string;
+}): Promise<
+  | { mode: "own-key" }
+  | { mode: "demo"; grant: DemoGrant }
+  | { mode: "blocked"; reason: string }
+> {
+  const bridge = WorkerBridge.getInstance();
+
+  // Check if the user has their own key stored — if so, skip demo entirely
+  try {
+    const hasOwnKey = await bridge.hasKey(args.activeProvider);
+    if (hasOwnKey) return { mode: "own-key" };
+  } catch {
+    // Bridge unreachable (e.g., keys.fatedfortress.com unreachable locally);
+    // fall through to demo path; if that also fails, show blocked.
+  }
+
+  // No stored key — try demo path
+  try {
+    const grant = await bridge.consumeDemoToken(args.activeProvider, args.roomId);
+    activeDemoGrant = grant;
+    return { mode: "demo", grant };
+  } catch (err) {
+    if (err instanceof DemoRateLimitError) {
+      return {
+        mode: "blocked",
+        reason: `Demo quota exhausted. Available again ${new Date(
+          err.resetAt,
+        ).toLocaleTimeString()}. Connect your own key to continue.`,
+      };
+    }
+    const isBridgeTimeout =
+      err instanceof Error &&
+      (err.message.includes("timed out") ||
+        err.message.includes("timeout") ||
+        (err as any)?.code === "REQUEST_TIMEOUT");
+
+    return {
+      mode: "blocked",
+      reason: isBridgeTimeout
+        ? "Could not reach demo service. Add your own API key to continue."
+        : "Demo service unavailable. Add your own API key to continue.",
+    };
+  }
+}
+
+// ─── PRIORITY 2: Community-Key Consent Gate ────────────────────────────────────
+
+/**
+ * Renders the community-key consent modal if the room is in community mode
+ * and the participant hasn't consented since the last policy change.
+ * Returns a promise that resolves when the user consents or declines.
+ */
+export async function gateKeyPolicyConsent(
+  doc: FortressRoomDoc,
+): Promise<"consented" | "declined"> {
+  const myPubkey = getMyPubkey() ?? "";
+  if (!needsKeyPolicyConsent(doc, myPubkey)) return "consented";
+
+  return new Promise((resolve) => {
+    const backdrop = document.createElement("div");
+    backdrop.className = "ff-consent-modal";
+    backdrop.setAttribute("role", "dialog");
+    backdrop.setAttribute("aria-modal", "true");
+    backdrop.innerHTML = `
+      <div class="ff-consent-modal-backdrop"></div>
+      <div class="ff-consent-modal-content">
+        <h2>Community-Powered Room</h2>
+        <p>
+          This room's host has enabled <strong>Community Keys</strong>. If you
+          contribute an API key, it will be used for collaborative generation
+          alongside other participants. Your key is stored only on your device
+          and never leaves this browser — but the room's generations consume
+          your quota.
+        </p>
+        <p class="ff-text-muted">
+          You can leave the room now, or continue as a spectator (read-only, no
+          key required), or accept and contribute your key.
+        </p>
+        <div class="ff-consent-modal-actions">
+          <button data-action="leave">Leave room</button>
+          <button data-action="spectate">Spectate only</button>
+          <button data-action="consent" class="ff-primary">I understand, continue</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(backdrop);
+
+    backdrop.addEventListener("click", (event) => {
+      const target = event.target as HTMLElement;
+      const action = (target as HTMLElement & { dataset?: { action?: string } }).dataset?.action;
+      if (!action) return;
+
+      if (action === "consent") {
+        recordKeyPolicyConsent(doc, myPubkey);
+        backdrop.remove();
+        resolve("consented");
+      } else if (action === "spectate" || action === "leave") {
+        backdrop.remove();
+        resolve("declined");
+        if (action === "leave") {
+          window.location.hash = "#/table";
+        }
+      }
+    });
+  });
+}
+
+// ─── State ─────────────────────────────────────────────────────────────────────
 
 let cleanup: (() => void) | null = null;
 let presenceInterval: ReturnType<typeof setInterval> | null = null;
@@ -131,7 +270,7 @@ async function joinRoom(roomId: string, opts: MountRoomOptions = {}): Promise<Fo
 
 // ── Intent handlers ────────────────────────────────────────────────────────────
 
-function handleIntent(doc: FortressRoomDoc) {
+function handleIntent(doc: FortressRoomDoc, demoMode: boolean) {
   window.addEventListener("palette:intent", async (e: Event) => {
     const { intent } = (e as CustomEvent).detail as { intent: PaletteIntent };
 
@@ -159,7 +298,6 @@ function handleIntent(doc: FortressRoomDoc) {
       }
 
       case "switch_model": {
-        // The ControlPane handles this via the model selector — trigger a re-render
         window.dispatchEvent(new CustomEvent("room:switch_model", { detail: intent }));
         break;
       }
@@ -204,11 +342,14 @@ function handleIntent(doc: FortressRoomDoc) {
       }
 
       case "upgrade_room": {
-        // Handled by main.ts dispatchIntent, but also update local state
         break;
       }
 
       case "fork_receipt": {
+        if (demoMode) {
+          showBanner("Fork is disabled on a demo key — add your own key to unlock");
+          break;
+        }
         showBanner("Fork: select a receipt to fork from /me page");
         window.history.pushState({}, "", "/me");
         window.dispatchEvent(new PopStateEvent("popstate"));
@@ -287,6 +428,53 @@ function handleIntent(doc: FortressRoomDoc) {
   });
 }
 
+// ── Spectator-only mount (extracted when user declines community-key consent) ──
+
+function mountSpectatorRoom(doc: FortressRoomDoc, container: HTMLElement): () => void {
+  const splitPane = document.createElement("div");
+  splitPane.className = "room-split";
+  splitPane.innerHTML = `
+    <div class="room-header">
+      <span class="room-title">${(doc.meta.get("name") as string) ?? "Room"}</span>
+      <span class="spectator-badge">SPECTATING</span>
+      <button class="btn-leave" id="btn-leave">LEAVE</button>
+    </div>
+    <div class="room-control-pane"></div>
+    <div class="room-output-pane"></div>
+  `;
+  container.appendChild(splitPane);
+
+  const chatEl = document.createElement("div");
+  chatEl.className = "spectator-chat";
+  const chatView = new SpectatorChatView(doc);
+  chatView.mount(chatEl);
+  splitPane.querySelector(".room-control-pane")!.appendChild(chatEl);
+
+  const outputEl = splitPane.querySelector(".room-output-pane")!;
+  const outputPane = new OutputPane(doc);
+  outputPane.mount(outputEl);
+
+  upsertPresence(doc, { name: getMyDisplayName(), isSpectator: true });
+
+  presenceInterval = setInterval(() => {
+    upsertPresence(doc, { name: getMyDisplayName(), isSpectator: true });
+  }, 5000);
+
+  splitPane.querySelector("#btn-leave")?.addEventListener("click", () => {
+    window.history.pushState({}, "", "/table");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  });
+
+  cleanup = () => {
+    removePresence(doc);
+    if (presenceInterval) clearInterval(presenceInterval);
+    cleanupRoomState(getRoomId(doc));
+    splitPane.remove();
+  };
+
+  return cleanup;
+}
+
 // ── Main mount ────────────────────────────────────────────────────────────────
 
 export async function mountRoom(
@@ -296,12 +484,37 @@ export async function mountRoom(
 ): Promise<() => void> {
   const doc = await joinRoom(roomId, opts);
 
+  // ── PRIORITY 2: Community-key consent gate ──────────────────────────
+  const consentResult = await gateKeyPolicyConsent(doc);
+  if (consentResult === "declined") {
+    // Re-join as spectator
+    const spectatorDoc = await joinRoom(roomId, { spectate: true });
+    setActiveRoomDoc(spectatorDoc);
+    return mountSpectatorRoom(spectatorDoc, container);
+  }
+
+  // ── PRIORITY 1: Demo key or own-key resolution ──────────────────────
+  const activeProvider: DemoGrant["provider"] = "openai";
+  const entry = await resolveEntryMode({ doc, activeProvider, roomId });
+  const bridge = WorkerBridge.getInstance();
+
+  if (entry.mode === "blocked") {
+    mountKeyPromptBanner(entry.reason);
+  } else if (entry.mode === "demo") {
+    const onConnectKey = () => {
+      window.history.pushState({}, "", "/connect");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    };
+    mountDemoKeyBanner(entry.grant, onConnectKey);
+  }
+
   // Register as active doc for other modules
   setActiveRoomDoc(doc);
 
   const myPubkey = getMyPubkey() ?? "";
   const participant = getParticipants(doc).find((p: any) => p.pubkey === myPubkey);
   const isSpectator = opts.spectate ?? participant?.isSpectator ?? false;
+  const demoMode = entry.mode === "demo";
 
   // Create layout
   const splitPane = document.createElement("div");
@@ -326,7 +539,7 @@ export async function mountRoom(
     splitPane.querySelector(".room-control-pane")!.appendChild(chatEl);
   } else {
     const controlEl = splitPane.querySelector(".room-control-pane")!;
-    controlPane = new ControlPane(doc);
+    controlPane = new ControlPane(doc, demoMode);
     controlPane.mount(controlEl);
   }
 
@@ -338,12 +551,11 @@ export async function mountRoom(
   upsertPresence(doc, { name: getMyDisplayName(), isSpectator });
 
   // Register intent handlers
-  handleIntent(doc);
+  handleIntent(doc, demoMode);
 
   // Heartbeat presence updates every 5s
   presenceInterval = setInterval(() => {
     upsertPresence(doc, { name: getMyDisplayName(), isSpectator });
-    // Also check for host presence staleness
     try {
       checkHostPresence(doc);
     } catch {}
@@ -356,7 +568,7 @@ export async function mountRoom(
   });
 
   cleanup = () => {
-    void WorkerBridge.getInstance().requestTeardown(); // pushState unmount — beforeunload may not run
+    void bridge.requestTeardown();
     controlPane?.destroy();
     outputPane.destroy();
     removePresence(doc);

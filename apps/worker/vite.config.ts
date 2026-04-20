@@ -13,9 +13,18 @@
  * Vite's rollupOptions.input determines chunk splitting for reproducibility.
  */
 
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
 export default defineConfig({
+  resolve: {
+    alias: {
+      "@fatedfortress/protocol": path.resolve(__dirname, "../../packages/protocol/src/index.ts"),
+    },
+  },
   define: {
     __FF_ORIGIN__: JSON.stringify(process.env.VITE_FF_ORIGIN ?? "https://fatedfortress.com"),
     __WORKER_ORIGIN__: JSON.stringify(process.env.VITE_WORKER_ORIGIN ?? "https://keys.fatedfortress.com"),

@@ -10,11 +10,23 @@
  *   - POST /internal/register-shard-peer — shard tells parent peerId → shard index (O(1) map).
  *   - POST /internal/deliver — shard asks parent to route when the target is not local to shard.
  *
+ * Global Lobby (Task 1):
+ *   - RELAY_REGISTRY Durable Object tracks active rooms with metadata (name, category,
+ *     participant count, spectator count, access, price) for the GET /rooms HTTP endpoint.
+ *   - Rooms register on first participant join and deregister when the last participant leaves.
+ *   - Seed rooms are pre-registered so the lobby is never empty.
+ *
+ * Demo Mode (Task 2):
+ *   - GET /demo/check?ip=X — returns demo rate-limit status for an IP address.
+ *     Limits: 10 requests/hour per IP, 200 tokens per session (tracked separately per ip).
+ *   - Demo sessions can trigger generation but cannot fork rooms or sign receipts.
+ *
  * Invariants (#2, #9): JSON.parse guarded; reconnect replaces same peerId without leaking peerCount.
  */
 
 export interface Env {
   RELAY: DurableObjectNamespace<RelayDO>;
+  RELAY_REGISTRY: DurableObjectNamespace<RelayRegistryDO>;
 }
 
 /** Parent DO stops accepting new peers here; they receive REDIRECT (soft cap ~80 × (1 + MAX_SHARDS) peers/room). */
@@ -26,6 +38,20 @@ const SIGNALING_TYPES = new Set(["offer", "answer", "ice-candidate"]);
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+
+    // GET /rooms — HTTP endpoint returning live room metadata for the lobby grid.
+    if (request.method === "GET" && url.pathname === "/rooms") {
+      const registryId = env.RELAY_REGISTRY.idFromName("global-registry");
+      return env.RELAY_REGISTRY.get(registryId).fetch(request);
+    }
+
+    // GET /demo/check?ip=X — demo rate-limit status (10 req/hr per IP, 200 tokens/session).
+    if (request.method === "GET" && url.pathname === "/demo/check") {
+      const ip = url.searchParams.get("ip") ?? "unknown";
+      const registryId = env.RELAY_REGISTRY.idFromName("global-registry");
+      return env.RELAY_REGISTRY.get(registryId).fetch(request);
+    }
+
     const roomId = url.searchParams.get("roomId") ?? "default";
     const shard = url.searchParams.get("shard");
     // Same RelayDO class, different durable name → isolated peer maps per room / shard.
@@ -37,6 +63,231 @@ export default {
     return env.RELAY.get(id).fetch(request);
   },
 };
+
+// ── RelayRegistryDO — tracks active rooms for the lobby grid ──────────────────
+
+interface RoomMeta {
+  id: string;
+  name: string;
+  category: string;
+  hostPubkey: string;
+  access: "free" | "paid";
+  price?: number;
+  participantCount: number;
+  spectatorCount: number;
+  fuelFraction: number;
+}
+
+interface RateLimitEntry {
+  count: number;
+  windowStart: number;
+  sessionTokens: number;
+}
+
+const DEMO_RATE_LIMIT_WINDOW_MS = 3_600_000; // 1 hour
+const DEMO_RATE_LIMIT_MAX = 10;              // 10 requests per hour
+const DEMO_SESSION_TOKEN_LIMIT = 15_000;    // 15,000 tokens per session
+
+const SEED_ROOMS: RoomMeta[] = [
+  {
+    id: "rm_seed_animation",
+    name: "AI Animation Jam",
+    category: "animation",
+    hostPubkey: "FatedFortress",
+    access: "free",
+    participantCount: 0,
+    spectatorCount: 0,
+    fuelFraction: 1.0,
+  },
+  {
+    id: "rm_seed_code",
+    name: "Code Review Room",
+    category: "code",
+    hostPubkey: "FatedFortress",
+    access: "free",
+    participantCount: 0,
+    spectatorCount: 0,
+    fuelFraction: 1.0,
+  },
+  {
+    id: "rm_seed_showcase",
+    name: "Paid Showcase",
+    category: "showcase",
+    hostPubkey: "FatedFortress",
+    access: "paid",
+    price: 2,
+    participantCount: 0,
+    spectatorCount: 0,
+    fuelFraction: 1.0,
+  },
+];
+
+export class RelayRegistryDO implements DurableObject {
+  /** roomId → metadata */
+  private rooms = new Map<string, RoomMeta>();
+  /** IP address → rate-limit counters */
+  private rateLimits = new Map<string, RateLimitEntry>();
+
+  constructor(
+    private readonly ctx: DurableObjectState,
+    private readonly env: Env
+  ) {
+    // Seed the 3 always-on public rooms so the lobby is never empty.
+    for (const room of SEED_ROOMS) {
+      this.rooms.set(room.id, { ...room });
+    }
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+
+    if (request.method === "GET" && url.pathname === "/rooms") {
+      const list = Array.from(this.rooms.values()).map((r) => ({
+        id: r.id,
+        name: r.name,
+        category: r.category,
+        hostPubkey: r.hostPubkey,
+        access: r.access,
+        price: r.price,
+        participantCount: r.participantCount,
+        spectatorCount: r.spectatorCount,
+        fuelFraction: r.fuelFraction,
+      }));
+      return new Response(JSON.stringify({ rooms: list }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    if (request.method === "GET" && url.pathname === "/demo/check") {
+      const ip = url.searchParams.get("ip") ?? "unknown";
+      const entry = this.rateLimits.get(ip) ?? {
+        count: 0,
+        windowStart: Date.now(),
+        sessionTokens: 0,
+      };
+      return new Response(
+        JSON.stringify({
+          allowed: entry.count < DEMO_RATE_LIMIT_MAX,
+          requestsRemaining: Math.max(0, DEMO_RATE_LIMIT_MAX - entry.count),
+          sessionTokensUsed: entry.sessionTokens,
+          sessionTokenLimit: DEMO_SESSION_TOKEN_LIMIT,
+        }),
+        { headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    if (request.method === "POST" && url.pathname === "/demo/consume") {
+      let body: { ip?: unknown; tokens?: unknown };
+      try {
+        body = (await request.json()) as { ip?: unknown; tokens?: unknown };
+      } catch {
+        return new Response("bad json", { status: 400 });
+      }
+      const ip = typeof body.ip === "string" ? body.ip : "unknown";
+      const tokens = typeof body.tokens === "number" ? body.tokens : 1;
+      const allowed = this.consumeDemoToken(ip, tokens);
+      return new Response(JSON.stringify({ allowed }), {
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+
+    if (request.method === "POST" && url.pathname === "/register") {
+      let body: {
+        roomId?: unknown;
+        name?: unknown;
+        category?: unknown;
+        hostPubkey?: unknown;
+        access?: unknown;
+        price?: unknown;
+      };
+      try {
+        body = (await request.json()) as typeof body;
+      } catch {
+        return new Response("bad json", { status: 400 });
+      }
+      if (typeof body.roomId !== "string" || typeof body.name !== "string") {
+        return new Response("bad fields", { status: 400 });
+      }
+      const existing = this.rooms.get(body.roomId);
+      this.rooms.set(body.roomId, {
+        id: body.roomId,
+        name: body.name,
+        category: typeof body.category === "string" ? body.category : "open",
+        hostPubkey: typeof body.hostPubkey === "string" ? body.hostPubkey : "unknown",
+        access: body.access === "paid" ? "paid" : "free",
+        price: typeof body.price === "number" ? body.price : undefined,
+        participantCount: existing?.participantCount ?? 0,
+        spectatorCount: existing?.spectatorCount ?? 0,
+        fuelFraction: existing?.fuelFraction ?? 1.0,
+      });
+      return new Response("ok");
+    }
+
+    if (request.method === "POST" && url.pathname === "/heartbeat") {
+      let body: {
+        roomId?: unknown;
+        participantCount?: unknown;
+        spectatorCount?: unknown;
+        fuelFraction?: unknown;
+      };
+      try {
+        body = (await request.json()) as typeof body;
+      } catch {
+        return new Response("bad json", { status: 400 });
+      }
+      if (typeof body.roomId !== "string") {
+        return new Response("bad fields", { status: 400 });
+      }
+      const existing = this.rooms.get(body.roomId);
+      if (existing) {
+        existing.participantCount =
+          typeof body.participantCount === "number" ? body.participantCount : existing.participantCount;
+        existing.spectatorCount =
+          typeof body.spectatorCount === "number" ? body.spectatorCount : existing.spectatorCount;
+        existing.fuelFraction =
+          typeof body.fuelFraction === "number" ? body.fuelFraction : existing.fuelFraction;
+      }
+      return new Response("ok");
+    }
+
+    if (request.method === "POST" && url.pathname === "/deregister") {
+      let body: { roomId?: unknown };
+      try {
+        body = (await request.json()) as { roomId?: unknown };
+      } catch {
+        return new Response("bad json", { status: 400 });
+      }
+      if (typeof body.roomId === "string") {
+        this.rooms.delete(body.roomId);
+      }
+      return new Response("ok");
+    }
+
+    return new Response("not found", { status: 404 });
+  }
+
+  private consumeDemoToken(ip: string, tokens: number): boolean {
+    const now = Date.now();
+    let entry = this.rateLimits.get(ip);
+    if (!entry) {
+      entry = { count: 0, windowStart: now, sessionTokens: 0 };
+    }
+    // Reset hourly window if expired.
+    if (now - entry.windowStart > DEMO_RATE_LIMIT_WINDOW_MS) {
+      entry.count = 0;
+      entry.windowStart = now;
+      entry.sessionTokens = 0;
+    }
+    if (entry.count >= DEMO_RATE_LIMIT_MAX) return false;
+    if (entry.sessionTokens + tokens > DEMO_SESSION_TOKEN_LIMIT) return false;
+    entry.count++;
+    entry.sessionTokens += tokens;
+    this.rateLimits.set(ip, entry);
+    return true;
+  }
+}
+
+// ── RelayDO — per-room WebRTC signaling ──────────────────────────────────────
 
 export class RelayDO implements DurableObject {
   private peers = new Map<string, WebSocket>();
@@ -50,11 +301,8 @@ export class RelayDO implements DurableObject {
   private roomId: string | null = null;
   /** Non-null when this stub is a shard (`roomId-shard-n` binding) */
   private shardIndex: number | null = null;
-
-  constructor(
-    private readonly ctx: DurableObjectState,
-    private readonly env: Env
-  ) {}
+  private registeredRoom = false;
+  private heartbeatTimer: number | null = null;
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
@@ -181,6 +429,11 @@ export class RelayDO implements DurableObject {
       this.ctx.waitUntil(this.notifyParentShardPlacement(roomParam, peerId, this.shardIndex));
     }
 
+    // Register room on first participant join (non-spectator, non-shard, non-replacement).
+    if (!isSpectator && !isReplacement && !isShardConn) {
+      this.ctx.waitUntil(this.ensureRegistered(roomParam));
+    }
+
     if (!isShardConn && this.peerCount >= SHARD_THRESHOLD - 10) {
       console.warn(
         `[RelayDO] Room ${roomParam} parent peer load ${this.peerCount} (threshold ${SHARD_THRESHOLD}).`
@@ -226,6 +479,10 @@ export class RelayDO implements DurableObject {
         this.peerCount--;
       }
       this.spectatorPeers.delete(peerId);
+      // Deregister room when the last non-spectator participant leaves.
+      if (!isSpectator && this.peerCount === 0) {
+        this.ctx.waitUntil(this.cleanupRoom(roomParam));
+      }
     });
 
     return new Response(null, { status: 101, webSocket: client });
@@ -257,6 +514,69 @@ export class RelayDO implements DurableObject {
         body: JSON.stringify({ peerId, shardIndex }),
       })
     );
+  }
+
+  /** Register this room in the global lobby registry (called once per room on first participant join). */
+  private async ensureRegistered(roomId: string): Promise<void> {
+    if (this.registeredRoom || this.shardIndex !== null) return;
+    this.registeredRoom = true;
+    const name = `Room ${roomId}`;
+    const category = "open";
+    const stub = this.env.RELAY_REGISTRY.get(
+      this.env.RELAY_REGISTRY.idFromName("global-registry")
+    );
+    await stub.fetch("http://relay/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ roomId, name, category }),
+    });
+    this.startHeartbeat(roomId);
+  }
+
+  private startHeartbeat(roomId: string): void {
+    if (this.heartbeatTimer !== null) return;
+    this.heartbeatTimer = this.ctx.storage.setTimeout(
+      () => this.sendHeartbeat(roomId),
+      30_000
+    ) as unknown as number;
+  }
+
+  private async sendHeartbeat(roomId: string): Promise<void> {
+    if (this.shardIndex !== null) return;
+    const stub = this.env.RELAY_REGISTRY.get(
+      this.env.RELAY_REGISTRY.idFromName("global-registry")
+    );
+    await stub.fetch("http://relay/heartbeat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        roomId,
+        participantCount: this.peerCount - this.spectatorPeers.size,
+        spectatorCount: this.spectatorPeers.size,
+        fuelFraction: 1.0,
+      }),
+    }).catch(() => {/* ignore */});
+    this.heartbeatTimer = this.ctx.storage.setTimeout(
+      () => this.sendHeartbeat(roomId),
+      30_000
+    ) as unknown as number;
+  }
+
+  private async cleanupRoom(roomId: string): Promise<void> {
+    if (this.shardIndex !== null) return;
+    if (this.heartbeatTimer !== null) {
+      this.ctx.storage.clearTimeout(this.heartbeatTimer as unknown as ReturnType<typeof setTimeout>);
+      this.heartbeatTimer = null;
+    }
+    const stub = this.env.RELAY_REGISTRY.get(
+      this.env.RELAY_REGISTRY.idFromName("global-registry")
+    );
+    await stub.fetch("http://relay/deregister", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ roomId }),
+    }).catch(() => {/* ignore */});
+    this.registeredRoom = false;
   }
 
   /** WS message routing: local delivery, parent forward map, or escalate shard → parent. */

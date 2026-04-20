@@ -8,6 +8,8 @@ export interface RoomCardData {
   access: "free" | "paid";
   price?: number;
   fuelLevel?: number;
+  participantCount?: number;
+  spectatorCount?: number;
 }
 
 export class RoomCard {
@@ -24,9 +26,21 @@ export class RoomCard {
     const priceBadge = this.room.access === "paid"
       ? `<span class="price-badge">$${this.room.price} USDC</span>`
       : `<span class="price-badge free">FREE</span>`;
-    const fuelBar = this.room.fuelLevel !== undefined
-      ? `<div class="fuel-bar"><div class="fuel-fill" style="width:${this.room.fuelLevel}%"></div></div>`
-      : "";
+
+    const participants = this.room.participantCount ?? 0;
+    const spectators = this.room.spectatorCount ?? 0;
+    const countLabel = participants > 0
+      ? `${participants} ▲ ${spectators} ◉`
+      : `${spectators} ◉ spectating`;
+
+    const fuelPct = this.room.fuelLevel ?? 100;
+    const fuelBar = `
+      <div class="room-card-fuel">
+        <div class="fuel-bar">
+          <div class="fuel-fill" style="width:${fuelPct}%"></div>
+        </div>
+        <span class="fuel-label">${Math.round(fuelPct * 100)}%</span>
+      </div>`;
 
     const card = document.createElement("div");
     card.className = "room-card";
@@ -39,6 +53,7 @@ export class RoomCard {
         <span class="host-pubkey">@${this.escapeHtml(truncatedHost)}</span>
         ${priceBadge}
       </div>
+      <div class="room-counts">${countLabel}</div>
       ${fuelBar}
       <div class="room-actions">
         <button class="btn-join" data-room="${this.room.id}">JOIN</button>

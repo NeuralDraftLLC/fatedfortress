@@ -307,3 +307,77 @@ export function applyRemoteUpdate(room: FortressRoomDoc, update: Uint8Array): vo
   Y.applyUpdate(room.doc, update);
   migrateParticipantsFromLegacy(room); // peer may still emit old "participants" array CRDT ops
 }
+
+// ─── PRIORITY 2: Host-Only Key Mode ───────────────────────────────────────────
+
+/** Default: host-only key mode. Participants must NOT contribute keys unless host opts in. */
+export const DEFAULT_ALLOW_COMMUNITY_KEYS = false;
+
+/** Reads the allowCommunityKeys flag with a safe default (false for existing rooms without the field). */
+export function getAllowCommunityKeys(doc: FortressRoomDoc): boolean {
+  const meta = doc.meta;
+  const value = meta.get("allowCommunityKeys");
+  return typeof value === "boolean" ? value : DEFAULT_ALLOW_COMMUNITY_KEYS;
+}
+
+/**
+ * Toggles the allowCommunityKeys flag. Only the active host may call this.
+ * Guard is enforced here rather than at the CRDT layer (Y.js has no ACL).
+ * Non-host callers get a thrown error — the UI should hide the toggle for non-hosts.
+ */
+export function setAllowCommunityKeys(
+  doc: FortressRoomDoc,
+  value: boolean,
+): void {
+  const meta = doc.meta;
+  const activeHost = meta.get("activeHostPubkey");
+  const myPubkey = getMyPubkey();
+
+  if (activeHost !== myPubkey) {
+    throw new Error(
+      "Only the active host can change the key policy. Request a host transfer first.",
+    );
+  }
+
+  doc.doc.transact(() => {
+    meta.set("allowCommunityKeys", value);
+    // Mark a policy-change timestamp so participants can be prompted to re-consent
+    meta.set("keyPolicyChangedAt", Date.now());
+  });
+}
+
+/**
+ * Called on join. Returns true if the room is in community-key mode AND this
+ * participant hasn't consented since the last policy change — triggering the
+ * consent modal before ControlPane becomes interactive.
+ */
+export function needsKeyPolicyConsent(
+  doc: FortressRoomDoc,
+  participantPubkey: string,
+): boolean {
+  const meta = doc.meta;
+  if (!getAllowCommunityKeys(doc)) return false;
+
+  const participants = doc.participants;
+  const p = participants.get(participantPubkey as PublicKeyBase58) as
+    | { consentedToPolicyAt?: number }
+    | undefined;
+
+  const changedAt = (meta.get("keyPolicyChangedAt") as number | undefined) ?? 0;
+  const consentedAt = p?.consentedToPolicyAt ?? 0;
+
+  return consentedAt < changedAt;
+}
+
+/** Records consent after the user accepts the community-key consent modal. */
+export function recordKeyPolicyConsent(
+  doc: FortressRoomDoc,
+  participantPubkey: string,
+): void {
+  const participants = doc.participants;
+  const existing = (participants.get(participantPubkey as PublicKeyBase58) as Record<string, unknown>) ?? {};
+  participants.set(participantPubkey as PublicKeyBase58, {
+    ...existing,
+    consentedToPolicyAt: Date.now(),
+  } as ParticipantEntry);
+}

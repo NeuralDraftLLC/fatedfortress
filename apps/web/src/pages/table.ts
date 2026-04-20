@@ -3,7 +3,7 @@ import type { PaletteIntent } from "@fatedfortress/protocol";
 import { safeStorage, KEY_HERENOW_TOKEN, KEY_ROOMS_CACHE } from "../util/storage.js";
 import { RoomCard } from "../components/RoomCard.js";
 
-interface RoomEntry {
+export interface RoomEntry {
   id: string;
   name: string;
   category: string;
@@ -11,10 +11,13 @@ interface RoomEntry {
   access: "free" | "paid";
   price?: number;
   fuelLevel?: number;
+  participantCount?: number;
+  spectatorCount?: number;
 }
 
 let _rooms: RoomEntry[] = [];
 let _listenersAttached = false;
+let _autoRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
 function attachIntentListeners() {
   if (_listenersAttached) return;
@@ -45,11 +48,11 @@ export function mountTable(container: HTMLElement): () => void {
   attachIntentListeners();
 
   container.innerHTML = `
-    <div class="table-header">
+    <div class="lobby-hero">
       <h1>FATEDFORTRESS</h1>
-      <p class="table-sub">Collaborative AI generation rooms</p>
-      <div class="table-actions">
-        <button type="button" class="btn-primary btn-create-room" id="btn-create-room">CREATE ROOM</button>
+      <p class="lobby-hero__sub">Collaborative AI generation rooms</p>
+      <div class="lobby-hero__actions">
+        <button type="button" class="btn-primary btn-create-room" id="btn-create-room">Create Public Room</button>
       </div>
     </div>
     <div class="room-grid" id="room-grid">
@@ -63,44 +66,70 @@ export function mountTable(container: HTMLElement): () => void {
     window.dispatchEvent(new PopStateEvent("popstate"));
   });
 
-  // Load rooms
   loadRooms().then(() => {
     renderRooms(container);
+    startAutoRefresh(container);
   });
 
   return () => {
+    if (_autoRefreshTimer !== null) {
+      clearTimeout(_autoRefreshTimer);
+      _autoRefreshTimer = null;
+    }
     container.innerHTML = "";
   };
 }
 
 async function loadRooms(): Promise<void> {
-  // Token + cache paths use safeStorage — embed-safe (Phase 5); keys unchanged for upgrades
+  // 1. Fetch live rooms from relay HTTP endpoint (primary source).
+  const relayRooms = await fetchFromRelay();
+  if (relayRooms.length > 0) {
+    _rooms = relayRooms;
+    cacheRooms(_rooms);
+    return;
+  }
+
+  // 2. Fall back to here.now published rooms.
   try {
     const token = safeStorage.getItem(KEY_HERENOW_TOKEN);
-    if (!token) {
-      _rooms = getCachedRooms();
-      return;
+    if (token) {
+      const response = await fetch("https://api.here.now/v1/rooms", {
+        headers: {
+          "Authorization": `Bearer ${token}`,
+          "X-Client": "fatedfortress",
+        },
+      });
+      if (response.ok) {
+        const data = await response.json() as { rooms?: RoomEntry[] };
+        if (data.rooms && data.rooms.length > 0) {
+          _rooms = data.rooms;
+          cacheRooms(_rooms);
+          return;
+        }
+      }
     }
+  } catch {
+    /* fall through to cache */
+  }
 
-    const response = await fetch("https://api.here.now/v1/rooms", {
-      headers: {
-        "Authorization": `Bearer ${token}`,
-        "X-Client": "fatedfortress",
-      },
+  // 3. Use cached rooms as last resort.
+  _rooms = getCachedRooms();
+}
+
+async function fetchFromRelay(): Promise<RoomEntry[]> {
+  try {
+    // VITE_RELAY_URL is set in wrangler / dev environment; fall back gracefully.
+    const relayBase =
+      (import.meta.env.VITE_RELAY_URL as string | undefined) ??
+      "https://relay.fatedfortress.com";
+    const res = await fetch(`${relayBase}/rooms`, {
+      signal: AbortSignal.timeout(5_000),
     });
-
-    if (!response.ok) {
-      console.warn("[table] Failed to fetch rooms:", response.status);
-      _rooms = getCachedRooms();
-      return;
-    }
-
-    const data = await response.json() as { rooms?: RoomEntry[] };
-    _rooms = data.rooms ?? [];
-    cacheRooms(_rooms);
-  } catch (err) {
-    console.warn("[table] Room discovery failed, using cache:", err);
-    _rooms = getCachedRooms();
+    if (!res.ok) return [];
+    const data = await res.json() as { rooms?: RoomEntry[] };
+    return data.rooms ?? [];
+  } catch {
+    return [];
   }
 }
 
@@ -120,7 +149,6 @@ function cacheRooms(rooms: RoomEntry[]): void {
 }
 
 function getDefaultRooms(): RoomEntry[] {
-  // Built-in sample rooms for demo purposes
   return [
     {
       id: "rm_demo001",
@@ -129,6 +157,8 @@ function getDefaultRooms(): RoomEntry[] {
       hostPubkey: "DemoHost001",
       access: "free",
       fuelLevel: 75,
+      participantCount: 0,
+      spectatorCount: 0,
     },
     {
       id: "rm_demo002",
@@ -138,8 +168,18 @@ function getDefaultRooms(): RoomEntry[] {
       access: "paid",
       price: 100,
       fuelLevel: 40,
+      participantCount: 0,
+      spectatorCount: 0,
     },
   ];
+}
+
+function startAutoRefresh(container: HTMLElement): void {
+  _autoRefreshTimer = setTimeout(async () => {
+    await loadRooms();
+    renderRooms(container);
+    startAutoRefresh(container);
+  }, 15_000);
 }
 
 function filterAndRender(category: string | null, query: string): void {
@@ -154,8 +194,6 @@ function filterAndRender(category: string | null, query: string): void {
 }
 
 function renderRooms(container: HTMLElement): void {
-  const grid = document.getElementById("room-grid");
-  if (!grid) return;
   renderRoomsToGrid(_rooms);
 }
 
@@ -164,7 +202,21 @@ function renderRoomsToGrid(rooms: RoomEntry[]): void {
   if (!grid) return;
 
   if (rooms.length === 0) {
-    grid.innerHTML = `<p class="empty-msg">No rooms match your search. Try a different query or create a new room.</p>`;
+    grid.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-state__icon">◈</div>
+        <p class="empty-state__title">No public rooms right now</p>
+        <p class="empty-state__sub">Be the first to create one and start a jam.</p>
+        <div class="empty-state__arrow" aria-hidden="true">↓</div>
+        <div class="empty-state__cta">
+          <button type="button" class="btn-primary btn-create-room" id="btn-create-room-empty">Create Public Room</button>
+        </div>
+      </div>`;
+    grid.querySelector("#btn-create-room-empty")?.addEventListener("click", () => {
+      const roomId = `rm_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`;
+      window.history.pushState({}, "", `/room/${roomId}`);
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
     return;
   }
 
