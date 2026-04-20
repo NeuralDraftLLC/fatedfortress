@@ -19,18 +19,20 @@ const PLATFORM_FEE_BPS = 2000; // 20%
 export interface SplitResult {
   hostAmount: number;
   platformAmount: number;
-  hostBasisPoints: number;
-  platformBasisPoints: number;
+  hostBasisPoints: 8000;
+  platformBasisPoints: 2000;
 }
 
 export function calculateSplit(amount: number, type: PaymentIntent["type"]): SplitResult {
   const platformAmount = Math.floor(amount * PLATFORM_FEE_BPS / 10000);
   const hostAmount = amount - platformAmount;
+  const hostBps = 8000 as const;
+  const platformBps = 2000 as const;
   return {
     hostAmount,
     platformAmount,
-    hostBasisPoints: 10000 - PLATFORM_FEE_BPS,
-    platformBasisPoints: PLATFORM_FEE_BPS,
+    hostBasisPoints: hostBps,
+    platformBasisPoints: platformBps,
   };
 }
 

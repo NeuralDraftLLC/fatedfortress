@@ -14,7 +14,7 @@ import {
 } from "./keystore.js";
 // activeGenerations: same Map as in generate.ts (B3) — needed to abort in-flight streams
 // by requestId when the parent posts ABORT_GENERATE.
-import { handleGenerate, activeGenerations } from "./generate.js";
+import { handleGenerate, activeGenerations, abortAllGenerations } from "./generate.js";
 import { teardownBudget } from "./budget.js";
 import {
   mintToken,
@@ -197,7 +197,7 @@ export async function enforceKeyPolicy(args: {
     if (args.isHost) return { allowed: true };
 
     // Read allowCommunityKeys from the token's extensions / metadata field
-    const allowCommunityKeys = (token as Record<string, unknown>)["allowCommunityKeys"];
+    const allowCommunityKeys = (token as unknown as Record<string, unknown>)["allowCommunityKeys"];
     if (allowCommunityKeys === true) return { allowed: true };
 
     return {
@@ -254,7 +254,7 @@ export async function dispatchMessage(msg: RequestMessage): Promise<void> {
     }
 
     case "MINT_TOKEN": {
-      const token = await mintToken(msg.roomId, msg.participantPubkey as any, msg.tokensToGrant);
+      const token = await mintToken(msg.roomId as any, msg.participantPubkey as any, msg.tokensToGrant);
       send({ type: "OK", requestId, payload: token });
       return;
     }

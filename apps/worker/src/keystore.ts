@@ -261,15 +261,15 @@ export async function getSigningKey(): Promise<SigningKeyPair> {
 
   const kp = await crypto.subtle.generateKey(
     { name: "Ed25519" },
-    false,              // private key non-extractable
+    false,
     ["sign", "verify"]
-  );
+  ) as CryptoKeyPair;
 
   const pubRaw   = await crypto.subtle.exportKey("raw", kp.publicKey);
   const pubBytes = new Uint8Array(pubRaw);
 
   _signingKeyPair = {
-    privateKey:      kp.privateKey,
+    privateKey:      kp.privateKey as CryptoKey,
     publicKeyBase58: protocolToBase58(pubBytes) as PublicKeyBase58,
   };
 

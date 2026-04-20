@@ -47,6 +47,10 @@ export interface RoomMeta {
   upgradedAt: number | null;
   /** Public key of the active host (may differ from original hostPubkey during handoff) */
   activeHostPubkey: PublicKeyBase58;
+  /** Whether participants may contribute API keys (community-key mode) */
+  allowCommunityKeys: boolean;
+  /** Timestamp of the last allowCommunityKeys policy change — resets participant consent */
+  keyPolicyChangedAt: number;
 }
 
 export interface ParticipantEntry {
@@ -363,7 +367,7 @@ export function recordKeyPolicyConsent(
   participantPubkey: string,
 ): void {
   const participants = doc.participants;
-  const existing = (participants.get(participantPubkey as PublicKeyBase58) as Record<string, unknown>) ?? {};
+  const existing = participants.get(participantPubkey as PublicKeyBase58) ?? {} as ParticipantEntry;
   participants.set(participantPubkey as PublicKeyBase58, {
     ...existing,
     consentedToPolicyAt: Date.now(),

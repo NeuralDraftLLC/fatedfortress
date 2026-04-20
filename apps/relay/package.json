@@ -1,0 +1,12 @@
+{
+  "name": "@fatedfortress/relay",
+  "private": true,
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^3.19.0"
+  }
+}

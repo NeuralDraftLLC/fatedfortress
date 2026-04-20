@@ -119,7 +119,7 @@ async function generateAndPersistIdentity(db: IDBDatabase): Promise<{ keyPair: C
   const deviceSeedBytes = crypto.getRandomValues(new Uint8Array(32));
   const wrapIvBytes = crypto.getRandomValues(new Uint8Array(12));
 
-  const keyPair = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
+  const keyPair = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]) as CryptoKeyPair;
 
   const wrappingKey = await deriveWrappingKey(deviceSeedBytes);
 
@@ -227,7 +227,7 @@ export async function createIdentity(): Promise<Identity> {
   } catch (err) {
     console.warn("[identity] IndexedDB unavailable — using ephemeral identity:", err);
 
-    const kp = await crypto.subtle.generateKey({ name: "Ed25519" }, false, ["sign", "verify"]);
+    const kp = await crypto.subtle.generateKey({ name: "Ed25519" }, false, ["sign", "verify"]) as CryptoKeyPair;
     const pubRaw = await crypto.subtle.exportKey("raw", kp.publicKey);
     const pubkey = toBase58(new Uint8Array(pubRaw));
     setCachedIdentity(pubkey, kp.privateKey);

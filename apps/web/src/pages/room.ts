@@ -162,7 +162,6 @@ export async function gateKeyPolicyConsent(
 
 // ─── State ─────────────────────────────────────────────────────────────────────
 
-let cleanup: (() => void) | null = null;
 let presenceInterval: ReturnType<typeof setInterval> | null = null;
 
 interface MountRoomOptions {
@@ -436,7 +435,7 @@ function mountSpectatorRoom(doc: FortressRoomDoc, container: HTMLElement): () =>
   chatView.mount(chatEl);
   splitPane.querySelector(".room-control-pane")!.appendChild(chatEl);
 
-  const outputEl = splitPane.querySelector(".room-output-pane")!;
+  const outputEl = splitPane.querySelector(".room-output-pane")! as HTMLElement;
   const outputPane = new OutputPane(doc);
   outputPane.mount(outputEl);
 
@@ -451,7 +450,7 @@ function mountSpectatorRoom(doc: FortressRoomDoc, container: HTMLElement): () =>
     window.dispatchEvent(new PopStateEvent("popstate"));
   });
 
-  cleanup = () => {
+  const cleanup = () => {
     removePresence(doc);
     if (presenceInterval) clearInterval(presenceInterval);
     cleanupRoomState(getRoomId(doc));
@@ -524,12 +523,12 @@ export async function mountRoom(
     chatView.mount(chatEl);
     splitPane.querySelector(".room-control-pane")!.appendChild(chatEl);
   } else {
-    const controlEl = splitPane.querySelector(".room-control-pane")!;
+    const controlEl = splitPane.querySelector(".room-control-pane")! as HTMLElement;
     controlPane = new ControlPane(doc, demoMode);
     controlPane.mount(controlEl);
   }
 
-  const outputEl = splitPane.querySelector(".room-output-pane")!;
+  const outputEl = splitPane.querySelector(".room-output-pane")! as HTMLElement;
   const outputPane = new OutputPane(doc);
   outputPane.mount(outputEl);
 
@@ -553,7 +552,7 @@ export async function mountRoom(
     window.dispatchEvent(new PopStateEvent("popstate"));
   });
 
-  cleanup = () => {
+  const cleanup = () => {
     void bridge.requestTeardown();
     controlPane?.destroy();
     outputPane.destroy();

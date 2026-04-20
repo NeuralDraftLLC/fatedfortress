@@ -263,13 +263,13 @@ export function fromBase58(encoded: string): Uint8Array {
   }
   let hex = num.toString(16);
   if (hex.length % 2 !== 0) hex = "0" + hex;
-  const bytes = new Uint8Array(hex.length / 2);
+  const bytes = new Uint8Array(hex.length / 2) as Uint8Array<ArrayBuffer>;
   for (let i = 0; i < hex.length; i += 2) {
     bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
   }
   let leadingOnes = 0;
   while (encoded[leadingOnes] === "1") leadingOnes++;
-  const result = new Uint8Array(leadingOnes + bytes.length);
+  const result = new Uint8Array(leadingOnes + bytes.length) as Uint8Array<ArrayBuffer>;
   result.set(bytes, leadingOnes);
   return result;
 }
@@ -387,13 +387,18 @@ export async function verifyBudgetToken(
 
   const pubKey = await crypto.subtle.importKey(
     "raw",
-    pubKeyBytes,
+    pubKeyBytes.buffer as ArrayBuffer,
     { name: "Ed25519" },
     false,
     ["verify"]
   );
 
-  const valid = await crypto.subtle.verify("Ed25519", pubKey, sigBytes, message);
+  const valid = await crypto.subtle.verify(
+    "Ed25519",
+    pubKey,
+    sigBytes.buffer as ArrayBuffer,
+    message.buffer as ArrayBuffer
+  );
   if (!valid) {
     throw new FFError("BudgetTokenForged", "Signature verification failed");
   }

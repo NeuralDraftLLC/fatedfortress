@@ -10,7 +10,7 @@
  * Sharding: client follows { type: "REDIRECT", shardUrl } once after connect before attaching handlers.
  */
 
-import { type RoomId } from "@fatedfortress/protocol";
+import { type RoomId, type PublicKeyBase58 } from "@fatedfortress/protocol";
 import * as Y from "yjs";
 import {
   type FortressRoomDoc,
@@ -45,7 +45,7 @@ export function upsertPresence(doc: FortressRoomDoc, presence: Partial<PresenceE
   if (!myPubkey) return;
   const existing = doc.presence.get(myPubkey);
   doc.presence.set(myPubkey, {
-    pubkey: myPubkey,
+    pubkey: myPubkey as PublicKeyBase58,
     name: presence.name ?? existing?.name ?? getMyDisplayName(),
     cursorOffset: presence.cursorOffset ?? null,
     lastSeenAt: Date.now(),

@@ -44,7 +44,7 @@ export interface QuotaState {
 }
 
 export interface MintTokenOptions {
-  roomId: string;
+  roomId: RoomId;
   participantPubkey: PublicKeyBase58;
   hostPubkey: PublicKeyBase58;
   hostSigningKey: CryptoKey;

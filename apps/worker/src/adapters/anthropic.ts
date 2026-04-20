@@ -18,7 +18,9 @@ export default {
       body: JSON.stringify({
         model: opts.model,
         messages: [
-          ...(opts.systemPrompt ? { role: "user", content: `[System] ${opts.systemPrompt}` } : { role: "user", content: "" }),
+          ...(opts.systemPrompt
+            ? [{ role: "user" as const, content: `[System] ${opts.systemPrompt}` }]
+            : [{ role: "user" as const, content: "" }]),
           { role: "user", content: opts.prompt },
         ],
         stream: true,

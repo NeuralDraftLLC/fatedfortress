@@ -44,7 +44,8 @@ function getCurrentPage(): PageName {
 
 // ── Page mount functions ───────────────────────────────────────────────────────
 
-const router: Record<string, () => Promise<(() => void) | void>> = {
+type PageCleanup = (() => void) | void;
+const router: Record<string, () => Promise<PageCleanup>> = {
   table: async () => {
     setCurrentPage("table");
     const { mountTable } = await import("./pages/table.js");
@@ -105,7 +106,11 @@ async function route(path: string) {
 
   try {
     const unmount = await mountFn();
-    currentUnmount = unmount ?? null;
+    if (typeof unmount === "function") {
+      currentUnmount = unmount;
+    } else {
+      currentUnmount = null;
+    }
   } catch (err) {
     console.error(`[main] Failed to mount page "${page}":`, err);
   }

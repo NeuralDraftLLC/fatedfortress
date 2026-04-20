@@ -25,9 +25,12 @@
  */
 
 export interface Env {
-  RELAY: DurableObjectNamespace<RelayDO>;
-  RELAY_REGISTRY: DurableObjectNamespace<RelayRegistryDO>;
+  RELAY: DurableObjectNamespace;
+  RELAY_REGISTRY: DurableObjectNamespace;
 }
+
+/** Stable relay URL used internally for shard registration and forward calls. */
+const RELAY_STUB = "http://relay-internal";
 
 /** Parent DO stops accepting new peers here; they receive REDIRECT (soft cap ~80 × (1 + MAX_SHARDS) peers/room). */
 const SHARD_THRESHOLD = 80;
@@ -304,6 +307,18 @@ export class RelayDO implements DurableObject {
   private registeredRoom = false;
   private heartbeatTimer: number | null = null;
 
+  constructor(
+    private readonly ctx: DurableObjectState,
+    private readonly env: Env,
+  ) {}
+
+  /** Fired when the alarm set by setAlarm() triggers. Reschedules next heartbeat. */
+  async alarm(): Promise<void> {
+    if (this.roomId !== null) {
+      await this.sendHeartbeat(this.roomId);
+    }
+  }
+
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
 
@@ -336,7 +351,7 @@ export class RelayDO implements DurableObject {
         return new Response("bad fields", { status: 400 });
       }
       const target = this.peers.get(targetPeerId);
-      if (target && target.readyState === WebSocket.OPEN) {
+      if (target && target.readyState === WebSocket.READY_STATE_OPEN) {
         target.send(JSON.stringify(payload));
         return new Response("delivered");
       }
@@ -456,7 +471,7 @@ export class RelayDO implements DurableObject {
           const payload = JSON.stringify({ ...msg, fromPeerId: peerId });
           for (const [pid, sock] of this.peers) {
             if (pid === peerId) continue;
-            if (sock.readyState === WebSocket.OPEN) sock.send(payload);
+            if (sock.readyState === WebSocket.READY_STATE_OPEN) sock.send(payload);
           }
         }
         return;
@@ -535,10 +550,9 @@ export class RelayDO implements DurableObject {
 
   private startHeartbeat(roomId: string): void {
     if (this.heartbeatTimer !== null) return;
-    this.heartbeatTimer = this.ctx.storage.setTimeout(
-      () => this.sendHeartbeat(roomId),
-      30_000
-    ) as unknown as number;
+    // setAlarm takes an absolute timestamp; schedule first beat in 30s
+    this.heartbeatTimer = Date.now() + 30_000;
+    void this.ctx.storage.setAlarm(this.heartbeatTimer);
   }
 
   private async sendHeartbeat(roomId: string): Promise<void> {
@@ -556,16 +570,15 @@ export class RelayDO implements DurableObject {
         fuelFraction: 1.0,
       }),
     }).catch(() => {/* ignore */});
-    this.heartbeatTimer = this.ctx.storage.setTimeout(
-      () => this.sendHeartbeat(roomId),
-      30_000
-    ) as unknown as number;
+    // Reschedule next heartbeat
+    this.heartbeatTimer = Date.now() + 30_000;
+    void this.ctx.storage.setAlarm(this.heartbeatTimer);
   }
 
   private async cleanupRoom(roomId: string): Promise<void> {
     if (this.shardIndex !== null) return;
     if (this.heartbeatTimer !== null) {
-      this.ctx.storage.clearTimeout(this.heartbeatTimer as unknown as ReturnType<typeof setTimeout>);
+      void this.ctx.storage.deleteAlarm();
       this.heartbeatTimer = null;
     }
     const stub = this.env.RELAY_REGISTRY.get(
@@ -587,7 +600,7 @@ export class RelayDO implements DurableObject {
     msg: Record<string, unknown>
   ): Promise<void> {
     const target = this.peers.get(targetPeerId);
-    if (target && target.readyState === WebSocket.OPEN) {
+    if (target && target.readyState === WebSocket.READY_STATE_OPEN) {
       target.send(JSON.stringify({ ...msg, fromPeerId }));
       return;
     }
@@ -632,7 +645,7 @@ export class RelayDO implements DurableObject {
     msg: Record<string, unknown>
   ): Promise<boolean> {
     const target = this.peers.get(targetPeerId);
-    if (target && target.readyState === WebSocket.OPEN) {
+    if (target && target.readyState === WebSocket.READY_STATE_OPEN) {
       target.send(JSON.stringify({ ...msg, fromPeerId }));
       return true;
     }

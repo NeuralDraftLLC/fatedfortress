@@ -19,7 +19,7 @@ import {
 import { getSigningKey } from "./keystore.js";
 
 export async function mintToken(
-  roomId: string,
+  roomId: RoomId,
   participantPubkey: PublicKeyBase58,
   tokensToGrant: number
 ): Promise<BudgetToken | null> {
