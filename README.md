@@ -2,10 +2,11 @@
 
 > **The instant AI generation marketplace. Enter your keys. Join a room. Ship live in seconds.**
 
-[![CI](https://img.shields.io/github/actions/workflow/status/Ghostmonday/fatedfortress-v2/ci.yml?style=flat-square&branch=master)](https://github.com/Ghostmonday/fatedfortress-v2/actions)
+[![CI](https://img.shields.io/github/actions/workflow/status/Ghostmonday/fatedfortress-v2/ci.yml?style=flat-square&branch=main)](https://github.com/Ghostmonday/fatedfortress-v2/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-black?style=flat-square)](LICENSE)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.4-black?style=flat-square&logo=typescript)](https://www.typescriptlang.org/)
 [![Y.js](https://img.shields.io/badge/Y.js-CRDT-black?style=flat-square&logo=yjs)](https://yjs.dev)
+[![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-black?style=flat-square&logo=cloudflare)](https://workers.cloudflare.com/)
 
 ---
 
@@ -24,8 +25,9 @@ Every team pays for its own keys. Rate limits go unused. Outputs live in chat hi
 A single URL where anyone enters their API key, drops into a live room, and ships real output to a real live URL — in under ten seconds.
 
 - **Zero setup.** No account. No IDE. No build step.
-- **Provably BYOK.** Your keys never leave your browser. The Fortress Worker is a sandboxed iframe that calls providers directly. We publish the worker hash. You can verify it.
-- **Live rooms.** Real-time P2P sync via Y.js + WebRTC. Everyone in the room sees output stream as it happens.
+- **Provably BYOK.** Your keys never leave your browser. The Fortress Worker is a sandboxed iframe that calls providers directly. Keys are encrypted at rest. The worker hash is published and verifiable.
+- **Live rooms.** Real-time CRDT sync via Y.js + WebRTC through a Cloudflare Durable Object relay. Everyone in the room watches output stream as it happens.
+- **Spectate mode.** Watch any public room instantly — no key needed, no signaling traffic burned, no payment required.
 - **Every output becomes a URL.** One click publishes to here.now. Share it, embed it, gate it with Tempo stablecoin.
 - **Earn from your keys.** Host a paid room. Contributors pool their rate limits. The fork graph makes great work discoverable.
 
@@ -36,7 +38,7 @@ A single URL where anyone enters their API key, drops into a live room, and ship
 ```
 HOST creates room  →  ROOM is a URL (no account needed)
     ↓
-PARTICIPANTS join  →  P2P CRDT sync (no server state)
+PARTICIPANTS join (or spectate)  →  P2P CRDT sync (no server state)
     ↓
 KEYS validated in sandboxed Fortress Worker  →  provably never exfiltrated
     ↓
@@ -53,32 +55,60 @@ PAID ROOM?  →  Tempo stablecoin  →  80% to host, 20% to FF
 
 ## Key Features
 
-### Fortress Protocol (BYOK Guarantee)
-API keys live in a sandboxed Web Worker that has network access only to allow-listed AI provider origins. Keys are encrypted at rest with Argon2id + AES-256-GCM. The worker's SHA-256 hash is published and verifiable via SRI. **A FatedFortress server literally cannot receive a key.**
+### Command Palette (`/`)
 
-### P2P Real-Time Sync
-Rooms are CRDT documents synced over WebRTC via a stateless Cloudflare Durable Object relay. No database. No server-side state. Sub-50ms sync. Works offline after first connect. At 10,000 concurrent rooms, infra cost is ~$40/month.
-
-### Generation Receipts & Fork Graph
-Every generation produces a signed, hash-chained receipt stored permanently on here.now. Fork any receipt into a new room with one click. The fork graph is the public record of how ideas evolved — and the viral loop that makes FatedFortress share itself.
-
-### Provider Liquidity Pool
-Hosts contribute their API keys with per-participant token quotas enforced by signed Ed25519 budget tokens. Multiple hosts co-host a room, pooling rate limits. A live fuel gauge shows remaining quota per participant. Rate limits become a social good.
-
-### The Palette (`/`)
+A trie-accelerated command palette with ghost text completion. Type `/sp` and Tab accepts the longest common prefix — no mouse, no menus.
 
 ```
 /  create animation room free
 /  join rm_abc123
+/  spectate rm_abc123
 /  switch claude-4-opus
 /  publish
 /  pay 5
 /  fork rcp_xyz
 /  set system prompt: you are a 2D game artist
+/  delegate @alice 2000
 /  ?
 ```
 
-One keyboard shortcut routes to everything. No menus. No settings pages. Just a command line, the way Craigslist would have shipped it.
+Ghost text previews the full command before you commit. Trie is rebuilt on every open with context-aware vocabulary — room-scoped commands (`spectate`, `join`, `publish`) only appear when you're actually in a room.
+
+### P2P Real-Time Sync
+
+Rooms are Y.js CRDT documents. Changes merge deterministically regardless of network reordering or concurrent edits. The relay is a thin Cloudflare Durable Object fan-out layer — it never holds room state. At 80+ peers, it automatically shards to up to 8 Durable Objects, routing messages between them via an O(1) peer-to-shard map.
+
+- **OPFS caching** — room state is snapshotted to the Origin Private File System every 30 seconds and on disconnect. Reconnecting to a room restores the last state instantly, even if the relay hasn't synced yet.
+- **Spectator mode** — `?spectator=1` tells the relay to skip WebRTC signaling fan-out entirely. Spectators receive CRDT sync updates but never initiate peer connections, burning zero budget.
+- **Sub-50ms sync** — no database round-trip, no server-side state to maintain.
+
+### Fortress Protocol (BYOK Guarantee)
+
+API keys live in a sandboxed Web Worker iframe with network access allow-listed per provider. Keys are encrypted at rest with Argon2id + AES-256-GCM. The worker's SHA-256 hash is recorded at build time and verifiable via SRI. **A FatedFortress server literally cannot receive a key.**
+
+```
+Browser (SPA)
+  ├── Fortress Worker iframe (keys.fatedfortress.com)
+  │     ├── keystore.ts    — Argon2id + AES-256-GCM, Ed25519 signing
+  │     ├── budget.ts      — SubBudgetToken minting, per-participant quota, fuel gauge
+  │     ├── liquidity.ts   — host-side liquidity pool API
+  │     ├── generate.ts    — adapter orchestration + stream cache
+  │     └── adapters/      — openai · anthropic · google · minimax · groq · openrouter
+  │
+  ├── Y.js CRDT doc (room state)
+  │
+  └── Cloudflare Durable Object relay (stateless fan-out + sharding)
+        ├── Parent DO (room-scoped) — peer registry, signaling, shard routing
+        └── Shard DOs (overflow, up to 8) — isolated peer maps, cross-shard forward
+```
+
+### Provider Liquidity Pool
+
+Hosts contribute their API keys with per-participant token quotas enforced by signed Ed25519 SubBudgetTokens. Multiple hosts co-host a room, pooling rate limits. A live fuel gauge shows remaining quota per participant. **Rate limits become a social good.**
+
+### Generation Receipts & Fork Graph
+
+Every generation produces a signed, hash-chained receipt stored permanently on here.now. Fork any receipt into a new room with one click. The fork graph is the public record of how ideas evolved — and the viral loop that makes FatedFortress share itself.
 
 ### Brutalist Terminal Aesthetic
 
@@ -87,29 +117,28 @@ One keyboard shortcut routes to everything. No menus. No settings pages. Just a 
 │  FATEDFORTRESS                        [CREATE ROOM]  [/]     │
 ├──────────────────────────────────────────────────────────────┤
 │                                                              │
-│  $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $   │
+│  $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $   │
 │  $                                                       $  │
 │  $   ENTER YOUR KEYS. FORGE YOUR FATE.                   $  │
 │  $   SHIP LIVE IN SECONDS.                               $  │
 │  $                                                       $  │
-│  $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $   │
+│  $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $ $   │
 │                                                              │
 ├──────────────────────────────────────────────────────────────┤
-│  FILTER: [ALL]  [GAMES]  [CODE]  [ANIMATION]  [PAID]      │
+│  [ALL]  [GAMES]  [CODE]  [ANIMATION]  [WRITING]  [PAID]   │
 ├──────────────────────────────────────────────────────────────┤
-│  { }  Minimax Animation Sprint          @3  ████░░  [JOIN]  │
-│  > Sprint through T2V prompts with the team. Fast output.   │
-│  ─────────────────────────────────────────────────────────── │
-│  { }  Claude Code Review              @5  FREE  [JOIN]      │
-│  > Live code review with Claude 4 Opus. Paste, critique.   │
-│  ─────────────────────────────────────────────────────────── │
-│  $   Game Jam Helper                    @2  $5  [JOIN]       │
-│  > Paid room. Host has Groq + Claude keys. Fuel available.  │
-│  ─────────────────────────────────────────────────────────── │
+│  { }  Minimax Animation Sprint        @3  ████░░  [JOIN]    │
+│  > Sprint through T2V prompts with the team. Fast output.     │
+│  ─────────────────────────────────────────────────────────   │
+│  { }  Claude Code Review              @5  FREE  [SPECTATE]   │
+│  > Live code review with Claude 4 Opus. Paste, critique.     │
+│  ─────────────────────────────────────────────────────────   │
+│  $   Game Jam Helper                  @2  $5  [JOIN]         │
+│  > Paid room. Host has Groq + Claude keys. Fuel available. │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-Black on white. JetBrains Mono. One font everywhere. No color. No exceptions.
+Black on white. Geist Mono. One font everywhere. No color. No exceptions.
 
 ---
 
@@ -118,9 +147,9 @@ Black on white. JetBrains Mono. One font everywhere. No color. No exceptions.
 ### As a Participant (no keys needed)
 
 1. Open [fatedfortress.com](https://fatedfortress.com)
-2. Browse live rooms — click `JOIN`
-3. Enter your own API key (optional) or use the room's shared key
-4. Type a prompt. Watch output stream live.
+2. Click `SPECTATE` on any public room
+3. Watch output stream live — no account, no key, no cost
+4. To generate: enter your own API key (optional)
 5. Click `PUBLISH >>>` — get a permanent URL
 
 ### As a Host
@@ -137,57 +166,62 @@ Black on white. JetBrains Mono. One font everywhere. No color. No exceptions.
 git clone https://github.com/Ghostmonday/fatedfortress-v2.git
 cd fatedfortress-v2
 
+# Install dependencies
+npm install
+
 # Build the web SPA (outputs to apps/web/dist/)
-npx vite build apps/web
-
-# Build the Fortress Worker (IIFE output for sandboxed iframe)
-npx vite build apps/worker
-
-# Compute and record the worker hash (required before first deploy)
-node scripts/verify-worker-hash.mjs --build
+npm run build --workspace=apps/web
 
 # Start web dev server
-npx vite apps/web
+npm run dev --workspace=apps/web
+# → http://localhost:5173
 
-# Run security proof (requires Playwright)
-node scripts/verify-key-never-exfiltrates.mjs --url http://localhost:5173
+# Deploy the relay worker (Cloudflare Wrangler)
+cd apps/relay && wrangler deploy
 ```
 
-### Deploying
+### Environment Variables
 
 ```bash
-# Publish to here.now
-HERENOW_TOKEN=your_token node scripts/publish.mjs
-# optional: append --staging for staging log label only
+# apps/web/.env.development
+VITE_RELAY_ORIGIN=ws://localhost:8787
+VITE_WORKER_ORIGIN=http://localhost:8788
+VITE_FF_ORIGIN=http://localhost:5173
+VITE_HERENOW_CLIENT_ID=your_client_id
+VITE_PLATFORM_WALLET=your_wallet_address
+
+# apps/web/.env.production
+VITE_RELAY_ORIGIN=wss://relay.fatedfortress.com
+VITE_WORKER_ORIGIN=https://keys.fatedfortress.com
+VITE_FF_ORIGIN=https://fatedfortress.com
 ```
 
 ---
 
 ## Architecture
 
-```
-Browser (FatedFortress SPA — here.now)
-  │
-  ├── Fortress Worker (sandboxed iframe — keys.fatedfortress.com)
-  │     ├── keystore.ts     — Argon2id + AES-256-GCM, Ed25519 signing
-  │     ├── budget.ts       — token minting, hourly quota, fuel gauge
-  │     ├── liquidity.ts    — host-side liquidity pool API
-  │     ├── generate.ts     — provider adapter orchestration
-  │     └── adapters/       — openai · anthropic · google · minimax · groq · openrouter
-  │
-  ├── Y.js CRDT doc (room state)
-  │
-  └── y-webrtc (P2P sync)
-        │
-        └── Cloudflare Durable Object (stateless relay — ~50 LOC)
+### Relay DO Sharding
 
-here.now
-  ├── Static SPA hosting
-  ├── here.now publish (receipts, room snapshots)
-  └── Edge payment gate (Tempo stablecoin)
+The Durable Object is room-scoped (`env.RELAY.idFromName(roomId)`). When the parent DO exceeds 80 connected peers, new connections receive a `{ type: "REDIRECT", shardUrl }` message and reconnect to a shard DO (`roomId-shard-0` through `roomId-shard-7`). Shards notify the parent of their peer registry via `POST /internal/register-shard-peer`, enabling O(1) cross-shard message routing via `POST /_relay/forward`. Maximum room capacity: ~80 × 9 = 720 peers.
 
-No primary database. here.now is the filesystem. CRDT is the state.
+### Y.js Document Schema
+
 ```
+FortressRoomDoc
+  ├── meta:          Y.Map        — room metadata, access, price, system prompt
+  ├── participants:  Y.Map        — keyed by pubkey (Phase 5 L12 migration from Y.Array)
+  ├── output:        Y.Text       — character-level streaming output
+  ├── receiptIds:    Y.Array      — hash-chained receipt IDs
+  ├── templates:     Y.Array      — saved prompt templates
+  ├── presence:      Y.Map        — peer cursor + online state
+  └── spectatorChat: Y.Array      — spectator chat messages
+```
+
+Participants moved from `Y.Array` to `Y.Map<pubkey, ParticipantEntry>` in Phase 5 — eliminating the CRDT delete/insert race condition under concurrent `updateParticipant` calls.
+
+### Stream Cache (Mid-Session Resume)
+
+On host drop mid-generation, the `handoff.ts` stream cache captures chunks as they arrive. The cache key is `SHA-256(model | systemPrompt | prompt)`. If the host rejoins within 10 minutes, the accumulated text is prepended to the generation input with a `--- resume ---` separator, so the new host continues from where the stream was cut.
 
 ---
 
@@ -195,25 +229,14 @@ No primary database. here.now is the filesystem. CRDT is the state.
 
 | Property | Mechanism |
 |---|---|
-| Keys never leave the browser | Sandboxed worker iframe, CSP allow-list, `getRawKey()` has no postMessage type |
+| Keys never leave the browser | Sandboxed worker iframe, CSP allow-list per provider origin, `getRawKey()` has no `postMessage` export |
 | Keys never at rest in plaintext | Argon2id + AES-256-GCM, passphrase-derived wrapping key |
-| Worker is verifiable | SHA-256 hash over minified bundle, published + SRI |
+| Worker is verifiable | SHA-256 hash over minified bundle, recorded at build time + SRI |
 | Budget tokens are unforgeable | Ed25519 signature by host's non-extractable key |
 | Receipts are tamper-evident | SHA-256 output hash + Ed25519 signature, hash-chained |
-| No key exfiltration | Automated Playwright proof: sentinel key + all encoding variants checked on every network request and postMessage |
-
-See `apps/worker/src/keystore.ts`, `apps/worker/src/budget.ts`, and the inline security comments throughout the codebase for the full security model.
-
----
-
-## Roadmap
-
-| Phase | What's Next |
-|---|---|
-| **v1.1** | P2P room sync via y-webrtc, presence cursors |
-| **v1.5** | Liquidity pool, Tempo paid rooms, fuel gauge |
-| **v2** | LiveKit voice chat, Liveblocks shared canvas overlays, template marketplace |
-| **v3** | Mobile PWA, `ff` CLI, Tauri desktop app |
+| Participant updates are CRDT-safe | `Y.Map` keyed by pubkey — no delete/insert races |
+| No localStorage crashes in embeds | `safeStorage` wrapper probes once; falls back to in-memory Map |
+| No base64 stack overflow on large docs | Chunked encoding/decoding in 8,192-byte blocks |
 
 ---
 
@@ -230,11 +253,31 @@ See `apps/worker/src/keystore.ts`, `apps/worker/src/budget.ts`, and the inline s
 
 ---
 
+## Roadmap
+
+| Version | What's Next |
+|---|---|
+| **v1.1** | ✅ Shipped — P2P sync, presence cursors, liquidity pool, fuel gauge, spectate mode |
+| **v1.5** | ✅ Shipped — Y.Map participants, OPFS caching, command trie ghost text, stream resume |
+| **v2** | here.now native integration, LiveKit voice, shared canvas overlays, template marketplace |
+| **v3** | Mobile PWA, `ff` CLI, Tauri desktop app |
+
+---
+
 ## Contributing
 
-FatedFortress is open to contributors. The codebase is designed for modular, parallel development — each adapter, component, and protocol piece is self-contained with its own test scaffold.
+The codebase is designed for modular, parallel development. Each adapter, component, and protocol piece is self-contained.
 
-Read the `apps/web`, `apps/worker`, and `apps/relay` directories for the development protocol and coding standards before submitting PRs.
+```
+apps/
+  web/       — Vite + React SPA (here.now hosted)
+  worker/     — Sandboxed iframe (keys.* origin)
+  relay/      — Cloudflare Durable Object (stateless fan-out + sharding)
+packages/
+  protocol/   — Shared types, crypto helpers, budget token schemas
+```
+
+Read the inline comments in `ydoc.ts`, `budget.ts`, and `relay/src/index.ts` for the full data model and protocol invariants before submitting PRs.
 
 ---
 
