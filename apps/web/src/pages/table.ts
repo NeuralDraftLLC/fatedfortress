@@ -1,5 +1,6 @@
 // apps/web/src/pages/table.ts
 import type { PaletteIntent } from "@fatedfortress/protocol";
+import { safeStorage, KEY_HERENOW_TOKEN, KEY_ROOMS_CACHE } from "../util/storage.js";
 import { RoomCard } from "../components/RoomCard.js";
 
 interface RoomEntry {
@@ -73,10 +74,9 @@ export function mountTable(container: HTMLElement): () => void {
 }
 
 async function loadRooms(): Promise<void> {
-  // Load rooms from here.now if a token is available,
-  // otherwise fall back to localStorage cache or empty list
+  // Token + cache paths use safeStorage — embed-safe (Phase 5); keys unchanged for upgrades
   try {
-    const token = localStorage.getItem("herenow_token");
+    const token = safeStorage.getItem(KEY_HERENOW_TOKEN);
     if (!token) {
       _rooms = getCachedRooms();
       return;
@@ -106,7 +106,7 @@ async function loadRooms(): Promise<void> {
 
 function getCachedRooms(): RoomEntry[] {
   try {
-    const cached = localStorage.getItem("ff_rooms_cache");
+    const cached = safeStorage.getItem(KEY_ROOMS_CACHE);
     return cached ? JSON.parse(cached) : getDefaultRooms();
   } catch {
     return getDefaultRooms();
@@ -115,7 +115,7 @@ function getCachedRooms(): RoomEntry[] {
 
 function cacheRooms(rooms: RoomEntry[]): void {
   try {
-    localStorage.setItem("ff_rooms_cache", JSON.stringify(rooms));
+    safeStorage.setItem(KEY_ROOMS_CACHE, JSON.stringify(rooms));
   } catch {}
 }
 

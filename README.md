@@ -157,7 +157,8 @@ node scripts/verify-key-never-exfiltrates.mjs --url http://localhost:5173
 
 ```bash
 # Publish to here.now
-HERENOW_TOKEN=your_token node scripts/publish.mjs --env production
+HERENOW_TOKEN=your_token node scripts/publish.mjs
+# optional: append --staging for staging log label only
 ```
 
 ---

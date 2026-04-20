@@ -2,17 +2,18 @@
 /**
  * scripts/publish.mjs — here.now deployment script.
  *
- * Usage:
- *   node scripts/publish.mjs [--env production|staging]
+ * FIXES APPLIED:
+ *   B4: Refactored createZip() into two clean passes:
+ *       Pass 1 — write all local file entries, record per-file offsets and CRC values.
+ *       Pass 2 — write central directory using the offsets recorded in Pass 1.
+ *       Previously, the CD loop referenced `header` from the outer scope (wrong file's
+ *       header) and re-accumulated cdOffset on top of already-accumulated values,
+ *       producing incorrect relative offsets for every file after the first.
  *
- * Steps:
- *   1. Build web app: vite build (apps/web)
- *   2. Zip dist/ contents (stored, no compression — works in any Node.js)
- *   3. POST to here.now publish API
- *   4. Log the permanent URL
+ *   Additional: makeCrc32Table() hoisted to module scope (was called per-file).
+ *               Each file's data is read once and reused across both passes.
  *
- * Environment:
- *   HERENOW_TOKEN  — here.now API token
+ * Usage: HERENOW_TOKEN=… node scripts/publish.mjs [--staging]
  */
 
 import { join, dirname } from "path";
@@ -25,10 +26,14 @@ const ROOT = join(__dirname, "..");
 const HERE_NOW_API = "https://api.here.now/v1";
 const HERE_NOW_TOKEN = process.env.HERENOW_TOKEN ?? "";
 
+// ✅ FIX B4: Hoisted to module scope — built once, reused for every file's CRC.
+const CRC32_TABLE = makeCrc32Table();
+
 async function build() {
   console.log("[publish] Building web app...");
   const { execSync } = await import("child_process");
   try {
+    // Produces apps/web/dist — the only input to createZip (static deploy bundle).
     execSync("npx vite build", {
       cwd: join(ROOT, "apps/web"),
       stdio: "inherit",
@@ -56,16 +61,6 @@ function collectFiles(dir, prefix = "") {
   return files;
 }
 
-/** CRC-32 using the standard IEEE polynomial */
-function crc32(data) {
-  let crc = 0xffffffff;
-  const table = makeCrc32Table();
-  for (let i = 0; i < data.length; i++) {
-    crc = table[(crc ^ data[i]) & 0xff] ^ (crc >>> 8);
-  }
-  return (crc ^ 0xffffffff) >>> 0;
-}
-
 function makeCrc32Table() {
   const table = new Uint32Array(256);
   for (let i = 0; i < 256; i++) {
@@ -78,85 +73,117 @@ function makeCrc32Table() {
   return table;
 }
 
-/** Creates a valid ZIP file (stored, no compression) as a Buffer */
+function crc32(data) {
+  let crc = 0xffffffff;
+  for (let i = 0; i < data.length; i++) {
+    crc = CRC32_TABLE[(crc ^ data[i]) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+/**
+ * ✅ FIX B4: Rewritten with two clean passes.
+ *
+ * Pass 1: For each file, build the local file header + data, push to `parts`,
+ *         and record the file's { localHeaderOffset, nameBytes, data, crc }
+ *         for use in Pass 2.
+ *
+ * Pass 2: Build central directory entries using the recorded offsets from Pass 1.
+ *         `cdOffset` is set once to the total byte length after Pass 1 —
+ *         it is never mutated inside the CD loop.
+ */
 function createZip(distPath) {
   console.log("[publish] Creating ZIP archive...");
   const files = collectFiles(distPath);
   console.log(`[publish] Found ${files.length} files`);
 
   const parts = [];
-  let cdOffset = 0;
+  // Metadata recorded during Pass 1 for use in Pass 2
+  const fileRecords = [];
+  let currentOffset = 0;
 
-  // Local file headers + data
+  // ── Pass 1: Local file headers + data ──────────────────────────────────────
   for (const file of files) {
+    // ✅ FIX B4: Each file's data is read exactly once and cached in fileRecords.
     const data = readFileSync(file.fullPath);
     const nameBytes = Buffer.from(file.path, "utf8");
     const nameLen = nameBytes.length;
+    const fileCrc = crc32(data);
 
-    const header = Buffer.alloc(30 + nameLen);
-    header.writeUInt32LE(0x04034b50, 0);     // signature
-    header.writeUInt16LE(20, 4);              // version needed (2.0)
-    header.writeUInt16LE(0, 6);               // general flag
-    header.writeUInt16LE(0, 8);               // compression (stored)
-    header.writeUInt16LE(0, 10);              // mod time
-    header.writeUInt16LE(0, 12);              // mod date
-    header.writeUInt32LE(crc32(data), 14);   // CRC-32
-    header.writeUInt32LE(data.length, 18);   // compressed size
-    header.writeUInt32LE(data.length, 22);   // uncompressed size
-    header.writeUInt16LE(nameLen, 26);       // name length
-    header.writeUInt16LE(0, 28);              // extra field length
-    nameBytes.copy(header, 30);             // file name
+    const localHeader = Buffer.alloc(30 + nameLen);
+    localHeader.writeUInt32LE(0x04034b50, 0);   // local file header signature
+    localHeader.writeUInt16LE(20, 4);            // version needed (2.0)
+    localHeader.writeUInt16LE(0, 6);             // general purpose bit flag
+    localHeader.writeUInt16LE(0, 8);             // compression method (stored)
+    localHeader.writeUInt16LE(0, 10);            // last mod time
+    localHeader.writeUInt16LE(0, 12);            // last mod date
+    localHeader.writeUInt32LE(fileCrc, 14);      // CRC-32
+    localHeader.writeUInt32LE(data.length, 18);  // compressed size
+    localHeader.writeUInt32LE(data.length, 22);  // uncompressed size
+    localHeader.writeUInt16LE(nameLen, 26);      // file name length
+    localHeader.writeUInt16LE(0, 28);            // extra field length
+    nameBytes.copy(localHeader, 30);
 
-    parts.push(header, data);
-    cdOffset += header.length + data.length;
+    // Record the byte offset of this local file header BEFORE pushing
+    const localHeaderOffset = currentOffset;
+
+    parts.push(localHeader, data);
+    currentOffset += localHeader.length + data.length;
+
+    // Save everything needed for Pass 2 — no second readFileSync call needed
+    fileRecords.push({ nameBytes, data, fileCrc, localHeaderOffset });
   }
 
-  // Central directory
+  // ── Pass 2: Central directory ───────────────────────────────────────────────
+  // ✅ FIX B4: cdStartOffset is set once from accumulated Pass 1 output.
+  //    It is never modified inside this loop. Each CD entry reads its
+  //    localHeaderOffset from the record captured in Pass 1.
+  const cdStartOffset = currentOffset;
   const cdEntries = [];
-  for (const file of files) {
-    const data = readFileSync(file.fullPath);
-    const nameBytes = Buffer.from(file.path, "utf8");
+
+  for (const record of fileRecords) {
+    const { nameBytes, data, fileCrc, localHeaderOffset } = record;
     const nameLen = nameBytes.length;
 
-    const entry = Buffer.alloc(46 + nameLen);
-    entry.writeUInt32LE(0x02014b50, 0);     // signature
-    entry.writeUInt16LE(20, 4);              // version made by
-    entry.writeUInt16LE(20, 6);              // version needed
-    entry.writeUInt16LE(0, 8);               // general flag
-    entry.writeUInt16LE(0, 10);              // compression
-    entry.writeUInt16LE(0, 12);             // mod time
-    entry.writeUInt16LE(0, 14);             // mod date
-    entry.writeUInt32LE(crc32(data), 16);  // CRC-32
-    entry.writeUInt32LE(data.length, 20);  // compressed size
-    entry.writeUInt32LE(data.length, 24);  // uncompressed size
-    entry.writeUInt16LE(nameLen, 28);      // name length
-    entry.writeUInt16LE(0, 30);            // extra field length
-    entry.writeUInt16LE(0, 32);            // comment length
-    entry.writeUInt16LE(0, 34);            // disk number start
-    entry.writeUInt16LE(0, 36);            // internal attrs
-    entry.writeUInt32LE(0, 38);            // external attrs
-    entry.writeUInt32LE(cdOffset, 42);    // relative offset
-    nameBytes.copy(entry, 46);             // file name
+    const cdEntry = Buffer.alloc(46 + nameLen);
+    cdEntry.writeUInt32LE(0x02014b50, 0);            // central directory signature
+    cdEntry.writeUInt16LE(20, 4);                     // version made by
+    cdEntry.writeUInt16LE(20, 6);                     // version needed
+    cdEntry.writeUInt16LE(0, 8);                      // general purpose bit flag
+    cdEntry.writeUInt16LE(0, 10);                     // compression method (stored)
+    cdEntry.writeUInt16LE(0, 12);                     // last mod time
+    cdEntry.writeUInt16LE(0, 14);                     // last mod date
+    cdEntry.writeUInt32LE(fileCrc, 16);               // CRC-32
+    cdEntry.writeUInt32LE(data.length, 20);           // compressed size
+    cdEntry.writeUInt32LE(data.length, 24);           // uncompressed size
+    cdEntry.writeUInt16LE(nameLen, 28);               // file name length
+    cdEntry.writeUInt16LE(0, 30);                     // extra field length
+    cdEntry.writeUInt16LE(0, 32);                     // file comment length
+    cdEntry.writeUInt16LE(0, 34);                     // disk number start
+    cdEntry.writeUInt16LE(0, 36);                     // internal file attributes
+    cdEntry.writeUInt32LE(0, 38);                     // external file attributes
+    cdEntry.writeUInt32LE(localHeaderOffset, 42);     // ✅ offset of local file header
+    nameBytes.copy(cdEntry, 46);
 
-    cdEntries.push(entry);
-    cdOffset += header.length + data.length;
+    cdEntries.push(cdEntry);
   }
 
   const cdData = Buffer.concat(cdEntries);
   const cdSize = cdData.length;
-  const cdStart = parts.reduce((sum, p) => sum + p.length, 0);
 
-  // End of central directory
+  // EOCD links the contiguous bytes: [...localRecords..., cdData] so unzip can
+  // find CD start via cdStartOffset (PK\x05\x06 trailer per APPNOTE.TXT).
   const eocd = Buffer.alloc(22);
-  eocd.writeUInt32LE(0x06054b50, 0);     // signature
-  eocd.writeUInt16LE(0, 4);               // disk number
-  eocd.writeUInt16LE(0, 6);               // CD disk
-  eocd.writeUInt16LE(files.length, 8);     // CD entries on disk
-  eocd.writeUInt16LE(files.length, 10);    // CD entries total
-  eocd.writeUInt32LE(cdSize, 12);        // CD size
-  eocd.writeUInt32LE(cdStart, 16);       // CD offset
-  eocd.writeUInt16LE(0, 20);              // comment length
+  eocd.writeUInt32LE(0x06054b50, 0);          // end of central directory signature
+  eocd.writeUInt16LE(0, 4);                    // disk number
+  eocd.writeUInt16LE(0, 6);                    // disk with start of CD
+  eocd.writeUInt16LE(files.length, 8);         // number of CD entries on this disk
+  eocd.writeUInt16LE(files.length, 10);        // total number of CD entries
+  eocd.writeUInt32LE(cdSize, 12);             // size of central directory
+  eocd.writeUInt32LE(cdStartOffset, 16);      // offset of start of CD
+  eocd.writeUInt16LE(0, 20);                   // comment length
 
+  // Final layout: local headers+data | central directory | end-of-CD record
   const zip = Buffer.concat([...parts, cdData, eocd]);
   console.log(`[publish] ZIP: ${files.length} files, ${(zip.length / 1024).toFixed(1)} KB`);
   return zip;

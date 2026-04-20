@@ -1,3 +1,7 @@
+/**
+ * liquidity.ts — Thin façade: budget.ts + keystore signing key for router handlers.
+ * Keeps router imports stable; real logic remains in budget.ts / keystore.ts.
+ */
 import type { PublicKeyBase58, RoomId } from "@fatedfortress/protocol";
 import type { BudgetToken, SubBudgetToken } from "@fatedfortress/protocol";
 import {
@@ -68,8 +72,8 @@ export function getFuelState(roomId: string): FuelGaugeState {
   return getFuelGaugeState(roomId);
 }
 
-export function teardownLiquidity(): void {
-  teardownBudget();
+export async function teardownLiquidity(): Promise<void> {
+  await teardownBudget();
 }
 
 export function revokeSubBudgetDelegation(delegatePubkey: PublicKeyBase58): void {

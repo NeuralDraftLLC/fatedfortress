@@ -1,3 +1,9 @@
+/**
+ * Palette UI — overlay, inline ghost completion (.palette-ghost / .ghost-typed / .ghost-suffix),
+ * command list. Tokens use global --ff-* where noted.
+ * Phase 4: .ghost-suffix reads --color-text-faint when set (design tokens).
+ */
+
 .palette-overlay {
   position: fixed;
   inset: 0;
@@ -7,12 +13,17 @@
     linear-gradient(90deg, rgba(255, 255, 255, 0.08) 1px, transparent 1px);
   background-size: 16px 16px;
   background-position: 0 0;
+  backdrop-filter: blur(6px);
   display: flex;
   align-items: flex-start;
   justify-content: center;
-  padding-top: 10vh;
+  padding-top: clamp(calc(var(--ff-step, 4px) * 4), 12vh, calc(var(--ff-step, 4px) * 8));
   z-index: 9999;
   animation: palette-open 90ms ease;
+}
+
+.palette-overlay[hidden] {
+  display: none;
 }
 
 @keyframes palette-open {
@@ -24,44 +35,87 @@
   }
 }
 
-.palette {
+.palette,
+.palette-box {
   background: #fff;
   border: 2px solid #0a0a0a;
   border-radius: 0;
-  width: min(440px, 92vw);
+  width: min(640px, calc(100vw - calc(var(--ff-step, 4px) * 2)));
   max-width: 92vw;
   box-shadow: 10px 10px 0 rgba(0, 0, 0, 0.22);
   overflow: hidden;
 }
 
+/* Input stack: ghost layer behind real input (same metrics) */
+.palette-input-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  background: #fafaf8;
+  border-bottom: 2px solid #0a0a0a;
+  transition: background-color 70ms ease;
+}
+
+.palette-input-wrap:focus-within {
+  background: #fff;
+}
+
+.palette-ghost {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  padding: 8px 10px;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.35;
+  white-space: pre;
+  pointer-events: none;
+  user-select: none;
+  overflow: hidden;
+}
+
+.ghost-typed {
+  color: transparent;
+}
+
+/* Ghost prediction — faint ink (also --color-text-faint if defined on :root) */
+.ghost-suffix {
+  color: var(--color-text-faint, var(--ff-muted, #5c5c5c));
+}
+
 .palette-input {
+  position: relative;
+  z-index: 1;
   width: 100%;
   padding: 8px 10px;
   border: none;
-  border-bottom: 2px solid #0a0a0a;
   font-size: 13px;
   font-family: inherit;
   line-height: 1.35;
   outline: none;
   box-sizing: border-box;
-  background: #fafaf8;
+  background: transparent;
+  color: var(--ff-ink, #0a0a0a);
+  caret-color: var(--ff-ink, #0a0a0a);
   transition: background-color 70ms ease;
-}
-
-.palette-input:focus {
-  background: #fff;
 }
 
 .palette-input::placeholder {
   color: #888;
 }
 
-.palette-list {
-  max-height: min(280px, 42vh);
+.palette-list,
+.palette-results {
+  list-style: none;
+  margin: 0;
+  padding: calc(var(--ff-step, 4px) / 2) 0;
+  max-height: min(320px, 45vh);
   overflow-y: auto;
 }
 
-.palette-item {
+.palette-item,
+.palette-result {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -70,14 +124,30 @@
   font-size: 12px;
   line-height: 1.3;
   border-left: 3px solid transparent;
+  border-radius: 0;
   transition:
-    background-color 70ms ease,
-    border-color 70ms ease,
-    padding-left 70ms ease;
+    background-color var(--ff-tap, 70ms) ease,
+    border-color var(--ff-tap, 70ms) ease,
+    padding-left var(--ff-tap, 70ms) ease,
+    color var(--ff-tap, 70ms) ease;
 }
 
-.palette-item:hover {
+.palette-item:hover,
+.palette-result:hover,
+.palette-result:focus {
   background: #ecece8;
+  outline: none;
+}
+
+.palette-result-match {
+  color: var(--ff-ink, #0a0a0a);
+  font-weight: 600;
+}
+
+.palette-result--empty {
+  color: #888;
+  cursor: default;
+  font-style: italic;
 }
 
 .palette-item.selected {

@@ -1,5 +1,18 @@
-// apps/web/src/components/ControlPane.ts
+/**
+ * apps/web/src/components/ControlPane.ts — Room controls (model, prompts, generation, fuel).
+ *
+ * Medium #12 — Fuel event leak: `ff:fuel` must use a stable listener reference stored on
+ * the instance so `destroy()` can `removeEventListener` it. Inline arrows cannot be removed.
+ *
+ * Phase 4 — stream cache (state/handoff.ts): same model|system|user-prompt key for resume + CHUNK append.
+ */
 import { WorkerBridge } from "../net/worker-bridge.js";
+import {
+  appendStreamChunk,
+  getCachedOutput,
+  markStreamComplete,
+} from "../state/handoff.js";
+import { getMyPubkey } from "../state/identity.js";
 import {
   appendOutput,
   getTemplates,
@@ -30,6 +43,8 @@ export class ControlPane {
   private bridge = WorkerBridge.getInstance();
   private fuelInterval: ReturnType<typeof setInterval> | null = null;
   private abortController: AbortController | null = null;
+  /** Bound `ff:fuel` handler — same reference required for removeEventListener (#12). */
+  private _fuelListener: ((e: Event) => void) | null = null;
 
   constructor(doc: FortressRoomDoc) {
     this.doc = doc;
@@ -108,7 +123,14 @@ export class ControlPane {
   }
 
   destroy(): void {
-    if (this.fuelInterval) clearInterval(this.fuelInterval);
+    if (this.fuelInterval !== null) {
+      clearInterval(this.fuelInterval);
+      this.fuelInterval = null;
+    }
+    if (this._fuelListener !== null) {
+      window.removeEventListener("ff:fuel", this._fuelListener);
+      this._fuelListener = null;
+    }
     this.abortController?.abort();
   }
 
@@ -119,11 +141,20 @@ export class ControlPane {
     const generateBtn = this.container.querySelector("#btn-generate") as HTMLButtonElement;
     const abortBtn = this.container.querySelector("#btn-abort") as HTMLButtonElement;
 
-    const prompt = promptEl.value.trim();
-    if (!prompt) return;
+    // Stable cache key for stream resume (must not include cached prefix appended below).
+    const promptKey = promptEl.value.trim();
+    if (!promptKey) return;
 
+    const roomId = getRoomId(this.doc);
     const [provider, model] = modelEl.value.split("/") as [string, string];
     const systemPrompt = systemEl.value.trim();
+
+    // Phase 4 handoff.ts — prepend partial stream after host drop so worker continues from tail.
+    const cached = await getCachedOutput(model, systemPrompt, promptKey);
+    let prompt = promptKey;
+    if (cached) {
+      prompt = `${cached}\n--- resume ---\n${promptKey}`;
+    }
 
     // Create abort controller for this generation
     this.abortController = new AbortController();
@@ -131,13 +162,25 @@ export class ControlPane {
     abortBtn.style.display = "inline-block";
 
     try {
+      const myPk = getMyPubkey();
       const outputHash = await this.bridge.requestGenerate(
-        { provider, model, prompt, systemPrompt, signal: this.abortController.signal },
+        {
+          provider,
+          model,
+          prompt,
+          systemPrompt,
+          signal: this.abortController.signal,
+          roomId,
+          participantPubkey: myPk ?? undefined,
+          quotaTokensToReserve: myPk ? 1 : undefined,
+        },
         {
           onChunk: (chunk) => {
+            void appendStreamChunk(model, systemPrompt, promptKey, chunk);
             appendOutput(this.doc, chunk);
           },
           onDone: async (hash) => {
+            void markStreamComplete(model, systemPrompt, promptKey, hash);
             console.log("[ControlPane] generation done:", hash);
             generateBtn.style.display = "inline-block";
             abortBtn.style.display = "none";
@@ -177,7 +220,10 @@ export class ControlPane {
       try {
         const state = await this.bridge.requestFuelGauge(roomId as any);
         const total = state.participants.reduce((sum: number, p: any) => sum + (p.quota ?? 0), 0);
-        const consumed = state.participants.reduce((sum: number, p: any) => sum + (p.consumed ?? 0), 0);
+        const consumed = state.participants.reduce(
+          (sum: number, p: any) => sum + (p.consumed ?? 0) + (p.reserved ?? 0),
+          0
+        );
         const pct = total > 0 ? Math.max(0, 100 - (consumed / total * 100)) : 100;
         const fill = fillEl();
         const label = labelEl();
@@ -192,18 +238,21 @@ export class ControlPane {
     poll();
     this.fuelInterval = setInterval(poll, 5000);
 
-    // Listen for fuel events too
-    const onFuel = (e: Event) => {
+    this._fuelListener = (e: Event) => {
       const state = (e as CustomEvent).detail as any;
+      if (state?.roomId != null && state.roomId !== roomId) return;
       const total = state.participants.reduce((sum: number, p: any) => sum + (p.quota ?? 0), 0);
-      const consumed = state.participants.reduce((sum: number, p: any) => sum + (p.consumed ?? 0), 0);
+      const consumed = state.participants.reduce(
+        (sum: number, p: any) => sum + (p.consumed ?? 0) + (p.reserved ?? 0),
+        0
+      );
       const pct = total > 0 ? Math.max(0, 100 - (consumed / total * 100)) : 100;
       const fill = fillEl();
       const label = labelEl();
       if (fill) fill.style.width = `${pct}%`;
       if (label) label.textContent = `${state.participants?.length ?? 0} participant(s) · ${pct.toFixed(0)}% fuel`;
     };
-    window.addEventListener("ff:fuel", onFuel as EventListener);
+    window.addEventListener("ff:fuel", this._fuelListener);
   }
 
   private escapeAttr(str: string): string {

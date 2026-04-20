@@ -1,20 +1,27 @@
 /**
- * budget.ts — Budget token verification and quota management in the Fortress Worker.
+ * budget.ts — Budget token verification, quota management, and nonce persistence.
  *
- * This module runs INSIDE the worker, on the HOST side.
- * It maintains per-participant quota state for liquidity pool rooms.
+ * Trust model (unchanged):
+ *   - `hostPubkeyFromDoc` in verify* must come from the Y.js room doc, not the token.
+ *   - Sub-budget wire bytes: `encodeBudgetTokenSigningMessage` uses `participantPubkey` in
+ *     the object; storage uses `delegatePubkey` (B2) — keep mint/verify in lockstep.
+ *   - `RoomId` is branded in protocol; use it in sub-budget mint (B1).
  *
- * SECURITY CONTRACT (see SECURITY.md Claim 5):
- *   - Tokens are verified against hostPubkeyFromDoc (CRDT doc value), NEVER token.hostPubkey.
- *   - Nonce dedup is in-memory per session — prevents replay within the session window.
- *   - Quota is tracked here — never trusted from the participant side.
- *   - Budget state is ephemeral: cleared when host worker terminates.
+ * FIXES APPLIED:
+ *   Critical #3 — Budget nonce replay: consumed nonces persist in IndexedDB under a composite
+ *     key (roomId + hostPubkey + nonce). TTL sweep runs opportunistically. Successful verify
+ *     ends with `add()` so a concurrent duplicate consume loses the race (ConstraintError → replay).
+ *
+ *   Critical #5 — TOCTOU quota race: `quotaReservations` subtracts from available balance before
+ *     work starts. Prefer reserveQuota → finaliseQuotaReservation / releaseQuotaReservation on
+ *     GENERATE paths; `getRemainingQuota` subtracts consumed + reserved.
  */
 
 import {
   type BudgetToken,
   type SubBudgetToken,
   type PublicKeyBase58,
+  type RoomId,
   verifyBudgetToken,
   generateTokenId,
   generateTokenNonce,
@@ -31,11 +38,8 @@ import {
 const ONE_HOUR_MS = 3_600_000;
 
 export interface QuotaState {
-  /** Max tokens granted per participant per hour */
   quotaPerUser: number;
-  /** Tokens consumed per participant pubkey in the current hour window */
   consumed: Map<PublicKeyBase58, number>;
-  /** Unix ms — start of the current hour window */
   windowStart: number;
 }
 
@@ -43,31 +47,131 @@ export interface MintTokenOptions {
   roomId: string;
   participantPubkey: PublicKeyBase58;
   hostPubkey: PublicKeyBase58;
-  /** Ed25519 signing CryptoKey for the host — obtained from keystore, non-extractable */
   hostSigningKey: CryptoKey;
   tokensToGrant: number;
 }
 
-/** Per-room quota state */
+export interface FuelGaugeState {
+  roomId: string;
+  participants: Array<{
+    pubkey: PublicKeyBase58;
+    fraction: number;
+    consumed: number;
+    reserved: number;
+    quota: number;
+  }>;
+}
+
+// ── Persistent nonce store ────────────────────────────────────────────────────
+
+const NONCE_DB_NAME = "fortress-budget-nonces";
+const NONCE_STORE = "nonces";
+
+async function openNonceDB(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(NONCE_DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(NONCE_STORE)) {
+        const store = db.createObjectStore(NONCE_STORE);
+        store.createIndex("expiresAt", "expiresAt", { unique: false });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function nonceDBKey(roomId: string, hostPubkey: string, nonce: string): string {
+  return `${roomId}|${hostPubkey}|${nonce}`;
+}
+
+async function sweepExpiredNonces(db: IDBDatabase): Promise<void> {
+  const now = Date.now();
+  return new Promise((resolve) => {
+    const tx = db.transaction(NONCE_STORE, "readwrite");
+    const index = tx.objectStore(NONCE_STORE).index("expiresAt");
+    const range = IDBKeyRange.upperBound(now, false);
+    const req = index.openCursor(range);
+    req.onsuccess = () => {
+      const cursor = req.result;
+      if (cursor) {
+        cursor.delete();
+        cursor.continue();
+      }
+    };
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => resolve();
+  });
+}
+
+async function isNonceSeen(
+  db: IDBDatabase,
+  roomId: string,
+  hostPubkey: string,
+  nonce: string
+): Promise<boolean> {
+  await sweepExpiredNonces(db);
+
+  const key = nonceDBKey(roomId, hostPubkey, nonce);
+  return new Promise((resolve) => {
+    const tx = db.transaction(NONCE_STORE, "readonly");
+    const req = tx.objectStore(NONCE_STORE).get(key);
+    req.onsuccess = () => resolve(req.result !== undefined);
+    req.onerror = () => resolve(false);
+  });
+}
+
+/**
+ * Persists a consumed nonce after successful verification.
+ * IndexedDB `add` (not `put`): duplicate key ⇒ ConstraintError ⇒ replay lost race (#3).
+ */
+async function markNonceSeen(
+  db: IDBDatabase,
+  roomId: string,
+  hostPubkey: string,
+  nonce: string,
+  tokenExpiresAt: number
+): Promise<void> {
+  const key = nonceDBKey(roomId, hostPubkey, nonce);
+  const expiresAt = tokenExpiresAt + BUDGET_TOKEN_TTL_MS;
+
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(NONCE_STORE, "readwrite");
+    const req = tx.objectStore(NONCE_STORE).add({ expiresAt }, key);
+    req.onsuccess = () => resolve();
+    req.onerror = () => {
+      const err = req.error;
+      if (err?.name === "ConstraintError") {
+        reject(new FFError("BudgetTokenReplayed", "Token nonce already consumed"));
+      } else {
+        resolve();
+      }
+    };
+    tx.onerror = () => resolve();
+  });
+}
+
+let _nonceDB: IDBDatabase | null = null;
+
+async function getNonceDB(): Promise<IDBDatabase> {
+  if (!_nonceDB) {
+    _nonceDB = await openNonceDB();
+  }
+  return _nonceDB;
+}
+
+// ── Quota (TOCTOU pre-reserve) ────────────────────────────────────────────────
+
 const quotaState = new Map<string, QuotaState>();
 
-/**
- * Global nonce dedup set.
- * All rooms share this set since a nonce is globally unique by construction
- * (16 random bytes = 2^128 collision space).
- */
-const seenNonces = new Set<string>();
+/** In-flight token capacity held until GENERATE finalises or releases (#5). */
+const quotaReservations = new Map<string, number>();
 
-/**
- * Set of delegates whose sub-budget delegation has been revoked.
- * Keyed by delegatePubkey.
- */
-const revokedDelegates = new Set<PublicKeyBase58>();
+function reservationKey(roomId: string, pubkey: string): string {
+  return `${roomId}|${pubkey}`;
+}
 
-/**
- * Initializes or resets quota state for a room.
- * Called when the host configures the liquidity pool.
- */
 export function initQuota(roomId: string, quotaPerUser: number): void {
   quotaState.set(roomId, {
     quotaPerUser,
@@ -76,10 +180,11 @@ export function initQuota(roomId: string, quotaPerUser: number): void {
   });
 }
 
-/**
- * Returns remaining quota for a participant in a room.
- * Automatically resets the window if more than 1 hour has elapsed.
- */
+/** True once the host has configured pool quota for this room (`INIT_QUOTA`). */
+export function hasRoomQuota(roomId: string): boolean {
+  return quotaState.has(roomId);
+}
+
 export function getRemainingQuota(
   roomId: string,
   participantPubkey: PublicKeyBase58
@@ -91,17 +196,69 @@ export function getRemainingQuota(
   if (now - state.windowStart > ONE_HOUR_MS) {
     state.consumed.clear();
     state.windowStart = now;
+    for (const key of quotaReservations.keys()) {
+      if (key.startsWith(`${roomId}|`)) quotaReservations.delete(key);
+    }
   }
 
   const consumed = state.consumed.get(participantPubkey) ?? 0;
-  return Math.max(0, state.quotaPerUser - consumed);
+  const reserved = quotaReservations.get(reservationKey(roomId, participantPubkey)) ?? 0;
+  return Math.max(0, state.quotaPerUser - consumed - reserved);
 }
 
-/**
- * Decrements quota for a participant after a successful generation.
- * Called AFTER token verification succeeds and generation completes.
- * Never called before — quota is not pre-reserved.
- */
+export function reserveQuota(
+  roomId: string,
+  participantPubkey: PublicKeyBase58,
+  tokensRequested: number
+): number {
+  const available = getRemainingQuota(roomId, participantPubkey);
+  if (available <= 0) return 0;
+
+  const toReserve = Math.min(tokensRequested, available);
+  const key = reservationKey(roomId, participantPubkey);
+  quotaReservations.set(key, (quotaReservations.get(key) ?? 0) + toReserve);
+  return toReserve;
+}
+
+export function finaliseQuotaReservation(
+  roomId: string,
+  participantPubkey: PublicKeyBase58,
+  tokensActuallyUsed: number
+): void {
+  const key = reservationKey(roomId, participantPubkey);
+  const reserved = quotaReservations.get(key) ?? 0;
+  const toRelease = Math.min(reserved, tokensActuallyUsed);
+
+  const newReserved = reserved - toRelease;
+  if (newReserved <= 0) {
+    quotaReservations.delete(key);
+  } else {
+    quotaReservations.set(key, newReserved);
+  }
+
+  const state = quotaState.get(roomId);
+  if (state) {
+    const current = state.consumed.get(participantPubkey) ?? 0;
+    state.consumed.set(participantPubkey, current + tokensActuallyUsed);
+  }
+}
+
+export function releaseQuotaReservation(
+  roomId: string,
+  participantPubkey: PublicKeyBase58,
+  tokensReserved: number
+): void {
+  const key = reservationKey(roomId, participantPubkey);
+  const current = quotaReservations.get(key) ?? 0;
+  const newReserved = Math.max(0, current - tokensReserved);
+  if (newReserved <= 0) {
+    quotaReservations.delete(key);
+  } else {
+    quotaReservations.set(key, newReserved);
+  }
+}
+
+/** Direct consumption for paths that skip reservation (compat). */
 export function consumeQuota(
   roomId: string,
   participantPubkey: PublicKeyBase58,
@@ -109,19 +266,11 @@ export function consumeQuota(
 ): void {
   const state = quotaState.get(roomId);
   if (!state) return;
-  const current = state.consumed.get(participantPubkey) ?? 0;
-  state.consumed.set(participantPubkey, current + tokensUsed);
+  const cur = state.consumed.get(participantPubkey) ?? 0;
+  state.consumed.set(participantPubkey, cur + tokensUsed);
 }
 
-/**
- * Mints a signed budget token for a participant.
- *
- * The token is Ed25519-signed by the host's identity key.
- * Returns null if the participant has exhausted their quota.
- */
-export async function mintBudgetToken(
-  options: MintTokenOptions
-): Promise<BudgetToken | null> {
+export async function mintBudgetToken(options: MintTokenOptions): Promise<BudgetToken | null> {
   const remaining = getRemainingQuota(options.roomId, options.participantPubkey);
   if (remaining <= 0) return null;
 
@@ -140,28 +289,13 @@ export async function mintBudgetToken(
   };
 
   const message = encodeBudgetTokenSigningMessage(tokenData);
-
-  const sigBuffer = await crypto.subtle.sign(
-    "Ed25519",
-    options.hostSigningKey, // non-extractable — we sign but never export
-    message
-  );
-
+  const sigBuffer = await crypto.subtle.sign("Ed25519", options.hostSigningKey, message);
   const signature = base64urlEncode(new Uint8Array(sigBuffer)) as BudgetToken["signature"];
   const id = generateTokenId();
 
   return { ...tokenData, id, signature };
 }
 
-/**
- * Verifies a budget token before allowing a provider call.
- *
- * CRITICAL: hostPubkeyFromDoc comes from the Y.js CRDT doc,
- * never from the token itself. This prevents self-signed forgeries.
- *
- * On success: returns tokensGranted and marks nonce as seen.
- * On failure: throws FFError with specific error code.
- */
 export async function verifyAndConsumeToken(
   rawToken: unknown,
   hostPubkeyFromDoc: PublicKeyBase58,
@@ -172,65 +306,29 @@ export async function verifyAndConsumeToken(
   }
 
   const token = rawToken as BudgetToken;
-
   if (token.roomId !== roomId) {
-    throw new FFError(
-      "BudgetTokenForged",
-      `Token roomId mismatch: expected ${roomId}, got ${token.roomId}`
-    );
+    throw new FFError("BudgetTokenForged", `Token roomId mismatch`);
   }
 
+  const db = await getNonceDB();
+  const alreadySeen = await isNonceSeen(db, roomId, token.hostPubkey, token.nonce);
+  if (alreadySeen) {
+    throw new FFError("BudgetTokenReplayed", "Token nonce already seen (persisted)");
+  }
+
+  const ephemeral = new Set<string>();
   const result = await verifyBudgetToken(token, {
     hostPubkeyFromDoc,
-    seenNonces, // passed by reference — mutated on success inside verifyBudgetToken
+    seenNonces: ephemeral,
   });
+
+  await markNonceSeen(db, roomId, token.hostPubkey, token.nonce, token.expiresAt);
 
   return result.tokensGranted;
 }
 
-export interface FuelGaugeState {
-  roomId: string;
-  participants: Array<{
-    pubkey: PublicKeyBase58;
-    fraction: number;
-    consumed: number;
-    quota: number;
-  }>;
-}
+const revokedDelegates = new Set<PublicKeyBase58>();
 
-export function getFuelGaugeState(roomId: string): FuelGaugeState {
-  const state = quotaState.get(roomId);
-  if (!state) return { roomId, participants: [] };
-
-  const participants: FuelGaugeState["participants"] = [];
-  for (const [pubkey, consumed] of state.consumed) {
-    participants.push({
-      pubkey,
-      consumed,
-      quota: state.quotaPerUser,
-      fraction: Math.max(0, 1 - consumed / state.quotaPerUser),
-    });
-  }
-
-  return { roomId, participants };
-}
-
-/**
- * Cleanup function called by worker.ts on unload/pagehide.
- * budget.ts runs in an iframe (window) context — the "close" event
- * does not fire on iframe windows. worker.ts owns the lifecycle and
- * calls this explicitly before the iframe is removed from the DOM.
- */
-export function teardownBudget(): void {
-  quotaState.clear();
-  seenNonces.clear();
-  revokedDelegates.clear();
-}
-
-/**
- * Revokes a delegate's sub-budget authority.
- * After this call, the delegate cannot use their sub-budget token.
- */
 export function revokeSubBudgetDelegation(delegatePubkey: PublicKeyBase58): void {
   revokedDelegates.add(delegatePubkey);
 }
@@ -272,11 +370,21 @@ export async function mintSubBudgetTokenForRoom(
     expiresAt: now + SUB_BUDGET_TOKEN_TTL_MS,
     nonce,
   };
+
   const sigBuffer = await crypto.subtle.sign(
     "Ed25519",
     hostSigningKey,
-    encodeBudgetTokenSigningMessage(tokenData)
+    encodeBudgetTokenSigningMessage({
+      roomId: tokenData.roomId,
+      participantPubkey: tokenData.delegatePubkey,
+      hostPubkey: tokenData.hostPubkey,
+      tokensGranted: tokenData.tokensGranted,
+      issuedAt: tokenData.issuedAt,
+      expiresAt: tokenData.expiresAt,
+      nonce: tokenData.nonce,
+    })
   );
+
   return {
     ...tokenData,
     id: generateTokenId(),
@@ -294,25 +402,15 @@ export async function verifyAndConsumeSubBudgetToken(
   }
 
   const token = rawToken as SubBudgetToken;
+  if (token.roomId !== roomId) throw new FFError("SubBudgetTokenForged", "roomId mismatch");
+  if (token.hostPubkey !== hostPubkeyFromDoc) throw new FFError("SubBudgetTokenForged", "Host pubkey mismatch");
+  if (revokedDelegates.has(token.delegatePubkey)) throw new FFError("SubBudgetTokenRevoked", "Delegation revoked");
+  if (Date.now() > token.expiresAt) throw new FFError("SubBudgetTokenExpired", "Token expired");
 
-  if (token.roomId !== roomId) {
-    throw new FFError(
-      "SubBudgetTokenForged",
-      `Token roomId mismatch: expected ${roomId}, got ${token.roomId}`
-    );
-  }
-
-  if (token.hostPubkey !== hostPubkeyFromDoc) {
-    throw new FFError("SubBudgetTokenForged", "Host pubkey mismatch");
-  }
-  if (revokedDelegates.has(token.delegatePubkey)) {
-    throw new FFError("SubBudgetTokenRevoked", "Delegation has been revoked by host");
-  }
-  if (seenNonces.has(token.nonce)) {
-    throw new FFError("SubBudgetTokenReplayed", "Token nonce already seen");
-  }
-  if (Date.now() > token.expiresAt) {
-    throw new FFError("SubBudgetTokenExpired", "Token has expired");
+  const db = await getNonceDB();
+  const alreadySeen = await isNonceSeen(db, roomId, token.hostPubkey, token.nonce);
+  if (alreadySeen) {
+    throw new FFError("SubBudgetTokenReplayed", "Token nonce already seen (persisted)");
   }
 
   const message = encodeBudgetTokenSigningMessage({
@@ -326,7 +424,6 @@ export async function verifyAndConsumeSubBudgetToken(
   });
 
   const sigBytes = base64urlDecode(token.signature);
-
   let pubKeyBytes: Uint8Array;
   try {
     pubKeyBytes = fromBase58(token.hostPubkey);
@@ -336,19 +433,62 @@ export async function verifyAndConsumeSubBudgetToken(
 
   if (pubKeyBytes.length !== 32) throw new FFError("SubBudgetTokenForged", "Invalid public key length");
 
-  const pubKey = await crypto.subtle.importKey(
-    "raw",
-    pubKeyBytes,
-    { name: "Ed25519" },
-    false,
-    ["verify"]
-  );
-
+  const pubKey = await crypto.subtle.importKey("raw", pubKeyBytes, { name: "Ed25519" }, false, ["verify"]);
   const valid = await crypto.subtle.verify("Ed25519", pubKey, sigBytes, message);
-  if (!valid) {
-    throw new FFError("SubBudgetTokenForged", "Signature verification failed");
+  if (!valid) throw new FFError("SubBudgetTokenForged", "Signature verification failed");
+
+  await markNonceSeen(db, roomId, token.hostPubkey, token.nonce, token.expiresAt);
+
+  return token.tokensGranted;
+}
+
+export function getFuelGaugeState(roomId: string): FuelGaugeState {
+  const state = quotaState.get(roomId);
+  if (!state) return { roomId, participants: [] };
+
+  const participants: FuelGaugeState["participants"] = [];
+  const seen = new Set<PublicKeyBase58>();
+  const prefix = `${roomId}|`;
+
+  for (const [pubkey, consumed] of state.consumed) {
+    seen.add(pubkey);
+    const reserved = quotaReservations.get(reservationKey(roomId, pubkey)) ?? 0;
+    participants.push({
+      pubkey,
+      consumed,
+      reserved,
+      quota: state.quotaPerUser,
+      fraction: Math.max(0, 1 - (consumed + reserved) / state.quotaPerUser),
+    });
   }
 
-  seenNonces.add(token.nonce);
-  return token.tokensGranted;
+  for (const key of quotaReservations.keys()) {
+    if (!key.startsWith(prefix)) continue;
+    const pubkey = key.slice(prefix.length) as PublicKeyBase58;
+    if (seen.has(pubkey)) continue;
+    seen.add(pubkey);
+    const reserved = quotaReservations.get(key) ?? 0;
+    participants.push({
+      pubkey,
+      consumed: 0,
+      reserved,
+      quota: state.quotaPerUser,
+      fraction: Math.max(0, 1 - reserved / state.quotaPerUser),
+    });
+  }
+
+  return { roomId, participants };
+}
+
+export async function teardownBudget(): Promise<void> {
+  quotaState.clear();
+  quotaReservations.clear();
+  revokedDelegates.clear();
+
+  try {
+    const db = await getNonceDB();
+    await sweepExpiredNonces(db);
+  } catch {
+    /* ignore */
+  }
 }

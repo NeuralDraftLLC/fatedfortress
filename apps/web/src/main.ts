@@ -1,6 +1,16 @@
-// apps/web/src/main.ts
+/**
+ * apps/web/src/main.ts — SPA shell: URL → page mount, palette, identity bootstrap.
+ *
+ * Routing: `/spectate/:id` is handled before the generic `/(\w+)/` matcher so spectate
+ * never falls through to `table`. Palette commands that need room state use
+ * `getActiveRoomDocIfSet()` only when `_currentPage === "room"`.
+ *
+ * Intents: `palette:select` → `dispatchIntent`; room-specific handlers listen on
+ * `palette:intent` from pages (e.g. room.ts).
+ */
 import { openPalette, buildPaletteContext } from "./components/Palette/index.js";
 import { showWelcomeModal } from "./components/WelcomeModal.js";
+import { hasSeenWelcome } from "./util/storage.js";
 import { createIdentity } from "./state/identity.js";
 import { handleUpgradeRoom } from "./handlers/upgrade.js";
 import { getActiveRoomDocIfSet } from "./state/ydoc.js";
@@ -82,8 +92,6 @@ async function route(path: string) {
   const roomMatch = path.match(/^\/room\/(.+)/);
   if (roomMatch) {
     window.history.replaceState({}, "", `/room/${roomMatch[1]}`);
-  } else if (spectateMatch) {
-    window.history.replaceState({}, "", `/spectate/${spectateMatch[1]}`);
   }
 
   const [, page] = path.match(/^\/(\w+)/) ?? [];
@@ -126,7 +134,8 @@ async function init() {
     console.warn("[main] Could not create identity:", err);
   }
 
-  if (!localStorage.getItem("hasSeenWelcome")) {
+  if (!hasSeenWelcome()) {
+    // safeStorage: no throw in sandboxed embeds (Phase 5 #6)
     showWelcomeModal();
   }
 

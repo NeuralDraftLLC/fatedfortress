@@ -1,22 +1,28 @@
 /**
  * Palette/index.ts — Command palette UI with ghost text + keyboard navigation.
+ *
+ * Ghost suffix: Phase 4 CommandTrie (vocabulary LCP) when non-empty; else NL parser first label.
+ * Command list / Enter selection still comes from parse() — trie only accelerates typed completion.
  */
 
 import type { PaletteIntent, PaletteContext } from "@fatedfortress/protocol";
 import { parse } from "./parser.js";
+import { buildCommandTrie, type CommandTrie } from "./commandTrie.js";
 import "./palette.css";
 
 export { buildPaletteContext } from "./context.js";
-
-interface PaletteOptions {
-  onSelect: (intent: PaletteIntent) => void;
-  onClose: () => void;
-}
 
 let overlayEl: HTMLElement | null = null;
 let inputEl: HTMLInputElement | null = null;
 let listEl: HTMLElement | null = null;
 let ghostEl: HTMLElement | null = null;
+let ghostTypedEl: HTMLElement | null = null;
+let ghostSuffixEl: HTMLElement | null = null;
+/** Snapshot for Tab / ArrowRight ghost acceptance */
+let lastGhostSuffix = "";
+let currentCtx: PaletteContext | null = null;
+/** Phase 4 — trie over full vocabulary for ghost Tab completion (built each open). */
+let commandTrie: CommandTrie | null = null;
 let selectedIndex = -1;
 let currentCandidates: Array<{ intent: PaletteIntent; confidence: number; label: string }> = [];
 
@@ -24,13 +30,20 @@ export function openPalette(ctx: PaletteContext): void {
   closePalette();
   selectedIndex = -1;
   currentCandidates = [];
+  currentCtx = ctx;
+  commandTrie = buildCommandTrie(ctx);
 
   overlayEl = document.createElement("div");
   overlayEl.className = "palette-overlay";
   overlayEl.innerHTML = `
-    <div class="palette">
-      <input class="palette-input" type="text" placeholder="type a command…" autofocus />
-      <div class="palette-list"></div>
+    <div class="palette palette-box">
+      <div class="palette-input-wrap">
+        <div class="palette-ghost" aria-hidden="true">
+          <span class="ghost-typed"></span><span class="ghost-suffix"></span>
+        </div>
+        <input class="palette-input" type="text" placeholder="type a command…" autofocus />
+      </div>
+      <div class="palette-list palette-results"></div>
       <div class="palette-ghost-suggestions"></div>
     </div>
   `;
@@ -40,6 +53,8 @@ export function openPalette(ctx: PaletteContext): void {
   inputEl = overlayEl.querySelector(".palette-input");
   listEl = overlayEl.querySelector(".palette-list");
   ghostEl = overlayEl.querySelector(".palette-ghost-suggestions");
+  ghostTypedEl = overlayEl.querySelector(".ghost-typed");
+  ghostSuffixEl = overlayEl.querySelector(".ghost-suffix");
 
   overlayEl.addEventListener("click", (e) => {
     if (e.target === overlayEl) closePalette();
@@ -62,16 +77,36 @@ function closePalette(): void {
     inputEl = null;
     listEl = null;
     ghostEl = null;
+    ghostTypedEl = null;
+    ghostSuffixEl = null;
+    lastGhostSuffix = "";
+    currentCtx = null;
     selectedIndex = -1;
     currentCandidates = [];
   }
+  commandTrie = null;
   document.removeEventListener("keydown", onKeydown);
 }
 
 function onKeydown(e: KeyboardEvent) {
-  if (!listEl) return;
+  if (!listEl || !currentCtx) return;
 
   const items = Array.from(listEl.querySelectorAll(".palette-item:not(.palette-hint)"));
+
+  if (e.key === "Tab" || e.key === "ArrowRight") {
+    if (
+      inputEl &&
+      lastGhostSuffix.length > 0 &&
+      inputEl.selectionStart === inputEl.value.length &&
+      inputEl.selectionEnd === inputEl.value.length
+    ) {
+      e.preventDefault();
+      inputEl.value += lastGhostSuffix;
+      render(inputEl.value, currentCtx);
+      return;
+    }
+    if (e.key === "Tab") return;
+  }
 
   if (e.key === "Escape") {
     e.preventDefault();
@@ -120,10 +155,47 @@ function selectIntent(intent: PaletteIntent): void {
   window.dispatchEvent(new CustomEvent("palette:select", { detail: { intent } }));
 }
 
+function updateInlineGhost(value: string, result: ReturnType<typeof parse>, _ctx: PaletteContext): void {
+  if (!ghostTypedEl || !ghostSuffixEl) return;
+
+  const typed = value;
+  let suffix = "";
+
+  // Trie wins for ghost — advances to shared prefix of all matching commands (branch-point Tab UX).
+  const trieSuffix = commandTrie?.complete(typed) ?? "";
+  if (trieSuffix.length > 0) {
+    ghostTypedEl.textContent = typed;
+    ghostSuffixEl.textContent = trieSuffix;
+    lastGhostSuffix = trieSuffix;
+    return;
+  }
+
+  if (result.kind === "candidates" && result.candidates.length > 0) {
+    const label = result.candidates[0].label;
+    const t = typed;
+    if (t.trim().length === 0) {
+      suffix = label;
+    } else if (label.toLowerCase().startsWith(t.toLowerCase())) {
+      suffix = label.slice(t.length);
+    }
+  } else if (result.kind === "resolved") {
+    const label = result.label;
+    const t = typed;
+    if (label.toLowerCase().startsWith(t.toLowerCase())) {
+      suffix = label.slice(t.length);
+    }
+  }
+
+  ghostTypedEl.textContent = typed;
+  ghostSuffixEl.textContent = suffix;
+  lastGhostSuffix = suffix;
+}
+
 function render(input: string, ctx: PaletteContext): void {
   if (!listEl || !ghostEl || !inputEl) return;
 
   const result = parse(input, ctx);
+  updateInlineGhost(input, result, ctx);
 
   if (result.kind === "candidates") {
     currentCandidates = result.candidates;

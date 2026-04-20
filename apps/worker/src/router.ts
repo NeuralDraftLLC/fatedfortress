@@ -11,7 +11,10 @@ import {
   type ProviderId,
   type EncryptedKeyBlob,
 } from "./keystore.js";
+// activeGenerations: same Map as in generate.ts (B3) — needed to abort in-flight streams
+// by requestId when the parent posts ABORT_GENERATE.
 import { handleGenerate, activeGenerations } from "./generate.js";
+import { teardownBudget } from "./budget.js";
 import {
   mintToken,
   verifyToken,
@@ -28,7 +31,7 @@ export type InboundMessage =
   | { type: "HAS_KEY";      provider: string;                                requestId: string }
   | { type: "ENCRYPT_KEY";  provider: string; passphrase: string;            requestId: string }
   | { type: "DECRYPT_KEY";  provider: string; blob: EncryptedKeyBlob; passphrase: string; requestId: string }
-  | { type: "GENERATE";     provider: string; model: string; prompt: string; systemPrompt: string; requestId: string; isSpectator?: boolean }
+  | { type: "GENERATE";     provider: string; model: string; prompt: string; systemPrompt: string; requestId: string; isSpectator?: boolean; roomId?: string; participantPubkey?: string; quotaTokensToReserve?: number }
   | { type: "ABORT_GENERATE"; requestId: string }
   | { type: "VERIFY_TOKEN"; token: unknown; hostPubkey: string; roomId: string; requestId: string }
   | { type: "MINT_TOKEN";   roomId: string; participantPubkey: string; tokensToGrant: number; requestId: string }
@@ -36,6 +39,8 @@ export type InboundMessage =
   | { type: "FUEL_GAUGE";   roomId: string;                                  requestId: string }
 | { type: "DELEGATE_SUB_BUDGET"; peerPubkey: string; tokensToDelegate: number; roomId: string; requestId: string }
 | { type: "REVOKE_DELEGATION";   peerPubkey: string;                               requestId: string }
+  /** Phase 5 Medium #11 — SPA navigation: flush budget DB + abort streams (same net effect as iframe unload). */
+  | { type: "TEARDOWN"; requestId: string }
   | { type: "TERMINATE" };
 
 export type RequestMessage = Exclude<InboundMessage, { type: "TERMINATE" }>;
@@ -140,7 +145,8 @@ export async function dispatchMessage(msg: RequestMessage): Promise<void> {
     }
 
     case "REVOKE_DELEGATION": {
-      // Mark the delegate's sub-budget as revoked by removing from the revoked set
+      // budget: add peerPubkey to revokedDelegates; future sub-budget tokens for
+      // that delegate fail verify (see budget.verifyAndConsumeSubBudgetToken).
       const { revokeSubBudgetDelegation } = await import("./liquidity.js");
       revokeSubBudgetDelegation(msg.peerPubkey as any);
       send({ type: "OK", requestId });
@@ -148,9 +154,17 @@ export async function dispatchMessage(msg: RequestMessage): Promise<void> {
     }
 
     case "ABORT_GENERATE": {
+      // Propagates to adapter via AbortSignal; generate.ts finally block still clears the map.
       const controller = activeGenerations.get(msg.requestId);
       controller?.abort();
       send({ type: "OK", requestId });
+      return;
+    }
+
+    case "TEARDOWN": {
+      abortAllGenerations(); // cancel streaming fetches before closing nonce DB
+      await teardownBudget(); // IndexedDB nonce sweep + reservation map — not teardownKeystore
+      send({ type: "OK", requestId, payload: null });
       return;
     }
 

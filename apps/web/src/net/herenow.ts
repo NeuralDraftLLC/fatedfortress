@@ -1,4 +1,5 @@
 // apps/web/src/net/herenow.ts
+import { safeStorage, KEY_HERENOW_TOKEN } from "../util/storage.js";
 
 /**
  * Links a here.now permanent URL to a room's metadata in the Y.js doc.
@@ -65,7 +66,7 @@ export async function linkHereNowAccount(): Promise<string> {
       window.removeEventListener("message", handleCallback);
       popup.close();
       if (event.data?.token) {
-        localStorage.setItem("herenow_token", event.data.token);
+        safeStorage.setItem(KEY_HERENOW_TOKEN, event.data.token); // key "herenow_token" for back compat
         resolve(event.data.token);
       } else {
         reject(new Error("Authorization failed"));
@@ -84,5 +85,5 @@ export async function linkHereNowAccount(): Promise<string> {
 }
 
 export function getHereNowToken(): string | null {
-  return localStorage.getItem("herenow_token");
+  return safeStorage.getItem(KEY_HERENOW_TOKEN);
 }

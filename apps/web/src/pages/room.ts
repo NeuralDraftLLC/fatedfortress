@@ -12,6 +12,7 @@ import {
   upsertPresence,
   removePresence,
 } from "../net/signaling.js";
+import { WorkerBridge } from "../net/worker-bridge.js";
 import { ControlPane } from "../components/ControlPane.js";
 import { OutputPane } from "../components/OutputPane.js";
 import { SpectatorChatView } from "../components/SpectatorChat.js";
@@ -86,12 +87,13 @@ async function enterRoom(doc: FortressRoomDoc, isSpectator = false): Promise<voi
 }
 
 async function joinRoom(roomId: string, opts: MountRoomOptions = {}): Promise<FortressRoomDoc> {
-  const doc = await signalingJoin(roomId as any);
+  // Relay tags spectator=1 — server skips WebRTC signaling fan-out; OPFS/spectate handled in signaling.ts.
+  const doc = await signalingJoin(roomId as any, { spectate: opts.spectate === true });
   const meta = doc.meta;
 
   // Check if already a participant
   const myPubkey = getMyPubkey() ?? "";
-  const existing = doc.participants.toArray().find((p: any) => p.pubkey === myPubkey);
+  const existing = getParticipants(doc).find((p: any) => p.pubkey === myPubkey);
 
   if (opts.spectate) {
     // Spectators join without payment
@@ -315,6 +317,7 @@ export async function mountRoom(
   `;
   container.appendChild(splitPane);
 
+  let controlPane: ControlPane | null = null;
   if (isSpectator) {
     const chatEl = document.createElement("div");
     chatEl.className = "spectator-chat";
@@ -323,7 +326,7 @@ export async function mountRoom(
     splitPane.querySelector(".room-control-pane")!.appendChild(chatEl);
   } else {
     const controlEl = splitPane.querySelector(".room-control-pane")!;
-    const controlPane = new ControlPane(doc);
+    controlPane = new ControlPane(doc);
     controlPane.mount(controlEl);
   }
 
@@ -353,6 +356,9 @@ export async function mountRoom(
   });
 
   cleanup = () => {
+    void WorkerBridge.getInstance().requestTeardown(); // pushState unmount — beforeunload may not run
+    controlPane?.destroy();
+    outputPane.destroy();
     removePresence(doc);
     if (presenceInterval) clearInterval(presenceInterval);
     cleanupRoomState(roomId);

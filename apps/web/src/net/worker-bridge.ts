@@ -1,5 +1,13 @@
 /**
- * net/worker-bridge.ts — Main thread ↔ Fortress Worker communication.
+ * apps/web/src/net/worker-bridge.ts — Main thread ↔ Fortress Worker (`keys…/worker.html`).
+ *
+ * postMessage targets WORKER_ORIGIN only; incoming messages ignore other origins.
+ *
+ * Critical #4 — Pending request timeouts: `storeKey`, `hasKey`, and `requestFuelGauge`
+ * use `requestWithTimeout` so a missing iframe (CSP, network, sandbox) cannot hang the UI
+ * forever. Shorter timeout on key paths (`STORE_KEY_TIMEOUT_MS`).
+ *
+ * Two channels: `pendingRequests` (OK/ERROR one-shots) vs `streamingRequests` (GENERATE).
  */
 
 import { type RoomId, FFError } from "@fatedfortress/protocol";
@@ -14,23 +22,33 @@ export interface FuelGaugeState {
     pubkey: string;
     fraction: number;
     consumed: number;
+    reserved: number;
     quota: number;
   }>;
 }
 
 const REQUEST_TIMEOUT_MS = 30_000;
+const STORE_KEY_TIMEOUT_MS = 10_000;
+
+type PendingEntry = {
+  resolve: (payload: unknown) => void;
+  reject: (err: unknown) => void;
+};
 
 export class WorkerBridge {
   private static instance: WorkerBridge;
   private workerIframe: HTMLIFrameElement | null = null;
-  private pendingRequests = new Map<string, (payload: any) => void>();
+  private pendingRequests = new Map<string, PendingEntry>();
   private streamingRequests = new Map<string, {
     onChunk?: (chunk: string) => void;
     onDone?: (outputHash: string) => void;
     onError?: (code: string, message: string) => void;
-    resolve: (payload: any) => void;
+    resolve: (payload: unknown) => void;
   }>();
 
+  /**
+   * Registers resolve/reject before `postMessage` so an immediate worker reply cannot race.
+   */
   public requestWithTimeout<T>(
     requestId: string,
     postMessage: () => void,
@@ -39,13 +57,24 @@ export class WorkerBridge {
     return new Promise<T>((resolve, reject) => {
       const timeoutId = setTimeout(() => {
         this.pendingRequests.delete(requestId);
-        reject(new FFError("REQUEST_TIMEOUT", `Request ${requestId} timed out after ${timeoutMs}ms`));
+        reject(new FFError(
+          "REQUEST_TIMEOUT",
+          `WorkerBridge request ${requestId} timed out after ${timeoutMs}ms — ` +
+            `the keystore iframe may not have loaded (CSP, network, or sandbox restriction).`
+        ));
       }, timeoutMs);
 
-      this.pendingRequests.set(requestId, (value: any) => {
-        clearTimeout(timeoutId);
-        this.pendingRequests.delete(requestId);
-        resolve(value);
+      this.pendingRequests.set(requestId, {
+        resolve: (value: unknown) => {
+          clearTimeout(timeoutId);
+          this.pendingRequests.delete(requestId);
+          resolve(value as T);
+        },
+        reject: (err: unknown) => {
+          clearTimeout(timeoutId);
+          this.pendingRequests.delete(requestId);
+          reject(err);
+        },
       });
 
       postMessage();
@@ -90,25 +119,20 @@ export class WorkerBridge {
     const msg = event.data;
     if (!msg || !msg.requestId) return;
 
-    // Handle standard OK/FUEL
     if (msg.type === "OK") {
-      const resolve = this.pendingRequests.get(msg.requestId);
-      if (resolve) {
-        resolve(msg.payload);
-        this.pendingRequests.delete(msg.requestId);
+      const entry = this.pendingRequests.get(msg.requestId);
+      if (entry) {
+        entry.resolve(msg.payload);
       }
     } else if (msg.type === "FUEL") {
-      // Dispatch custom event for FuelGauge components to subscribe independently
       window.dispatchEvent(new CustomEvent("ff:fuel", { detail: msg.state }));
-    }
-    // Handle Streaming Cases
-    else if (msg.type === "CHUNK") {
+    } else if (msg.type === "CHUNK") {
       const req = this.streamingRequests.get(msg.requestId);
       req?.onChunk?.(msg.chunk);
     } else if (msg.type === "DONE") {
       const req = this.streamingRequests.get(msg.requestId);
       req?.onDone?.(msg.outputHash);
-      if (req?.resolve) req.resolve(msg.outputHash);
+      req?.resolve?.(msg.outputHash);
       this.streamingRequests.delete(msg.requestId);
     } else if (msg.type === "ERROR") {
       const streamReq = this.streamingRequests.get(msg.requestId);
@@ -118,8 +142,7 @@ export class WorkerBridge {
       } else {
         const pending = this.pendingRequests.get(msg.requestId);
         if (pending) {
-          pending(Promise.reject(new FFError(msg.code, msg.message)));
-          this.pendingRequests.delete(msg.requestId);
+          pending.reject(new FFError(msg.code, msg.message));
         } else {
           console.error(`[WorkerBridge] Unhandled error: [${msg.code}] ${msg.message}`);
         }
@@ -128,30 +151,53 @@ export class WorkerBridge {
   }
 
   public async storeKey(provider: string, key: string): Promise<void> {
-  const requestId = crypto.randomUUID();
-  return new Promise((resolve, reject) => {
-    this.pendingRequests.set(requestId, resolve);
-    this.workerIframe?.contentWindow?.postMessage(
-      { type: "STORE_KEY", provider, key, requestId },
-      WORKER_ORIGIN
+    const requestId = crypto.randomUUID();
+    await this.requestWithTimeout<unknown>(
+      requestId,
+      () => {
+        this.workerIframe?.contentWindow?.postMessage(
+          { type: "STORE_KEY", provider, key, requestId },
+          WORKER_ORIGIN
+        );
+      },
+      STORE_KEY_TIMEOUT_MS
     );
-  });
-}
+  }
 
   public async requestFuelGauge(roomId: RoomId): Promise<FuelGaugeState> {
     const requestId = crypto.randomUUID();
-    return new Promise((resolve) => {
-      this.pendingRequests.set(requestId, resolve);
-      this.workerIframe?.contentWindow?.postMessage(
-        { type: "FUEL_GAUGE", roomId, requestId },
-        WORKER_ORIGIN
-      );
-    });
+    return this.requestWithTimeout<FuelGaugeState>(
+      requestId,
+      () => {
+        this.workerIframe?.contentWindow?.postMessage(
+          { type: "FUEL_GAUGE", roomId, requestId },
+          WORKER_ORIGIN
+        );
+      },
+      REQUEST_TIMEOUT_MS
+    );
   }
 
-  /**
-   * Send a GENERATE request with streaming callbacks and AbortSignal support.
-   */
+  /** Returns whether the worker reports a stored key; false on timeout or error. */
+  public async hasKey(provider: string): Promise<boolean> {
+    const requestId = crypto.randomUUID();
+    try {
+      const payload = await this.requestWithTimeout<{ has?: boolean }>(
+        requestId,
+        () => {
+          this.workerIframe?.contentWindow?.postMessage(
+            { type: "HAS_KEY", provider, requestId },
+            WORKER_ORIGIN
+          );
+        },
+        STORE_KEY_TIMEOUT_MS
+      );
+      return payload?.has ?? false;
+    } catch {
+      return false;
+    }
+  }
+
   public requestGenerate(
     opts: {
       provider: string;
@@ -160,6 +206,9 @@ export class WorkerBridge {
       systemPrompt: string;
       isSpectator?: boolean;
       signal?: AbortSignal;
+      roomId?: string;
+      participantPubkey?: string;
+      quotaTokensToReserve?: number;
     },
     callbacks: {
       onChunk?: (chunk: string) => void;
@@ -196,8 +245,29 @@ export class WorkerBridge {
         prompt: opts.prompt,
         systemPrompt: opts.systemPrompt,
         isSpectator: opts.isSpectator ?? false,
+        roomId: opts.roomId,
+        participantPubkey: opts.participantPubkey,
+        quotaTokensToReserve: opts.quotaTokensToReserve,
         requestId,
       }, WORKER_ORIGIN);
     });
+  }
+
+  /**
+   * Phase 5 — POST-style session flush: abort in-flight generations + teardownBudget()
+   * (nonce DB). Does not clear API keys — those stay until TERMINATE / full unload.
+   */
+  public async requestTeardown(): Promise<void> {
+    const requestId = crypto.randomUUID(); // correlate OK/ERROR with this flush
+    await this.requestWithTimeout<unknown>(
+      requestId,
+      () => {
+        this.workerIframe?.contentWindow?.postMessage(
+          { type: "TEARDOWN", requestId },
+          WORKER_ORIGIN
+        );
+      },
+      REQUEST_TIMEOUT_MS
+    );
   }
 }

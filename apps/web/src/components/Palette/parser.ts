@@ -3,6 +3,7 @@
  */
 
 import type { ParseResult, PaletteContext } from "@fatedfortress/protocol";
+import { hasSeenPalette, markPaletteSeen } from "../../util/storage.js";
 import { tokenizeWithStems } from "./tokenizer.js";
 import { scorers, type ScoredIntent } from "./scorers.js";
 
@@ -13,8 +14,8 @@ const MAX_CANDIDATES = 4;
 
 export function parse(input: string, context: PaletteContext): ParseResult {
   if (!input || input.trim().length === 0) {
-    if (!localStorage.getItem("hasSeenPalette")) {
-      localStorage.setItem("hasSeenPalette", "1");
+    if (!hasSeenPalette()) {
+      markPaletteSeen(); // persists via safeStorage only when available
       return {
         kind: "candidates",
         candidates: [{

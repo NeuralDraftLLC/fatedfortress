@@ -6,7 +6,8 @@
  *
  * TYPE SELECTION RATIONALE (do not change without full review):
  *   Y.Map    — room metadata: single logical owner, key-value fields
- *   Y.Array  — receipts, participants, templates: append-only, concurrent-safe
+ *   Y.Map    — participants: keyed by pubkey (Phase 5 L12 — replaces unsafe Y.Array delete/insert races)
+ *   Y.Array  — receipts, templates: append-only, concurrent-safe
  *   Y.Text   — output stream: character-level concurrent edits for streaming
  *   Y.Map<V> — presence: each peer owns exactly one entry keyed by pubkey
  *
@@ -24,6 +25,11 @@ import type {
   RoomRole,
 } from "@fatedfortress/protocol";
 import { getMyPubkey } from "./identity.js";
+
+/** Canonical participant store (pubkey → entry). */
+const PARTICIPANT_MAP_KEY = "participantMap";
+/** Legacy v0 — migrated once into participantMap (see migrateParticipantsFromLegacy). */
+const LEGACY_PARTICIPANTS_KEY = "participants";
 
 export interface RoomMeta {
   id: RoomId;
@@ -76,7 +82,7 @@ export interface SpectatorMessage {
 
 export interface FortressRoomDoc {
   meta: Y.Map<RoomMeta[keyof RoomMeta]>;
-  participants: Y.Array<ParticipantEntry>;
+  participants: Y.Map<ParticipantEntry>;
   output: Y.Text;
   receiptIds: Y.Array<ReceiptId>;
   templates: Y.Array<string>;
@@ -91,7 +97,7 @@ export function createRoomDoc(initialMeta?: Partial<RoomMeta>): FortressRoomDoc 
   const doc = new Y.Doc();
 
   const meta         = doc.getMap<RoomMeta[keyof RoomMeta]>("meta");
-  const participants  = doc.getArray<ParticipantEntry>("participants");
+  const participants = doc.getMap<ParticipantEntry>(PARTICIPANT_MAP_KEY); // not LEGACY_PARTICIPANTS_KEY
   const output       = doc.getText("output");
   const receiptIds   = doc.getArray<ReceiptId>("receiptIds");
   const templates    = doc.getArray<string>("templates");
@@ -129,7 +135,10 @@ export const getOutputText = (r: FortressRoomDoc): string       => r.output.toSt
 export const getReceiptIds = (r: FortressRoomDoc): ReceiptId[]  => r.receiptIds.toArray();
 export const getTemplates  = (r: FortressRoomDoc): string[]     => r.templates.toArray();
 export const getPresence   = (r: FortressRoomDoc): PresenceEntry[] => Array.from(r.presence.values());
-export const getParticipants = (r: FortressRoomDoc): ParticipantEntry[] => r.participants.toArray();
+export const getParticipants = (r: FortressRoomDoc): ParticipantEntry[] => {
+  migrateParticipantsFromLegacy(r); // OPFS/remote may still carry legacy array ops
+  return Array.from(r.participants.values()).sort((a, b) => a.joinedAt - b.joinedAt);
+};
 
 export function setMeta(
   room: FortressRoomDoc,
@@ -216,34 +225,51 @@ export function getActiveRoomDocIfSet(): FortressRoomDoc | null {
 export function getMyJoinedAt(doc: FortressRoomDoc): number {
   const myPubkey = getMyPubkey();
   if (!myPubkey) return Date.now();
-  const participant = doc.participants.toArray().find((p: ParticipantEntry) => p.pubkey === myPubkey);
+  migrateParticipantsFromLegacy(doc);
+  const participant = doc.participants.get(myPubkey as PublicKeyBase58);
   return participant?.joinedAt ?? Date.now();
 }
 
 /**
- * Adds a participant. Idempotent — checks by pubkey before pushing.
- * Uses toArray() scan — acceptable for rooms up to ~1000 participants.
+ * One-time copy from legacy Y.Array("participants") → Y.Map(participantMap), then clear the array.
+ * Safe if multiple peers run concurrently — set-by-pubkey is last-write-wins per key.
+ */
+export function migrateParticipantsFromLegacy(room: FortressRoomDoc): void {
+  const legacy = room.doc.getArray<ParticipantEntry>(LEGACY_PARTICIPANTS_KEY);
+  if (legacy.length === 0) return;
+  room.doc.transact(() => {
+    for (const entry of legacy.toArray()) {
+      const k = entry.pubkey as string;
+      if (!room.participants.has(k)) {
+        room.participants.set(k, entry); // first writer wins if races with another replica
+      }
+    }
+    legacy.delete(0, legacy.length); // stop replaying duplicate array inserts on sync
+  });
+}
+
+/**
+ * Adds a participant. Idempotent — one entry per pubkey (Y.Map last-write-wins).
  */
 export function addParticipant(room: FortressRoomDoc, participant: ParticipantEntry): void {
+  migrateParticipantsFromLegacy(room);
   room.doc.transact(() => {
-    const exists = room.participants.toArray().some((p: ParticipantEntry) => p.pubkey === participant.pubkey);
-    if (!exists) {
-      room.participants.push([participant]);
+    const k = participant.pubkey as string;
+    if (!room.participants.has(k)) {
+      room.participants.set(k, participant);
     }
   });
 }
 
 /**
- * Updates an existing participant's fields. Idempotent.
+ * Updates an existing participant's fields. Merge-safe per pubkey.
  */
 export function updateParticipant(room: FortressRoomDoc, pubkey: string, patch: Partial<ParticipantEntry>): void {
+  migrateParticipantsFromLegacy(room);
   room.doc.transact(() => {
-    const arr = room.participants.toArray();
-    const idx = arr.findIndex((p: ParticipantEntry) => p.pubkey === pubkey);
-    if (idx < 0) return;
-    const current = arr[idx];
-    room.participants.delete(idx);
-    room.participants.insert(idx, [{ ...current, ...patch } as ParticipantEntry]);
+    const existing = room.participants.get(pubkey as PublicKeyBase58);
+    if (!existing) return;
+    room.participants.set(pubkey as PublicKeyBase58, { ...existing, ...patch } as ParticipantEntry);
   });
 }
 
@@ -259,9 +285,9 @@ export function serializeDoc(room: FortressRoomDoc): Uint8Array {
 export function hydrateDoc(update: Uint8Array): FortressRoomDoc {
   const doc = new Y.Doc();
   Y.applyUpdate(doc, update);
-  return {
+  const fortress: FortressRoomDoc = {
     meta:          doc.getMap("meta"),
-    participants:  doc.getArray("participants"),
+    participants:  doc.getMap<ParticipantEntry>(PARTICIPANT_MAP_KEY),
     output:        doc.getText("output"),
     receiptIds:    doc.getArray("receiptIds"),
     templates:     doc.getArray("templates"),
@@ -269,6 +295,8 @@ export function hydrateDoc(update: Uint8Array): FortressRoomDoc {
     spectatorChat: doc.getArray<SpectatorMessage>("spectatorChat"),
     doc,
   };
+  migrateParticipantsFromLegacy(fortress);
+  return fortress;
 }
 
 /**
@@ -277,4 +305,5 @@ export function hydrateDoc(update: Uint8Array): FortressRoomDoc {
  */
 export function applyRemoteUpdate(room: FortressRoomDoc, update: Uint8Array): void {
   Y.applyUpdate(room.doc, update);
+  migrateParticipantsFromLegacy(room); // peer may still emit old "participants" array CRDT ops
 }

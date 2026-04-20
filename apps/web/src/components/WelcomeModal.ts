@@ -1,4 +1,5 @@
 // apps/web/src/components/WelcomeModal.ts
+import { markWelcomeSeen } from "../util/storage.js"; // embed-safe vs raw localStorage
 
 export function showWelcomeModal(): void {
   const overlay = document.createElement("div");
@@ -27,17 +28,17 @@ export function showWelcomeModal(): void {
 
   overlay.querySelector("#btn-close")?.addEventListener("click", () => {
     overlay.remove();
-    localStorage.setItem("hasSeenWelcome", "1");
+    markWelcomeSeen();
   });
   overlay.querySelector("#btn-join-room")?.addEventListener("click", () => {
     overlay.remove();
-    localStorage.setItem("hasSeenWelcome", "1");
+    markWelcomeSeen();
     window.history.pushState({}, "", "/table");
     window.dispatchEvent(new PopStateEvent("popstate"));
   });
   overlay.querySelector("#btn-add-key")?.addEventListener("click", () => {
     overlay.remove();
-    localStorage.setItem("hasSeenWelcome", "1");
+    markWelcomeSeen();
     window.history.pushState({}, "", "/connect");
     window.dispatchEvent(new PopStateEvent("popstate"));
   });

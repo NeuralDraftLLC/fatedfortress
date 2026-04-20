@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>FatedFortress</title>
-  <!-- TODO: replace 'unsafe-inline' in style-src with nonces/hashes once CSS is extracted -->
+  <!-- L3: Per-request nonces belong on the edge (see deploy worker). SPA uses script-src 'self' for Vite-hashed /assets/*.js. -->
   <meta http-equiv="Content-Security-Policy" content="
   default-src 'self';
   script-src 'self';

@@ -1,8 +1,8 @@
 /**
- * worker.ts — Fortress Worker main entry point.
+ * worker.ts — Fortress Worker iframe entry (bundled as worker.html on keys.* origin).
  *
- * Loaded cross-origin at keys.fatedfortress.com as a sandboxed iframe (window context).
- * Communicates with the FF main frame exclusively via postMessage.
+ * Message gate: ignore any postMessage whose origin is not FF_ORIGIN (the web app).
+ * TERMINATE — full teardownSession() (keys + budget). TEARDOWN (router) — budget only; keys kept.
  */
 
 const FF_ORIGIN = typeof __FF_ORIGIN__ !== "undefined"
@@ -13,10 +13,10 @@ import { teardownLiquidity } from "./liquidity.js";
 import { abortAllGenerations } from "./generate.js";
 import { dispatchMessage, send, sendError, type InboundMessage } from "./router.js";
 
-function teardownSession(): void {
+async function teardownSession(): Promise<void> {
   abortAllGenerations();
   teardownKeystore();
-  teardownLiquidity();
+  await teardownLiquidity();
 }
 
 window.addEventListener("message", async (event: MessageEvent) => {
@@ -26,7 +26,7 @@ window.addEventListener("message", async (event: MessageEvent) => {
   if (!msg || typeof msg.type !== "string") return;
 
   if (msg.type === "TERMINATE") {
-    teardownSession();
+    await teardownSession();
     send({ type: "OK", requestId: "__terminate__", payload: { terminated: true } });
     return;
   }
@@ -41,8 +41,8 @@ window.addEventListener("message", async (event: MessageEvent) => {
   }
 });
 
-window.addEventListener("beforeunload", teardownSession);
-window.addEventListener("unload", teardownSession);
+window.addEventListener("beforeunload", () => void teardownSession()); // tab kill / hard nav — SPA uses TEARDOWN too
+window.addEventListener("unload", () => void teardownSession());
 window.addEventListener("pagehide", (e: PageTransitionEvent) => {
-  if (!e.persisted) teardownSession();
+  if (!e.persisted) void teardownSession();
 });

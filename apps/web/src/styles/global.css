@@ -758,14 +758,15 @@ button:focus-visible {
   gap: 8px;
 }
 
+/* Phase 5 L1 — receipt card: uniform border + elevation (no thick accent border-left). */
 .receipt-card {
   position: relative;
   border: 1px solid var(--ff-border);
-  border-left: 3px solid var(--ff-border);
   padding: 0;
   cursor: pointer;
   background: #fafaf8;
   overflow: hidden;
+  box-shadow: 2px 2px 0 rgba(0, 0, 0, 0.06);
   transition:
     border-color var(--ff-tap) ease,
     background var(--ff-tap) ease,

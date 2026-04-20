@@ -4,6 +4,11 @@
  * Re-exported from: @fatedfortress/protocol
  * Consumed by: apps/web, apps/worker, apps/relay
  *
+ * FIX — Low L9: JSON serialization determinism for budget signing
+ *   encodeBudgetTokenSigningMessage() uses deterministicJSON(), not raw JSON.stringify(),
+ *   so signing bytes do not depend on object insertion order across engines/callers.
+ *   deterministicJSON is internal; always sign/verify via encodeBudgetTokenSigningMessage.
+ *
  * Types:
  *   RoomId, ReceiptId, RoomCategory, RoomAccess
  *   PaletteIntent, PaletteContext, ParseResult
@@ -17,12 +22,12 @@
  *   base64urlEncode / base64urlDecode
  *   toBase58 / fromBase58
  *   verifyBudgetToken / generateTokenId / generateTokenNonce
- *   encodeBudgetTokenSigningMessage / isBudgetToken
+ *   encodeBudgetTokenSigningMessage (canonical bytes; see L9) / isBudgetToken
  *   assertEd25519Supported
  *   BUDGET_TOKEN_TTL_MS
  *
  * Constants:
- *   FF_ORIGIN, PROVIDER_ALLOWLIST
+ *   FF_ORIGIN, WORKER_ORIGIN, PROVIDER_ALLOWLIST
  */
 
 // ---------------------------------------------------------------------------
@@ -151,6 +156,11 @@ export interface SubBudgetToken {
   expiresAt: number;
   nonce: string;
   signature: string & { readonly __brand: "Signature" };
+  /**
+   * When `"handoff"`, token accompanies Y.js snapshot on relay; same structural checks as sub-budget,
+   * but tokensGranted is 0 and signing may be validated when delegate first spends.
+   */
+  purpose?: "handoff";
 }
 
 export interface PaymentIntent {
@@ -191,18 +201,36 @@ export async function hashOutput(output: string): Promise<string> {
   return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+/**
+ * Phase 5 Low L10 — Chunked base64url: avoid spreading huge Uint8Arrays into
+ * String.fromCharCode / fromCharCode(...chunk) (V8 ~65k arg limit on large Y.js payloads).
+ */
+const B64_CHUNK = 8_192;
+
 export function base64urlEncode(data: Uint8Array): string {
-  let base64 = btoa(String.fromCharCode(...data));
-  return base64.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  let binaryStr = "";
+  for (let i = 0; i < data.length; i += B64_CHUNK) {
+    const chunk = data.subarray(i, i + B64_CHUNK); // ≤8k spread args — under V8 arg ceiling
+    binaryStr += String.fromCharCode(...chunk);
+  }
+  return btoa(binaryStr)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
 }
 
 export function base64urlDecode(str: string): Uint8Array {
   str = str.replace(/-/g, "+").replace(/_/g, "/");
   while (str.length % 4) str += "=";
-  const binary = atob(str);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
+  const binaryStr = atob(str);
+  const length = binaryStr.length;
+  const bytes = new Uint8Array(length);
+  // Byte-by-byte fill — never `fromCharCode(...allBytes)` on megabyte snapshots
+  for (let i = 0; i < length; i += B64_CHUNK) {
+    const end = Math.min(i + B64_CHUNK, length);
+    for (let j = i; j < end; j++) {
+      bytes[j] = binaryStr.charCodeAt(j);
+    }
   }
   return bytes;
 }
@@ -272,9 +300,38 @@ export function isBudgetToken(obj: any): obj is BudgetToken {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Deterministic JSON for budget signatures (internal — use encodeBudgetTokenSigningMessage)
+// ---------------------------------------------------------------------------
+
+/**
+ * Canonical JSON string for signing: recurse into objects and sort keys lexicographically
+ * before serializing. Arrays keep element order; primitives delegate to JSON.stringify.
+ * Undefined/functions/symbols in leaves follow JSON.stringify coercions (≈ null / omit rules
+ * where applicable — budget payloads are flat primitives only).
+ */
+function deterministicJSON(value: unknown): string {
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value) ?? "null";
+  }
+
+  if (Array.isArray(value)) {
+    return "[" + value.map(deterministicJSON).join(",") + "]";
+  }
+
+  const sortedKeys = Object.keys(value as object).sort();
+  const pairs = sortedKeys.map(
+    (k) => `${JSON.stringify(k)}:${deterministicJSON((value as Record<string, unknown>)[k])}`
+  );
+  return "{" + pairs.join(",") + "}";
+}
+
+/**
+ * Canonical bytes for Ed25519 budget/sub-budget signing and verification.
+ * L9: deterministic key order — must match on host (mint) and verifier (worker).
+ */
 export function encodeBudgetTokenSigningMessage(token: Omit<BudgetToken, "id" | "signature">): Uint8Array {
-  const s = JSON.stringify(token);
-  return new TextEncoder().encode(s);
+  return new TextEncoder().encode(deterministicJSON(token));
 }
 
 export async function assertEd25519Supported(): Promise<void> {
@@ -341,10 +398,7 @@ export async function verifyBudgetToken(
     throw new FFError("BudgetTokenForged", "Signature verification failed");
   }
 
-  // 3. Prevent Replay
-  // TODO [Phase 1 follow-up]: seenNonces must survive restarts to prevent replay attacks.
-  // Persist consumed nonces keyed by (roomId + hostPubkey) in IndexedDB (client)
-  // or Durable Object storage (worker). The current in-memory Set resets on reload.
+  // 3. Prevent replay (session-scoped Set here; worker persists nonces in IndexedDB — budget.ts)
   options.seenNonces.add(token.nonce);
   return { tokensGranted: token.tokensGranted };
 }

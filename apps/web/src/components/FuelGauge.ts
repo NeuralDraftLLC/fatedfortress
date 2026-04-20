@@ -64,7 +64,8 @@ export class FuelGauge {
     let totalConsumed = 0;
     let totalQuota = 0;
     for (const p of state.participants) {
-      totalConsumed += p.consumed;
+      const r = p.reserved ?? 0;
+      totalConsumed += p.consumed + r;
       totalQuota += p.quota;
     }
 
@@ -78,7 +79,10 @@ export class FuelGauge {
 
     // Build tooltip text
     const tooltip = state.participants
-      .map((p) => `${p.pubkey.slice(0, 8)}...: ${p.quota - p.consumed}/${p.quota}`)
+      .map((p) => {
+        const r = p.reserved ?? 0;
+        return `${p.pubkey.slice(0, 8)}...: ${p.quota - p.consumed - r}/${p.quota}`;
+      })
       .join("\n");
 
     this.element.title = `Per-participant breakdown:\n${tooltip}`;
