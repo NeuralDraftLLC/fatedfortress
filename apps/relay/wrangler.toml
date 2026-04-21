@@ -11,6 +11,11 @@ class_name = "RelayDO"
 name = "RELAY_REGISTRY"
 class_name = "RelayRegistryDO"
 
+# Required for Durable Object class deployments.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RelayDO", "RelayRegistryDO"]
+
 # ── TURN ─────────────────────────────────────────────────────────────────────
 # TURN_KEY_ID and TURN_KEY_API_TOKEN are Wrangler secrets — never add them here.
 # Run:
