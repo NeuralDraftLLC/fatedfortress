@@ -1,190 +1,516 @@
-%%{init: {"theme": "base", "fontFamily": "Iosevka, monospace", "fontSize": 12}}%%
+# Fortress UI Architecture — Stitch Compatible
+
+This document specifies the complete UI system for Stitch (Google AI UI generation) to produce pixel-perfect interfaces.
+
+---
+
+## Design System
+
+```
+Font: Iosevka (monospace)
+Color Palette:
+  --ff-black: #0a0a0a
+  --ff-white: #fafafa
+  --ff-gray-100: #f5f5f5
+  --ff-gray-200: #e5e5e5
+  --ff-gray-300: #d4d4d4
+  --ff-gray-400: #a3a3a3
+  --ff-gray-500: #737373
+  --ff-gray-600: #525252
+  --ff-gray-700: #404040
+  --ff-gray-800: #262626
+  --ff-gray-900: #171717
+  --ff-accent: #22c55e (green-500)
+  --ff-accent-hover: #16a34a
+  --ff-danger: #ef4444
+  --ff-warning: #f59e0b
+  --ff-info: #3b82f6
+
+Spacing Scale: 4px base (4, 8, 12, 16, 20, 24, 32, 40, 48, 64)
+Border Radius: 4px (sm), 8px (md), 12px (lg), 16px (xl)
+Shadows:
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.05)
+  --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.1)
+  --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.1)
+```
+
+---
+
+## Page Structure
+
+```
+App
+├── / (redirects to /table)
+├── /table [LobbyPage]
+├── /room [RoomPage]
+├── /spectate [SpectatePage]
+├── /me [IdentityPage]
+├── /connect [ConnectPage]
+└── /handlers/upgrade [UpgradePage]
+```
+
+---
+
+## Component Hierarchy — Full Tree
+
+```
+App
+└── Router
+    │
+    ├── LobbyPage (/table)
+    │   └── LobbyContainer
+    │       ├── Header
+    │       │   ├── Logo ("Fortress")
+    │       │   ├── NavLink (to="/me")
+    │       │   └── ThemeToggle
+    │       ├── RoomGrid
+    │       │   └── RoomCard (×N)
+    │       │       ├── RoomCardImage (category thumbnail)
+    │       │       ├── RoomCardMeta
+    │       │       │   ├── RoomCardTitle (name)
+    │       │       │   ├── RoomCardCategory (badge)
+    │       │       │   └── ParticipantCount (icon + count)
+    │       │       ├── FuelGauge (horizontal bar)
+    │       │       │   ├── FuelGaugeFill (width %)
+    │       │       │   └── FuelGaugeLabel ("XX% fuel")
+    │       │       └── RoomCardActions
+    │       │           ├── JoinButton → /room?id={roomId}
+    │       │           └── SpectateButton → /spectate?id={roomId}
+    │       ├── HereNowFeed
+    │       │   └── HereNowCard (×N, from here.now API)
+    │       │       ├── HereNowTitle
+    │       │       └── HereNowMeta
+    │       └── EmptyState (when no rooms)
+    │           ├── EmptyStateIcon
+    │           └── CreateRoomCTA
+    │
+    ├── RoomPage (/room)
+    │   └── RoomContainer
+    │       ├── DemoKeyBanner (conditional)
+    │       │   ├── BannerIcon
+    │       │   ├── BannerText
+    │       │   └── BannerCTA ("Connect Key" → /connect)
+    │       ├── KeyPromptBanner (conditional, no key + paid room)
+    │       │   ├── BannerIcon
+    │       │   ├── BannerText
+    │       │   └── BannerCTA
+    │       ├── OutputPane
+    │       │   ├── OutputHeader
+    │       │   │   ├── OutputTitle ("Output")
+    │       │   │   └── OutputActions (copy, clear)
+    │       │   ├── OutputContent
+    │       │   │   ├── MarkdownRenderer (prose)
+    │       │   │   ├── CodeBlock (×N, syntax highlighted)
+    │       │   │   │   ├── CodeBlockHeader (lang + copy)
+    │       │   │   │   └── CodeBlockContent
+    │       │   │   └── OutputSkeleton (loading)
+    │       │   └── OutputEmpty (initial state)
+    │       ├── ControlPane
+    │       │   ├── ModelSelector
+    │       │   │   ├── SelectorTrigger (current model name)
+    │       │   │   └── SelectorDropdown
+    │       │   │       └── ModelOption (×N, with icons)
+    │       │   ├── PromptInput
+    │       │   │   ├── Textarea (placeholder: "Describe what you want...")
+    │       │   │   └── CharacterCount
+    │       │   ├── GenerateButton
+    │       │   │   ├── ButtonIcon (sparkles)
+    │       │   │   ├── ButtonText ("Generate" | "Generating...")
+    │       │   │   └── ButtonSpinner (during generation)
+    │       │   ├── AbortButton (visible during generation)
+    │       │   └── FuelGaugeInline
+    │       │       ├── FuelIcon
+    │       │       └── FuelLabel
+    │       └── ReceiptPanel (collapsible)
+    │           ├── ReceiptPanelHeader
+    │           │   ├── ReceiptPanelTitle ("Receipt")
+    │           │   └── ReceiptPanelToggle (chevron)
+    │           └── ReceiptList
+    │               └── ReceiptCard (×N)
+    │                   ├── ReceiptCardHeader
+    │                   │   ├── ReceiptModel (icon + name)
+    │                   │   ├── ReceiptTimestamp
+    │                   │   └── ReceiptPrice (ETH)
+    │                   ├── ReceiptPrompt (truncated)
+    │                   ├── ForkTree
+    │                   │   └── ForkLine (×N, ASCII tree)
+    │                   └── ReceiptActions
+    │                       ├── ForkButton → /room?seed={receiptId}
+    │                       └── CopyButton
+    │
+    ├── SpectatePage (/spectate)
+    │   └── SpectateContainer
+    │       ├── SpectateHeader
+    │       │   ├── BackButton (→ /table)
+    │       │   ├── RoomTitle
+    │       │   └── ParticipantList
+    │       ├── OutputPane (same as RoomPage)
+    │       ├── SpectatorChat
+    │       │   ├── ChatHeader ("Spectator Chat")
+    │       │   ├── ChatMessages
+    │       │   │   └── ChatMessage (×N)
+    │       │   │       ├── MessageAvatar
+    │       │   │       ├── MessageContent
+    │       │   │       └── MessageTimestamp
+    │       │   ├── ChatInput
+    │       │   │   ├── Textarea (placeholder: "Say something...")
+    │       │   │   └── SendButton
+    │       │   └── ChatEmpty (no messages yet)
+    │       └── SpectateNotice
+    │           ├── NoticeIcon
+    │           └── NoticeText ("Generation disabled in spectate mode")
+    │
+    ├── IdentityPage (/me)
+    │   └── IdentityContainer
+    │       ├── Header
+    │       ├── IdentityCard
+    │       │   ├── AvatarDisplay (generated from pubkey)
+    │       │   ├── PubkeyDisplay (truncated + copy)
+    │       │   ├── DisplayNameInput
+    │       │   └── ExportButton
+    │       │       └── ExportDropdown
+    │       │           ├── ExportJSON
+    │       │           ├── ExportQR
+    │       │           └── ImportButton
+    │       ├── ReceiptVault
+    │       │   ├── VaultHeader
+    │       │   │   ├── VaultTitle ("Receipt Vault")
+    │       │   │   └── VaultCount (total receipts)
+    │       │   ├── VaultGrid
+    │       │   │   └── ReceiptCard (×N, from vault)
+    │       │   └── VaultEmpty
+    │       └── ForkCTA
+    │           ├── CTAIcon
+    │           └── CTAText + CTAButton → /table
+    │
+    ├── ConnectPage (/connect)
+    │   └── ConnectContainer
+    │       ├── Header
+    │       ├── ProviderGrid
+    │       │   └── ProviderCard (×N)
+    │       │       ├── ProviderIcon
+    │       │       ├── ProviderName
+    │       │       ├── APIKeyInput
+    │       │       │   ├── InputField (type=password)
+    │       │       │   ├── InputToggle (show/hide)
+    │       │       │   └── InputStatus (validating...)
+    │       │       ├── TestResult
+    │       │       │   ├── SuccessIcon (✓)
+    │       │       │   └── ErrorMessage
+    │       │       └── SaveButton
+    │       └── HelpText
+    │
+    └── UpgradePage (/handlers/upgrade)
+        └── UpgradeContainer
+            ├── UpgradeHeader
+            ├── PlanCard (paid access required)
+            │   ├── PlanName
+            │   ├── PlanPrice
+            │   └── PlanFeatures (list)
+            ├── PaymentForm
+            │   ├── EmailInput
+            │   ├── CardInput (Stripe Elements)
+            │   └── SubmitButton
+            └── BackButton (→ /table)
+```
+
+---
+
+## Shared Components
+
+### Button
+```
+States: default, hover, active, disabled, loading
+Variants:
+  - primary: green bg, white text
+  - secondary: gray bg, white text
+  - ghost: transparent, gray text
+  - danger: red bg, white text
+Sizes: sm (32px), md (40px), lg (48px)
+Props: leftIcon?, rightIcon?, loading?, disabled?, variant, size
+```
+
+### Input
+```
+States: default, focus, error, disabled
+Variants: text, password, textarea
+Props: label?, placeholder, error?, disabled?, type
+Features: password toggle (eye icon)
+```
+
+### Card
+```
+Props: interactive? (hover effect), padding
+Slots: header?, content, footer?
+```
+
+### Modal
+```
+States: open, closed
+Props: title, size (sm/md/lg/xl), closable?
+Slots: header, content, footer
+Behavior: backdrop click to close (if closable), ESC to close
+```
+
+### Dropdown
+```
+States: closed, open
+Props: trigger, placement (bottom-start/bottom-end/top-start/top-end)
+Slots: trigger, content, item
+Features: keyboard navigation, typeahead
+```
+
+### Toast
+```
+Variants: success, error, warning, info
+Props: message, duration (auto-dismiss), action?
+Behavior: stacks from bottom-right, auto-dismiss 5s default
+```
+
+### Skeleton
+```
+Props: variant (text|circle|rect), width?, height?, animation
+Use: loading states for content
+```
+
+### Badge
+```
+Variants: default, success, warning, danger, info
+Props: children, variant
+```
+
+### Tooltip
+```
+Props: content, placement, delay (200ms default)
+Behavior: hover/focus to show, mouse-leave/blur to hide
+```
+
+---
+
+## User Flows
+
+### Flow: Join Room
+```
+1. User at /table (LobbyPage)
+2. User clicks RoomCard JOIN button
+3. Navigate to /room?id={roomId}
+4. RoomPage mounts
+5. Check for stored API key (via worker-bridge.hasKey)
+   ├── No key + demo available → Show DemoKeyBanner
+   │   └── User clicks CTA → /connect
+   ├── No key + paid room → Show KeyPromptBanner
+   │   └── User clicks CTA → /connect
+   └── Has key or demo available → Proceed
+6. Join room via signaling (WebSocket to relay)
+7. Sync Y.js document
+8. Render OutputPane + ControlPane
+```
+
+### Flow: Generate Output
+```
+1. User types prompt in PromptInput
+2. User selects model (optional, defaults to last used)
+3. User clicks GenerateButton
+4. Button → loading state, AbortButton appears
+5. requestGenerate → worker-bridge → iframe
+6. Stream chunks → OutputPane updates in real-time
+7. On DONE: saveReceipt → vault
+8. Button → default state
+```
+
+### Flow: Fork Receipt
+```
+1. User at /me (IdentityPage) or /room (ReceiptPanel)
+2. User clicks ReceiptCard fork action
+3. Navigate to /room?seed={receiptId}
+4. Room loads with pre-filled prompt from receipt
+5. OutputPane shows original output (cached via handoff)
+6. User can modify prompt and generate new version
+```
+
+### Flow: Spectate Room
+```
+1. User at /table
+2. User clicks RoomCard SPECTATE button
+3. Navigate to /spectate?id={roomId}
+4. SpectateContainer mounts
+   ├── OutputPane (read-only)
+   ├── SpectatorChat (read/write)
+   └── Notice: "Generation disabled"
+5. WebSocket connects (spectate=1 flag)
+6. Receives real-time output sync
+```
+
+---
+
+## State Definitions
+
+### Room States
+```
+lobby:
+  rooms: Room[]
+  hereNowRooms: HereNowRoom[]
+  isLoading: boolean
+  error: string | null
+
+room:
+  status: connecting | connected | disconnected | error
+  isGenerating: boolean
+  isSpectator: boolean
+  doc: FortressRoomDoc
+  participants: Participant[]
+  output: string (markdown)
+  streamChunks: Chunk[]
+  error: string | null
+
+identity:
+  pubkey: string | null
+  displayName: string
+  isLoading: boolean
+  exportStatus: idle | exporting | success | error
+```
+
+### Component States
+```
+RoomCard:
+  default → hover (shadow lift, scale 1.02)
+  disabled (no fuel) → opacity 0.5
+
+GenerateButton:
+  default → hover → active
+  loading: spinner + "Generating..."
+  disabled (no fuel or no key)
+
+PromptInput:
+  default → focus (ring)
+  error (empty on submit)
+  disabled (during generation)
+
+APIKeyInput:
+  default → focus
+  validating (spinner)
+  valid (green check)
+  invalid (red x + error message)
+
+Toast:
+  entering (slide up + fade in)
+  visible
+  exiting (fade out)
+```
+
+---
+
+## Mermaid: Page Flow
+
+```mermaid
+flowchart LR
+    subgraph Pages
+        Table[LobbyPage<br/>/table]
+        Room[RoomPage<br/>/room]
+        Spectate[SpectatePage<br/>/spectate]
+        Me[IdentityPage<br/>/me]
+        Connect[ConnectPage<br/>/connect]
+        Upgrade[UpgradePage<br/>/handlers/upgrade]
+    end
+
+    Table -->|Join| Room
+    Table -->|Spectate| Spectate
+    Table -->|Nav| Me
+    Table -->|Nav| Connect
+
+    Room -->|Upgrade| Upgrade
+    Room -->|Fork| Room
+
+    Me -->|Fork CTA| Table
+    Connect -->|Success| Room
+```
+
+---
+
+## Mermaid: Data Flow
+
+```mermaid
 flowchart TB
-    subgraph apps_web["apps/web — Browser SPA (fatedfortress.com)"]
-        direction TB
-
-        subgraph pages["pages"]
-            table["pages/table\nFetches GET /rooms from relay registry, falls back to\nhere.now API then IndexedDB cache. Renders RoomCard grid."]
-            room["pages/room\njoinRoom → relay WebSocket → Y.js CRDT sync\nmounts ControlPane + OutputPane + demo/consent gates"]
-            spectate["pages/spectate\nIdentical to room mount but spectate=true flag\nDisables generation, mounts SpectatorChat + OutputPane"]
-            me["pages/me\nReceipt vault — identity export/import + fork CTA"]
-            connect["pages/connect\nPer-provider API key input → bridge.storeKey()"]
-        end
-
-        subgraph components["components"]
-            subgraph palette["Palette/"]
-                pal["index · / opens overlay, Tab ghost completion"]
-                parser["parser · tokenize + stem → scorer array → confidence sort"]
-                scorers["scorers · 17 intent scorers\ncreate_room · join · spectate · fork · switch_model\npublish · pay · invite · help …"]
-                extractors["extractors · extract model · category · price\nroomId · receiptId from token arrays"]
-                trie["commandTrie · Prefix trie for Tab ghost text"]
-                context["context · PaletteContext factory\nroomDoc · focusedReceiptId"]
-            end
-            cp["components/ControlPane\nModel selector · prompt input · Generate btn\nFuelGauge polling · switch_model event listener"]
-            banner["components/DemoKeyBanner\nmountDemoKeyBanner · mountKeyPromptBanner"]
-            rec["components/ReceiptCard\nbuildForkLines — ASCII fork tree from flat receipt list"]
-            card["components/RoomCard\nLobby tile — name · category · fuel bar · SPECTATE/JOIN"]
-            welcome["components/WelcomeModal\nFirst-run modal — /spectate /join /connect hints"]
-            out["components/OutputPane · Subscribes to doc.output Y.Text"]
-            chat["components/SpectatorChat\nSpectatorChatView — reads/writes spectatorChat Y.Array"]
-        end
-
-        subgraph net["net"]
-            wb["net/worker-bridge · postMessage → iframe\nstoreKey · hasKey · encryptKey · decryptKey\nconsumeDemoToken · checkDemoAvailable\nrequestGenerate (streaming CHUNK/DONE/ERROR)\nrequestFuelGauge · requestTeardown · requestAbort"]
-            sig["net/signaling · WebSocket relay client\njoinRoom (5s timeout on open) · REDIRECT → shardUrl reconnect\nupsertPresence · removePresence\nread/write OPFS snapshots (30s interval, on close flush)\nHANDOFF accept — relay → acceptHandoff(doc, msg)"]
-            hn["net/herenow · here.now integration\npublishToHereNow (stub — prompts manual node scripts/publish.mjs)\nlinkHereNowUrl · linkHereNowAccount (OAuth popup)\nUses safeStorage for here.now auth token"]
-            tempo["net/tempo · calculateSplit · showSplitModal · executePayment\n80% host · 20% FF platform (USDC stablecoin)"]
-        end
-
-        subgraph state["state"]
-            ydoc["state/ydoc · Y.js CRDT factory\nFortressRoomDoc:\n  meta · participants · output · receiptIds\n  templates · presence · spectatorChat\ngetAllowCommunityKeys · needsKeyPolicyConsent\nhydrateDoc · serializeDoc · applyRemoteUpdate"]
-            ident["state/identity · Ed25519 tab identity\ncreateIdentity · getMyPubkey · getMyPrivateKey\ngetMyDisplayName · getIdentity\nexportIdentity · importIdentity (PBKDF2/AES-GCM, PRIORITY 3)\nHKDF/AES-256-GCM wrapped PrivKey in IndexedDB"]
-            vault["state/vault · IndexedDB receipt store\nsaveReceipt · getReceipts · getReceiptById"]
-            presence["state/presence · Host presence detection\ncheckHostPresence (30s stale check) → calls initiateHandoff\ncleanupRoomState"]
-            handoff["state/handoff\nPart A: Y.js snapshot handoff — initiateHandoff · acceptHandoff\n(sends via relay WebSocket, SubBudgetToken wire format)\nPart B: Minimax stream cache — appendStreamChunk · markStreamComplete\ngetCachedOutput — LRU 50 · TTL 10min · SHA-256 cache key"]
-        end
-
-        handlers["handlers/upgrade · handleUpgradeRoom — access=paid"]
-        util["util/storage · SafeStorage (iframe-safe, falls back to Map)"]
+    subgraph UI["UI Layer"]
+        Pages[All Pages]
+        Components[All Components]
     end
 
-    subgraph apps_worker["apps/worker — Sandboxed Iframe (keys.fatedfortress.com)"]
-        direction TB
-
-        subgraph src["src/"]
-            router["router · dispatchMessage switch on msg.type\nOutbound: CHUNK · DONE · ERROR · OK · FUEL"]
-            gen["generate · handleGenerate streaming handler\nreserveQuota → adapter → stream → finaliseQuota\nabortAllGenerations (on TEARDOWN)"]
-            budgets["budget · IndexedDB nonce persistence (fortress-budget-nonces)\nmintBudgetToken · verifyAndConsumeToken\nreserveQuota (TOCTOU) · releaseQuota\ngetFuelGaugeState · teardownBudget"]
-            liq["liquidity · mintToken · verifyToken · mintSubBudgetToken\ngetFuelState · delegate/revoke sub-budget"]
-            keystore["keystore · AES-256-GCM + Argon2id (65536 m, 3 t, 1 p)\nstoreKey · hasKey · getRawKey · getSigningKey\nNon-extractable Ed25519 keypair · teardownKeystore"]
-        end
-
-        subgraph router_handlers["router dispatch (router.ts)"]
-            enforce["enforceKeyPolicy · Server-side allowCommunityKeys gate\nreads token.allowCommunityKeys · isHost bypass"]
-            demoH["handleConsumeDemoToken · handleCheckDemoAvailable\nfetch /demo/consume · Origin attestation via Ed25519 signing key"]
-            abortH["ABORT_GENERATE · TEARDOWN\nabort controller by requestId · teardownBudget (IndexedDB)"]
-            budgetH["VERIFY_TOKEN · MINT_TOKEN · INIT_QUOTA · FUEL_GAUGE\nDELEGATE_SUB_BUDGET · REVOKE_DELEGATION"]
-            cryptoH["ENCRYPT_KEY · DECRYPT_KEY · STORE_KEY · HAS_KEY\ngetSigningKey · Non-extractable Ed25519 keypair"]
-        end
-
-        subgraph adapters["adapters/"]
-            adapters_llm["openai · anthropic · google · minimax\ngroq · openrouter\nStreaming SSE → yield delta.text chunks"]
-        end
-
-        worker_entry["worker.ts · ORIGIN GATE — ignores postMessage\n≠ FF_ORIGIN. teardownSession on TERMINATE."]
+    subgraph State["State Management"]
+        YDoc[Y.js<br/>FortressRoomDoc]
+        Vault[IndexedDB<br/>fortress-vault]
+        Identity[IndexedDB<br/>fortress-identity]
     end
 
-    subgraph apps_relay["apps/relay — Cloudflare Worker (relay.fatedfortress.com)"]
-        direction TB
-
-        relayDO["RelayDO · Per-room WebSocket relay\npeers Map · offer/answer/ice-candidate routing\n(spectators excluded from signaling)\nsync broadcast · REDIRECT @80 peers\nCross-shard: peerToShard map for O(1) routing"]
-        relayReg["RelayRegistryDO · Global room registry + demo rate-limits\nGET /rooms · POST /demo/consume · GET /demo/check\nSeeded: Fortress Alpha · Code Club · Paid Room"]
+    subgraph Network["Network Layer"]
+        Bridge[worker-bridge<br/>iframe message]
+        Sig[signaling<br/>WebSocket]
+        Relay[relay.fatedfortress.com]
+        HereNow[api.here.now]
     end
 
-    subgraph external["External Services"]
-        llm["LLM Providers\nopenai · anthropic · google · minimax\ngroq · openrouter"]
-        here_now["here.now\nPermanent room/receipt publishing\nOAuth account linking"]
-        tempo_ext["Tempo · USDC split payments\n80% host · 20% FF platform"]
+    subgraph Worker["Worker (keys.fatedfortress.com)"]
+        Router[router.ts]
+        Gen[generate.ts]
+        Budget[budget.ts]
+        Keystore[keystore.ts]
     end
 
-    %% — room page wiring — %%
+    UI -->|read/write| YDoc
+    YDoc -->|sync| Sig
+    Sig -->|WebSocket| Relay
+    Bridge -->|postMessage| Gen
+    Bridge -->|postMessage| Keystore
+    Pages -->|fetch rooms| HereNow
+```
 
-    room -->|"gateKeyPolicyConsent"| banner
-    room -->|"joinRoom (signaling)"| sig
-    room -->|"resolveEntryMode · bridge.consumeDemoToken()"| wb
-    room -->|"setMeta · getParticipants · getAllowCommunityKeys"| ydoc
-    room -->|"executePayment"| tempo
-    room -->|"publishToHereNow · linkHereNowUrl(doc, url)"| hn
-    room -->|"checkHostPresence · cleanupRoomState"| presence
-    room -->|"mount SpectatorChatView · OutputPane"| chat
-    room -->|"mount OutputPane"| out
+---
 
-    %% — components — %%
+## Routing
 
-    cp -->|"requestGenerate · hasKey · requestFuelGauge"| wb
-    cp -->|"appendOutput · getTemplates · getRoomId"| ydoc
-    cp -->|"appendStreamChunk · markStreamComplete · streamCacheKey"| handoff
-    cp -->|"getMyPubkey"| ident
-    cp -->|"saveReceipt on generation done"| vault
+| Route | Component | Auth Required | Key Required |
+|-------|-----------|---------------|--------------|
+| `/table` | LobbyPage | No | No |
+| `/room` | RoomPage | No | No (demo or key) |
+| `/spectate` | SpectatePage | No | No |
+| `/me` | IdentityPage | No | No |
+| `/connect` | ConnectPage | No | No |
+| `/handlers/upgrade` | UpgradePage | Yes | Yes (paid) |
 
-    banner -->|"connect key CTA → /connect"| connect
+---
 
-    out -->|"subscribe: doc.output.observe()"| ydoc
-    chat -->|"read/write: doc.spectatorChat Y.Array"| ydoc
+## Error States
 
-    rec -->|"attachForkAction — navigates to /room?seed=<id>"| room
+| Context | Error | UI Response |
+|---------|-------|-------------|
+| Room join | Wrong room ID | Toast error + redirect /table |
+| Generation | No API key | DemoKeyBanner or KeyPromptBanner |
+| Generation | Model unavailable | Toast error + ModelSelector highlight |
+| Generation | Rate limit | Toast warning + cooldown timer |
+| here.now feed | API failure | Silent fail, show cached or empty |
+| Identity export | IndexedDB blocked | Modal error + retry button |
 
-    me -->|"exportIdentity · importIdentity"| ident
-    me -->|"getReceipts"| vault
-    me -->|"ReceiptCard + attachForkAction"| rec
+---
 
-    handlers -->|"setMeta · updateParticipant"| ydoc
+## Responsive Breakpoints
 
-    connect -->|"bridge.storeKey()"| wb
+```
+mobile: < 640px
+tablet: 640px - 1024px
+desktop: > 1024px
 
-    table -->|"fetch GET /rooms"| relayReg
-    table -.->|"fetch https://api.here.now/v1/rooms\n(bearer token, cache fallback)"| here_now
-    table -->|"safeStorage KEY_HERENOW_TOKEN"| util
-    hn -->|"safeStorage KEY_HERENOW_TOKEN"| util
+Mobile Layout:
+  - RoomGrid: 1 column
+  - ControlPane: full width, bottom fixed
+  - ReceiptPanel: bottom sheet
 
-    pal --> parser
-    parser --> scorers
-    scorers --> extractors
-    scorers --> trie
-    parser --> context
-    context --> ydoc
+Tablet Layout:
+  - RoomGrid: 2 columns
+  - ControlPane: sidebar (collapsed by default)
+  - ReceiptPanel: drawer
 
-    %% — state / handoff — %%
-
-    sig -->|"Y.js sync · HANDOFF relay"| ydoc
-    sig -->|"WebSocket connect\nroomId · peerId · spectate=1"| relayDO
-    relayDO -.->|"WebSocket frames back\n(sync · offer/answer/ice)"| sig
-
-    %% — web ↔ relay — %%
-
-    handoff -->|"getRelayWebSocket()"| sig
-    handoff -->|"serializeDoc · applyRemoteUpdate"| ydoc
-    handoff -->|"getMyPubkey"| ident
-
-    presence -->|"receives FortressRoomDoc as param"| ydoc
-
-    vault -.->|"IndexedDB fortress-vault"| vault
-    ident -.->|"IndexedDB fortress-identity"| ident
-
-    %% — web → worker bridge — %%
-
-    wb -.->|"postMessage\norigin=WORKER_ORIGIN"| gen
-    wb -.->|"postMessage\norigin=WORKER_ORIGIN"| keystore
-    wb -.->|"HTTP POST /demo/consume"| relayReg
-    wb -.->|"HTTP GET /demo/check"| relayReg
-
-    %% — worker internal — %%
-
-    worker_entry -->|"imports dispatchMessage"| router
-    router --> gen
-    router --> budgets
-    router --> keystore
-    router --> liq
-    router --> enforce
-    router --> demoH
-    router --> abortH
-    router --> budgetH
-    router --> cryptoH
-
-    gen --> keystore
-    gen --> budgets
-    gen --> adapters_llm
-
-    liq --> keystore
-    demoH -.->|"fetch /demo/consume\nOrigin attestation"| relayReg
-
-    adapters_llm -->|"Streaming SSE\ndelta.text"| llm
-
-    keystore -.->|"AES-256-GCM + Argon2id\nkey-wrapping ops"| keystore
-
-    %% — relay ↔ web — %%
-
-    relayReg -.->|"HTTP GET /rooms\n(server-push or long-poll optional)"| table
-
-    tempo -.->|"Payment POST"| tempo_ext
-    hn -->|"linkHereNowUrl(doc, url)"| ydoc
+Desktop Layout:
+  - RoomGrid: 3 columns
+  - ControlPane: fixed sidebar
+  - ReceiptPanel: collapsible panel
+```

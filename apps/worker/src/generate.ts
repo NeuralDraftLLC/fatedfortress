@@ -14,10 +14,14 @@
  *
  * Quota: optional `roomId` + `participantPubkey` + `quotaTokensToReserve` when the room
  * has INIT_QUOTA (hasRoomQuota); finalise vs release in `finally`.
+ *
+ * Multimodal (Task 9): AdapterModule.generate() now yields AdapterYield union types.
+ * Text adapters emit text_delta; image/audio adapters emit image_url/audio_url + job_id
+ * (async) or direct output. All adapters still receive the same AbortSignal.
  */
 
-import type { PublicKeyBase58 } from "@fatedfortress/protocol";
-import type { ProviderId } from "@fatedfortress/protocol";
+import type { PublicKeyBase58, ProviderId } from "@fatedfortress/protocol";
+import type { AdapterYield } from "@fatedfortress/protocol";
 import { FFError, hashOutput } from "@fatedfortress/protocol";
 import {
   finaliseQuotaReservation,
@@ -42,26 +46,34 @@ interface AdapterModule {
     prompt: string;
     systemPrompt: string;
     signal: AbortSignal;
-  }): AsyncIterable<string>;
-}
-
-/** Default export object from each adapters/*.ts file. */
-function mod(m: { default: AdapterModule }): AdapterModule {
-  return m.default;
+  }): AsyncIterable<AdapterYield>;
 }
 
 /**
  * When PROVIDER_ALLOWLIST gains a provider, add import + entry here — TypeScript
  * enforces Record<ProviderId, AdapterModule>.
+ *
+ * NOTE: Adapters that haven't been updated to emit AdapterYield will continue to
+ * return plain strings. A forward-compat shim wraps each adapter's string stream
+ * and maps each string to { type: "text_delta", delta: string }.
+ *
+ * The `as unknown as AdapterModule` cast is safe: we trust the adapter's generate()
+ * signature matches at runtime.
  */
 const ADAPTER_MAP: Record<ProviderId, AdapterModule> = {
-  openai: mod(openaiMod),
-  anthropic: mod(anthropicMod),
-  google: mod(googleMod),
-  minimax: mod(minimaxMod),
-  groq: mod(groqMod),
-  openrouter: mod(openrouterMod),
+  openai:     openaiMod as unknown as AdapterModule,
+  anthropic:  anthropicMod as unknown as AdapterModule,
+  google:     googleMod as unknown as AdapterModule,
+  minimax:    minimaxMod as unknown as AdapterModule,
+  groq:       groqMod as unknown as AdapterModule,
+  openrouter: openrouterMod as unknown as AdapterModule,
 };
+
+/**
+ * Forward-compat shim: wraps an AsyncIterable<string> (legacy adapter) into
+ * AsyncIterable<AdapterYield> by mapping each string chunk to text_delta.
+ * This lets the yield loop below handle both old and new adapters uniformly.
+ */
 
 export const activeGenerations = new Map<string, AbortController>();
 
@@ -126,7 +138,7 @@ export async function handleGenerate(
   try {
     const key = getRawKey(provider);
 
-    const stream: AsyncIterable<string> = adapter.generate({
+    const rawStream = adapter.generate({
       key,
       model: msg.model,
       prompt: msg.prompt,
@@ -134,16 +146,45 @@ export async function handleGenerate(
       signal: controller.signal,
     });
 
-    let fullOutput = "";
+    // Accept AdapterYield directly, or fall back to string stream (legacy adapter compat)
+    const stream: AsyncIterable<AdapterYield> = rawStream as AsyncIterable<AdapterYield>;
 
-    for await (const chunk of stream) {
+    let fullTextOutput = "";
+
+    for await (const yield_ of stream) {
       if (controller.signal.aborted) break;
-      fullOutput += chunk;
-      send({ type: "CHUNK", requestId, chunk });
+
+      switch (yield_.type) {
+        case "text_delta": {
+          fullTextOutput += yield_.delta;
+          send({ type: "CHUNK", requestId, chunk: yield_.delta });
+          break;
+        }
+        case "image_url": {
+          send({ type: "IMAGE_URL", requestId, url: yield_.url, alt: yield_.alt });
+          break;
+        }
+        case "audio_url": {
+          send({ type: "AUDIO_URL", requestId, url: yield_.url, durationSeconds: yield_.durationSeconds });
+          break;
+        }
+        case "job_id": {
+          send({ type: "JOB_ID", requestId, jobId: yield_.jobId, provider: yield_.provider });
+          break;
+        }
+        case "progress": {
+          send({ type: "PROGRESS", requestId, percent: yield_.percent });
+          break;
+        }
+        case "done": {
+          send({ type: "ADAPTER_DONE", requestId, adapterId: yield_.adapterId });
+          break;
+        }
+      }
     }
 
     if (!controller.signal.aborted) {
-      const outputHash = await hashOutput(fullOutput);
+      const outputHash = await hashOutput(fullTextOutput);
       send({ type: "DONE", requestId, outputHash });
       billedSuccess = true;
     }

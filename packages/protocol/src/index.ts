@@ -72,6 +72,39 @@ export type RoomCategory =
   | "writing"
   | "general";
 
+/** Modality supported in a room or generation request. */
+export type Modality = "text" | "image" | "audio" | "video";
+
+/**
+ * Yield types emitted by adapter `generate()` implementations.
+ * Each variant carries the data needed by the caller.
+ *
+ * text_delta  → incremental text token (same as current string yield)
+ * image_url  → URL or opfs:// path to a generated image
+ * audio_url  → URL or opfs:// path to generated audio
+ * job_id     → async job reference (for polling-based providers)
+ * progress   → integer 0–100 estimated progress
+ * done       → final marker; adapterId lets caller know which adapter finished
+ */
+export type AdapterYield =
+  | { type: "text_delta";  delta: string }
+  | { type: "image_url";   url: string; alt?: string }
+  | { type: "audio_url";   url: string; durationSeconds?: number }
+  | { type: "job_id";      jobId: string; provider: ProviderId }
+  | { type: "progress";    percent: number }
+  | { type: "done";        adapterId: ProviderId };
+
+/**
+ * Multimodal generation request — extends the basic text-only request.
+ * The `modality` field determines which output types are expected/allowed.
+ */
+export interface GenerateRequest {
+  modality: Modality;
+  prompt: string;
+  model: string;
+  systemPrompt?: string;
+}
+
 export type RoomAccess = "free" | "paid";
 
 export type RoomRole =

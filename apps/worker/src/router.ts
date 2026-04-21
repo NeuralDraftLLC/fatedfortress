@@ -15,6 +15,7 @@ import {
 // activeGenerations: same Map as in generate.ts (B3) — needed to abort in-flight streams
 // by requestId when the parent posts ABORT_GENERATE.
 import { handleGenerate, activeGenerations, abortAllGenerations } from "./generate.js";
+import { cancelAsyncJobsForRequest } from "./async-jobs.js";
 import { teardownBudget } from "./budget.js";
 import {
   mintToken,
@@ -32,7 +33,7 @@ export type InboundMessage =
   | { type: "HAS_KEY";      provider: string;                                requestId: string }
   | { type: "ENCRYPT_KEY";  provider: string; passphrase: string;            requestId: string }
   | { type: "DECRYPT_KEY";  provider: string; blob: EncryptedKeyBlob; passphrase: string; requestId: string }
-  | { type: "GENERATE";     provider: string; model: string; prompt: string; systemPrompt: string; requestId: string; isSpectator?: boolean; roomId?: string; participantPubkey?: string; quotaTokensToReserve?: number }
+  | { type: "GENERATE";     provider: string; model: string; prompt: string; systemPrompt: string; requestId: string; modality?: string; isSpectator?: boolean; roomId?: string; participantPubkey?: string; quotaTokensToReserve?: number }
   | { type: "ABORT_GENERATE"; requestId: string }
   | { type: "VERIFY_TOKEN"; token: unknown; hostPubkey: string; roomId: string; requestId: string }
   | { type: "MINT_TOKEN";   roomId: string; participantPubkey: string; tokensToGrant: number; requestId: string }
@@ -52,11 +53,17 @@ export type InboundMessage =
 export type RequestMessage = Exclude<InboundMessage, { type: "TERMINATE" }>;
 
 export type OutboundMessage =
-  | { type: "CHUNK";  requestId: string; chunk: string }
-  | { type: "DONE";   requestId: string; outputHash: string }
-  | { type: "ERROR";  requestId: string; code: string; message: string }
-  | { type: "OK";     requestId: string; payload?: unknown }
-  | { type: "FUEL";   requestId: string; state: unknown };
+  | { type: "CHUNK";       requestId: string; chunk: string }
+  | { type: "DONE";        requestId: string; outputHash: string }
+  | { type: "ERROR";       requestId: string; code: string; message: string }
+  | { type: "OK";          requestId: string; payload?: unknown }
+  | { type: "FUEL";        requestId: string; state: unknown }
+  // Multimodal (Task 9):
+  | { type: "IMAGE_URL";   requestId: string; url: string; alt?: string }
+  | { type: "AUDIO_URL";   requestId: string; url: string; durationSeconds?: number }
+  | { type: "JOB_ID";      requestId: string; jobId: string; provider: string }
+  | { type: "PROGRESS";    requestId: string; percent: number }
+  | { type: "ADAPTER_DONE"; requestId: string; adapterId: string };
 
 export function send(msg: OutboundMessage): void {
   window.parent.postMessage(msg, FF_ORIGIN);
@@ -295,6 +302,8 @@ export async function dispatchMessage(msg: RequestMessage): Promise<void> {
       // Propagates to adapter via AbortSignal; generate.ts finally block still clears the map.
       const controller = activeGenerations.get(msg.requestId);
       controller?.abort();
+      // Also cancel any async job registered for this requestId (Task 8.5)
+      cancelAsyncJobsForRequest(msg.requestId);
       send({ type: "OK", requestId });
       return;
     }

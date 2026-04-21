@@ -5,6 +5,58 @@ import { ReceiptCard, buildForkLines } from "../components/ReceiptCard.js";
 import { exportIdentity, importIdentity, type IdentityExport } from "../state/identity.js";
 import { getMyPubkey } from "../state/identity.js";
 
+// ─── Fork tree graph ──────────────────────────────────────────────────────────────
+
+interface GraphNode {
+  receipt: Receipt;
+  children: GraphNode[];
+}
+
+/** Build a directed acyclic graph of receipts by parentId. */
+function buildReceiptGraph(receipts: Receipt[]): GraphNode[] {
+  const byId = new Map<string, Receipt>();
+  for (const r of receipts) byId.set(r.id, r);
+
+  const roots: GraphNode[] = [];
+  const nodes = new Map<string, GraphNode>();
+
+  for (const r of receipts) {
+    nodes.set(r.id, { receipt: r, children: [] });
+  }
+
+  for (const [, node] of nodes) {
+    const parentId = node.receipt.parentId;
+    if (parentId && nodes.has(parentId)) {
+      nodes.get(parentId)!.children.push(node);
+    } else {
+      roots.push(node);
+    }
+  }
+
+  return roots;
+}
+
+/** Render the fork tree as a CSS grid with ASCII art. */
+function renderReceiptMap(receipts: Receipt[], container: HTMLElement): void {
+  if (receipts.length === 0) {
+    container.innerHTML = `<p class="empty-msg">No receipts to visualize.</p>`;
+    return;
+  }
+
+  const graph = buildReceiptGraph(receipts);
+
+  const renderNode = (node: GraphNode, depth: number): string => {
+    const short = node.receipt.id.slice(0, 10);
+    const model = node.receipt.model ?? "unknown";
+    const prefix = depth === 0 ? "●" : "├─";
+    const indent = "  ".repeat(depth);
+    const childrenHtml = node.children.map((child) => renderNode(child, depth + 1)).join("");
+    return `<div class="receipt-tree-node"><span class="receipt-tree-prefix">${indent}${prefix}</span> <span class="receipt-tree-id">${short}</span> <span class="receipt-tree-model">${model}</span></div>${childrenHtml}`;
+  };
+
+  container.innerHTML = `<div class="receipt-map">${graph.map((root) => renderNode(root, 0)).join("")}</div>`;
+}
+
 // ─── PRIORITY 3: Identity Export / Import UI ───────────────────────────────────
 
 function renderIdentitySection(container: HTMLElement): void {
@@ -118,25 +170,46 @@ export async function mountMe(container: HTMLElement): Promise<() => void> {
       <h1>MY RECEIPTS</h1>
       <p class="me-sub">Your generation history</p>
     </div>
-    <div class="receipt-list" id="receipt-list">
-      <p class="loading-msg">Loading receipts...</p>
+    <div class="me-tabs" id="me-tabs">
+      <button class="me-tab me-tab--active" data-tab="list">Receipts</button>
+      <button class="me-tab" data-tab="map">Receipt Map</button>
     </div>
+    <div class="receipt-list" id="receipt-list"></div>
+    <div class="receipt-map-container" id="receipt-map-container" style="display:none"></div>
   `;
 
   // ── Identity section ─────────────────────────────────────────────────
   renderIdentitySection(container);
 
+  // ── Tabs ───────────────────────────────────────────────────────────
+  const listEl = document.getElementById("receipt-list")!;
+  const mapEl = document.getElementById("receipt-map-container")!;
+  listEl.innerHTML = `<p class="loading-msg">Loading receipts...</p>`;
+
+  container.querySelectorAll<HTMLButtonElement>(".me-tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      container.querySelectorAll(".me-tab").forEach((t) => t.classList.remove("me-tab--active"));
+      tab.classList.add("me-tab--active");
+      const tabName = tab.dataset.tab;
+      if (tabName === "map") {
+        listEl.style.display = "none";
+        mapEl.style.display = "block";
+      } else {
+        listEl.style.display = "block";
+        mapEl.style.display = "none";
+      }
+    });
+  });
+
   // ── Receipts list ───────────────────────────────────────────────────
   try {
     const receipts: Receipt[] = await getReceipts();
-    const list = document.getElementById("receipt-list")!;
 
     if (receipts.length === 0) {
-      list.innerHTML = `<p class="empty-msg">No receipts yet. Your generation receipts will appear here.</p>`;
+      listEl.innerHTML = `<p class="empty-msg">No receipts yet. Your generation receipts will appear here.</p>`;
     } else {
-      // Sort newest first
       const sorted = [...receipts].sort((a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0));
-      list.innerHTML = "";
+      listEl.innerHTML = "";
 
       for (const receipt of sorted) {
         const item = document.createElement("div");
@@ -144,13 +217,15 @@ export async function mountMe(container: HTMLElement): Promise<() => void> {
         const forkLines = buildForkLines(receipt, sorted);
         const card = new ReceiptCard({ ...receipt, forkLines });
         card.mount(item);
-        attachForkAction(item, receipt); // PRIORITY 3: fork CTA
-        list.appendChild(item);
+        attachForkAction(item, receipt);
+        listEl.appendChild(item);
       }
+
+      // Render map (hidden by default)
+      renderReceiptMap(receipts, mapEl);
     }
   } catch (err) {
-    const list = document.getElementById("receipt-list")!;
-    list.innerHTML = `<p class="error-msg">Failed to load receipts: ${err}</p>`;
+    listEl.innerHTML = `<p class="error-msg">Failed to load receipts: ${err}</p>`;
   }
 
   return () => { container.innerHTML = ""; };

@@ -23,6 +23,7 @@ import type {
   RoomCategory,
   RoomAccess,
   RoomRole,
+  Modality,
 } from "@fatedfortress/protocol";
 import { getMyPubkey } from "./identity.js";
 
@@ -51,6 +52,10 @@ export interface RoomMeta {
   allowCommunityKeys: boolean;
   /** Timestamp of the last allowCommunityKeys policy change — resets participant consent */
   keyPolicyChangedAt: number;
+  /** Room modality type: text, image, audio, video. Defaults to "text". */
+  roomType: Modality;
+  /** Timestamp of the first generation in this room (null before first gen). */
+  firstGenerationAt: number | null;
 }
 
 export interface ParticipantEntry {
@@ -66,6 +71,15 @@ export interface ParticipantEntry {
   roles?: RoomRole[];
 }
 
+export type PresenceState = "active" | "idle" | "away" | "generating" | "error" | "disconnected";
+
+export type PresenceCurrentAction =
+  | { type: "idle" }
+  | { type: "typing"; prompt: string }
+  | { type: "generating"; adapterId: string; jobId: string }
+  | { type: "error"; error: string }
+  | { type: "viewing_receipt"; receiptId: string };
+
 export interface PresenceEntry {
   pubkey: PublicKeyBase58;
   name: string;
@@ -74,6 +88,14 @@ export interface PresenceEntry {
   lastSeenAt: number;
   /** Whether this presence entry belongs to a spectator */
   isSpectator?: boolean;
+  /** 6-state presence machine */
+  state: PresenceState;
+  /** What the participant is currently doing (null when disconnected) */
+  currentAction: PresenceCurrentAction | null;
+  /** How this client is connected */
+  connectedVia: "p2p" | "relay" | "spectator";
+  /** Seed string for deterministic avatar generation */
+  avatarSeed: string;
 }
 
 export interface SpectatorMessage {
@@ -82,17 +104,25 @@ export interface SpectatorMessage {
   displayName: string;
   text: string;
   ts: number;
+  type: "text" | "fork" | "reaction" | "join" | "leave" | "generation" | "prompt_share" | "system";
+  isDeleted: boolean;
+  reactions: Record<string, string[]>;
 }
 
 export interface FortressRoomDoc {
   meta: Y.Map<RoomMeta[keyof RoomMeta]>;
   participants: Y.Map<ParticipantEntry>;
   output: Y.Text;
+  /** Output items as Y.Array<Y.Map> — observable, supports reactions, soft-delete.
+   *  Used for multimodal output (text deltas + image URLs + audio URLs as separate items).
+   *  Fallback: if empty, fall back to reading output: Y.Text (legacy rooms). */
+  outputItems: Y.Array<Y.Map<unknown>>;
   receiptIds: Y.Array<ReceiptId>;
   templates: Y.Array<string>;
   presence: Y.Map<PresenceEntry>;
-  /** Chat messages among spectators in a room */
-  spectatorChat: Y.Array<SpectatorMessage>;
+  /** Chat messages among spectators in a room. Stored as Y.Map (observable, supports reactions).
+   *  Y.Map<unknown> since values are heterogeneous (string, number, boolean, object). */
+  spectatorChat: Y.Array<Y.Map<unknown>>;
   /** The raw Y.Doc — for transport (y-webrtc) and persistence (OPFS/IndexedDB) */
   doc: Y.Doc;
 }
@@ -106,7 +136,8 @@ export function createRoomDoc(initialMeta?: Partial<RoomMeta>): FortressRoomDoc 
   const receiptIds   = doc.getArray<ReceiptId>("receiptIds");
   const templates    = doc.getArray<string>("templates");
   const presence     = doc.getMap<PresenceEntry>("presence");
-  const spectatorChat = doc.getArray<SpectatorMessage>("spectatorChat");
+  const spectatorChat = doc.getArray<unknown>("spectatorChat");
+  const outputItems  = doc.getArray<Y.Map<unknown>>("outputItems");
 
   if (initialMeta) {
     doc.transact(() => {
@@ -122,10 +153,12 @@ export function createRoomDoc(initialMeta?: Partial<RoomMeta>): FortressRoomDoc 
       meta.set("schemaVersion", 1);
       meta.set("upgradedAt", null);
       meta.set("activeHostPubkey", initialMeta.activeHostPubkey ?? ("" as PublicKeyBase58));
+      meta.set("roomType", (initialMeta as Partial<RoomMeta>).roomType ?? "text");
+      meta.set("firstGenerationAt", null);
     });
   }
 
-  return { meta, participants, output, receiptIds, templates, presence, spectatorChat, doc };
+  return { meta, participants, output, outputItems: outputItems as unknown as Y.Array<Y.Map<unknown>>, receiptIds, templates, presence, spectatorChat: spectatorChat as unknown as Y.Array<Y.Map<unknown>>, doc };
 }
 
 export const getRoomId     = (r: FortressRoomDoc): RoomId      => r.meta.get("id")     as RoomId;
@@ -163,6 +196,34 @@ export function appendOutput(room: FortressRoomDoc, chunk: string): void {
   });
 }
 
+/**
+ * Appends a multimodal output item to outputItems (Y.Array<Y.Map>).
+ * Each item has a type: "text" | "image" | "audio".
+ * The resolved URL is passed directly — callers are responsible for
+ * resolving opfs:// URLs before calling this if needed (see archive.ts Task 14).
+ */
+export function appendOutputItem(
+  room: FortressRoomDoc,
+  item: { type: "text"; text: string } | { type: "image"; url: string; alt?: string } | { type: "audio"; url: string; durationSeconds?: number }
+): void {
+  const map = new Y.Map<unknown>();
+  if (item.type === "text") {
+    map.set("type", "text");
+    map.set("text", item.text);
+  } else if (item.type === "image") {
+    map.set("type", "image");
+    map.set("url", item.url);
+    if (item.alt) map.set("alt", item.alt);
+  } else if (item.type === "audio") {
+    map.set("type", "audio");
+    map.set("url", item.url);
+    if (item.durationSeconds !== undefined) map.set("durationSeconds", item.durationSeconds);
+  }
+  room.doc.transact(() => {
+    room.outputItems.push([map]);
+  });
+}
+
 export function clearOutput(room: FortressRoomDoc): void {
   room.doc.transact(() => {
     if (room.output.length > 0) {
@@ -180,6 +241,86 @@ export function addReceiptId(room: FortressRoomDoc, id: ReceiptId): void {
 export function addTemplate(room: FortressRoomDoc, template: string): void {
   room.doc.transact(() => {
     room.templates.push([template]);
+  });
+}
+
+/** RoomTemplate: a saved snapshot of room settings that can be reused when creating new rooms. */
+export interface RoomTemplate {
+  id: string;
+  name: string;
+  /** Saved system prompt (empty string = no override) */
+  systemPrompt: string;
+  /** Model reference: "provider/model" */
+  modelRef: string;
+  /** Room category for new rooms using this template */
+  category: RoomCategory;
+  /** Image-specific settings (null for text-only templates) */
+  imageSettings: {
+    aspectRatio?: string;
+    style?: string;
+    defaultNegativePrompt?: string;
+  } | null;
+  createdAt: number;
+}
+
+/** Save the current room's settings as a named template. */
+export function saveRoomTemplate(
+  room: FortressRoomDoc,
+  opts: { name: string; modelRef: string; imageSettings: RoomTemplate["imageSettings"] }
+): void {
+  const systemPrompt = getSystemPrompt(room);
+  const category = getCategory(room);
+  const template: RoomTemplate = {
+    id: `tpl_${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`,
+    name: opts.name,
+    systemPrompt,
+    modelRef: opts.modelRef,
+    category,
+    imageSettings: opts.imageSettings,
+    createdAt: Date.now(),
+  };
+  // Persist as a JSON string in the templates Y.Array (opaque to Y.js)
+  room.doc.transact(() => {
+    room.templates.push([JSON.stringify(template)]);
+  });
+}
+
+/** Load a saved template by id. Returns null if not found. */
+export function getRoomTemplate(room: FortressRoomDoc, id: string): RoomTemplate | null {
+  const raw = room.templates.toArray().find((t) => {
+    try {
+      const parsed = JSON.parse(t as string) as RoomTemplate;
+      return parsed.id === id;
+    } catch {
+      return false;
+    }
+  });
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw as string) as RoomTemplate;
+  } catch {
+    return null;
+  }
+}
+
+/** List all saved templates. */
+export function listRoomTemplates(room: FortressRoomDoc): RoomTemplate[] {
+  return room.templates.toArray().map((t) => {
+    try {
+      return JSON.parse(t as string) as RoomTemplate;
+    } catch {
+      return null;
+    }
+  }).filter((t): t is RoomTemplate => t !== null);
+}
+
+/** Apply a template's settings to the current room (systemPrompt + modelRef + imageSettings). */
+export function applyRoomTemplate(room: FortressRoomDoc, template: RoomTemplate): void {
+  room.doc.transact(() => {
+    if (template.systemPrompt !== undefined) {
+      room.meta.set("systemPrompt", template.systemPrompt);
+    }
+    // modelRef is applied by the ControlPane's model selector
   });
 }
 
@@ -281,10 +422,11 @@ export function hydrateDoc(update: Uint8Array): FortressRoomDoc {
     meta:          doc.getMap("meta"),
     participants:  doc.getMap<ParticipantEntry>(PARTICIPANT_MAP_KEY),
     output:        doc.getText("output"),
+    outputItems:   doc.getArray("outputItems"),
     receiptIds:    doc.getArray("receiptIds"),
     templates:     doc.getArray("templates"),
     presence:      doc.getMap("presence"),
-    spectatorChat: doc.getArray<SpectatorMessage>("spectatorChat"),
+    spectatorChat: doc.getArray<Y.Map<unknown>>("spectatorChat"),
     doc,
   };
   migrateParticipantsFromLegacy(fortress);

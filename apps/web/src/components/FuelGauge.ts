@@ -55,41 +55,56 @@ export class FuelGauge {
   }
 
   private render(state: FuelGaugeState) {
-    if (state.participants.length === 0) {
+    if (state.participants.length === 0 && state.maxImages === null) {
       this.element.innerText = "FREE ROOM (unlimited fuel)";
       return;
     }
 
-    // Calculate aggregate fuel
-    let totalConsumed = 0;
-    let totalQuota = 0;
-    for (const p of state.participants) {
-      const r = p.reserved ?? 0;
-      totalConsumed += p.consumed + r;
-      totalQuota += p.quota;
+    // Build a human-readable summary line based on what's available
+    const parts: string[] = [];
+
+    if (state.participants.length > 0) {
+      // Text token budget
+      let totalConsumed = 0;
+      let totalQuota = 0;
+      for (const p of state.participants) {
+        const r = p.reserved ?? 0;
+        totalConsumed += p.consumed + r;
+        totalQuota += p.quota;
+      }
+      const remaining = Math.max(0, totalQuota - totalConsumed);
+      const fraction = totalQuota > 0 ? remaining / totalQuota : 0;
+      const barWidth = 10;
+      const filledBlocks = Math.round(fraction * barWidth);
+      const emptyBlocks = barWidth - filledBlocks;
+      const bar = "█".repeat(filledBlocks) + "░".repeat(emptyBlocks);
+      parts.push(`${bar} ${remaining}/${totalQuota} tokens`);
     }
 
-    const remaining = Math.max(0, totalQuota - totalConsumed);
-    const fraction = totalQuota > 0 ? remaining / totalQuota : 0;
-    const barWidth = 10;
-    const filledBlocks = Math.round(fraction * barWidth);
-    const emptyBlocks = barWidth - filledBlocks;
+    if (state.maxImages !== null) {
+      parts.push(`🖼 ${state.maxImages} images`);
+    }
+    if (state.maxAudioSeconds !== null) {
+      parts.push(`🔊 ${state.maxAudioSeconds}s audio`);
+    }
+    if (state.maxVideoSeconds !== null) {
+      parts.push(`🎬 ${state.maxVideoSeconds}s video`);
+    }
 
-    const bar = "█".repeat(filledBlocks) + "░".repeat(emptyBlocks);
+    // Build tooltip with per-participant text breakdown
+    const tooltipLines: string[] = [];
+    for (const p of state.participants) {
+      const r = p.reserved ?? 0;
+      tooltipLines.push(`${p.pubkey.slice(0, 8)}...: ${p.quota - p.consumed - r}/${p.quota} tokens`);
+    }
+    const tooltip = tooltipLines.length > 0
+      ? `Per-participant breakdown:\n${tooltipLines.join("\n")}`
+      : "Multimodal budget active";
 
-    // Build tooltip text
-    const tooltip = state.participants
-      .map((p) => {
-        const r = p.reserved ?? 0;
-        return `${p.pubkey.slice(0, 8)}...: ${p.quota - p.consumed - r}/${p.quota}`;
-      })
-      .join("\n");
-
-    this.element.title = `Per-participant breakdown:\n${tooltip}`;
+    this.element.title = tooltip;
     this.element.innerHTML = `
       <div style="display: flex; align-items: center; gap: 8px;">
-        <span style="letter-spacing: -1px;">${bar}</span>
-        <span>${remaining}/${totalQuota} tokens left</span>
+        <span>${parts.join(" · ")}</span>
       </div>
     `;
   }

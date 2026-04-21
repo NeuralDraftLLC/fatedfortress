@@ -28,6 +28,7 @@ import {
   serializeDoc,
   migrateParticipantsFromLegacy,
   type PresenceEntry,
+  type PresenceCurrentAction,
 } from "../state/ydoc.js";
 import { getMyPubkey, getMyDisplayName } from "../state/identity.js";
 
@@ -76,6 +77,11 @@ export function upsertPresence(doc: FortressRoomDoc, presence: Partial<PresenceE
     cursorOffset: presence.cursorOffset ?? null,
     lastSeenAt: Date.now(),
     isSpectator: presence.isSpectator ?? false,
+    // New fields (defaults — heartbeat will update state/currentAction in Task 4)
+    state: presence.state ?? "active",
+    currentAction: presence.currentAction ?? null,
+    connectedVia: presence.connectedVia ?? "p2p",
+    avatarSeed: presence.avatarSeed ?? existing?.avatarSeed ?? myPubkey as string,
   });
 }
 
@@ -111,7 +117,7 @@ async function writeOpfsSnapshot(roomId: string, bytes: Uint8Array): Promise<voi
     const root = await navigator.storage.getDirectory();
     const fileHandle = await root.getFileHandle(`ff-room-${roomId}.yjs`, { create: true });
     const writable = await fileHandle.createWritable();
-    await writable.write(bytes);
+    await writable.write(bytes as unknown as FileSystemWriteChunkType);
     await writable.close();
   } catch (e) {
     console.warn("[signaling] OPFS snapshot write failed:", e);
@@ -267,6 +273,34 @@ function waitFirstMessage(ws: WebSocket, timeoutMs = 5000): Promise<string> {
   });
 }
 
+// ── Ephemeral relay helpers ────────────────────────────────────────────────────
+
+/**
+ * Sends a TYPING_START or TYPING_STOP message to the relay for broadcast to
+ * other participants in the same room. These are fire-and-forget — the relay
+ * relays them without storing. Callers handle errors silently.
+ *
+ * @param roomId  The current room
+ * @param prompt  Current prompt text (sent only with TYPING_START; "" on TYPING_STOP)
+ */
+export function broadcastTyping(roomId: RoomId, prompt: string): void {
+  if (!activeWs || activeWs.readyState !== WebSocket.OPEN) return;
+  const myPubkey = getMyPubkey();
+  if (!myPubkey) return;
+  const msg = {
+    type: prompt ? "TYPING_START" : "TYPING_STOP",
+    roomId,
+    pubkey: myPubkey as PublicKeyBase58,
+    prompt: prompt || "",
+    ts: Date.now(),
+  };
+  try {
+    activeWs.send(JSON.stringify(msg));
+  } catch {
+    // Silent fail — ephemeral
+  }
+}
+
 // ── joinRoom ──────────────────────────────────────────────────────────────────
 
 export interface JoinRoomOpts {
@@ -368,6 +402,19 @@ export async function joinRoom(
           console.warn("[signaling] HANDOFF handling failed:", e);
         }
       });
+    }
+
+    if (msg.type === "TYPING_START" || msg.type === "TYPING_STOP") {
+      // Relay ephemeral: update presence.currentAction without persisting to Y.Doc.
+      // Re-dispatch on the local doc so any PresenceBar subscriber re-renders.
+      if (msg.pubkey !== (getMyPubkey() as string)) {
+        const action: PresenceCurrentAction = msg.type === "TYPING_START"
+          ? { type: "typing", prompt: msg.prompt ?? "" }
+          : { type: "idle" };
+        try {
+          upsertPresence(doc, { pubkey: msg.pubkey, currentAction: action });
+        } catch { /* ignore stale relay messages */ }
+      }
     }
   });
 

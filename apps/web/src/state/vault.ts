@@ -7,6 +7,12 @@ export interface Receipt {
   timestamp: number;
   prompt?: string;
   parentId?: string;
+  /** Room type: text (default), image, audio, video */
+  type?: "text" | "image" | "audio" | "video";
+  /** Permanent published URLs for multimodal outputs (populated after here.now upload) */
+  outputUrls?: string[];
+  /** SHA-256 of the reference image used to generate this receipt (image rooms only) */
+  referenceImageHash?: string;
 }
 
 const DB_NAME = "fortress-vault";

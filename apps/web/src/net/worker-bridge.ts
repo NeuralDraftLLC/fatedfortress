@@ -35,6 +35,7 @@ const WORKER_ORIGIN = typeof __WORKER_ORIGIN__ !== "undefined"
 
 export interface FuelGaugeState {
   roomId: string;
+  /** Text token budget */
   participants: Array<{
     pubkey: string;
     fraction: number;
@@ -42,6 +43,10 @@ export interface FuelGaugeState {
     reserved: number;
     quota: number;
   }>;
+  /** Multimodal budget (null if not used / not yet initialized) */
+  maxImages: number | null;
+  maxAudioSeconds: number | null;
+  maxVideoSeconds: number | null;
 }
 
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -58,6 +63,9 @@ export class WorkerBridge {
   private pendingRequests = new Map<string, PendingEntry>();
   private streamingRequests = new Map<string, {
     onChunk?: (chunk: string) => void;
+    onImageUrl?: (url: string, alt?: string) => void;
+    onAudioUrl?: (url: string, durationSeconds?: number) => void;
+    onProgress?: (percent: number) => void;
     onDone?: (outputHash: string) => void;
     onError?: (code: string, message: string) => void;
     resolve: (payload: unknown) => void;
@@ -151,6 +159,17 @@ export class WorkerBridge {
       req?.onDone?.(msg.outputHash);
       req?.resolve?.(msg.outputHash);
       this.streamingRequests.delete(msg.requestId);
+    } else if (msg.type === "IMAGE_URL") {
+      const req = this.streamingRequests.get(msg.requestId);
+      req?.onImageUrl?.(msg.url, msg.alt);
+    } else if (msg.type === "AUDIO_URL") {
+      const req = this.streamingRequests.get(msg.requestId);
+      req?.onAudioUrl?.(msg.url, msg.durationSeconds);
+    } else if (msg.type === "JOB_ID") {
+      // Async job started — the worker will poll; caller can track via onProgress
+    } else if (msg.type === "PROGRESS") {
+      const req = this.streamingRequests.get(msg.requestId);
+      req?.onProgress?.(msg.percent);
     } else if (msg.type === "ERROR") {
       const streamReq = this.streamingRequests.get(msg.requestId);
       if (streamReq) {
@@ -221,6 +240,13 @@ export class WorkerBridge {
       model: string;
       prompt: string;
       systemPrompt: string;
+      modality?: string;
+      imageParams?: {
+        aspectRatio?: string;
+        negativePrompt?: string;
+        seed?: number;
+        style?: string;
+      };
       isSpectator?: boolean;
       signal?: AbortSignal;
       roomId?: string;
@@ -229,6 +255,8 @@ export class WorkerBridge {
     },
     callbacks: {
       onChunk?: (chunk: string) => void;
+      onImageUrl?: (url: string, alt?: string) => void;
+      onProgress?: (percent: number) => void;
       onDone?: (outputHash: string) => void;
       onError?: (code: string, message: string) => void;
     }
@@ -261,6 +289,8 @@ export class WorkerBridge {
         model: opts.model,
         prompt: opts.prompt,
         systemPrompt: opts.systemPrompt,
+        modality: opts.modality,
+        imageParams: opts.imageParams,
         isSpectator: opts.isSpectator ?? false,
         roomId: opts.roomId,
         participantPubkey: opts.participantPubkey,

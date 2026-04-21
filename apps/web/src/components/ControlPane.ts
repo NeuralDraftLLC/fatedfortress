@@ -15,6 +15,7 @@ import {
 import { getMyPubkey } from "../state/identity.js";
 import {
   appendOutput,
+  appendOutputItem,
   getTemplates,
   getRoomId,
 } from "../state/ydoc.js";
@@ -57,6 +58,8 @@ export class ControlPane {
   mount(el: HTMLElement): void {
     const templates = getTemplates(this.doc);
     const roomId = getRoomId(this.doc);
+    const roomType = this.doc.meta.get("roomType") as string ?? "text";
+    const isImage = roomType === "image";
 
     const demoBanner = this.demoMode
       ? `<div class="demo-banner" id="demo-banner">
@@ -65,6 +68,37 @@ export class ControlPane {
           <button class="demo-banner__dismiss" id="demo-banner-dismiss" aria-label="Dismiss">&times;</button>
         </div>`
       : "";
+
+    // Image-specific extras (only rendered when roomType === "image")
+    const imageExtras = isImage ? `
+      <div class="control-section">
+        <label>ASPECT RATIO</label>
+        <div class="chip-group" id="aspect-ratio-group">
+          ${["1:1", "16:9", "9:16", "4:3", "3:4"].map(ratio =>
+            `<button class="chip${ratio === "1:1" ? " chip--active" : ""}" data-ratio="${ratio}">${ratio}</button>`
+          ).join("")}
+        </div>
+      </div>
+      <div class="control-section">
+        <label>NEGATIVE PROMPT</label>
+        <textarea id="negative-prompt" placeholder="What to avoid..."></textarea>
+      </div>
+      <div class="control-section">
+        <label>SEED <span style="font-weight:normal">(0 = random)</span></label>
+        <input type="number" id="seed-input" min="0" max="4294967295" placeholder="0" style="width:100%">
+      </div>
+      <div class="control-section">
+        <label>STYLE PRESETS</label>
+        <select id="style-select">
+          <option value="">None</option>
+          <option value="photorealistic">Photorealistic</option>
+          <option value="illustration">Illustration</option>
+          <option value="digital-art">Digital Art</option>
+          <option value="anime">Anime</option>
+          <option value="watercolor">Watercolor</option>
+          <option value="pixel-art">Pixel Art</option>
+        </select>
+      </div>` : "";
 
     this.container.innerHTML = `
       ${demoBanner}
@@ -80,6 +114,7 @@ export class ControlPane {
         <label>SYSTEM PROMPT</label>
         <textarea id="system-prompt" placeholder="Optional system prompt..."></textarea>
       </div>
+      ${imageExtras}
       <div class="control-section">
         <label>PROMPT</label>
         <textarea id="prompt-input" placeholder="Enter your prompt..."></textarea>
@@ -135,6 +170,18 @@ export class ControlPane {
       if (banner) banner.remove();
     });
 
+    // Aspect ratio chips (image rooms only)
+    if (isImage) {
+      this.container.querySelectorAll<HTMLElement>("[data-ratio]").forEach((chip) => {
+        chip.style.cursor = "pointer";
+        chip.addEventListener("click", () => {
+          this.container.querySelectorAll<HTMLElement>("[data-ratio]").forEach((c) =>
+            c.classList.remove("chip--active"));
+          chip.classList.add("chip--active");
+        });
+      });
+    }
+
     // Start fuel polling
     this.startFuelPolling(roomId);
   }
@@ -163,6 +210,7 @@ export class ControlPane {
     if (!promptKey) return;
 
     const roomId = getRoomId(this.doc);
+    const roomType = this.doc.meta.get("roomType") as string ?? "text";
     const [provider, model] = modelEl.value.split("/") as [string, string];
     const systemPrompt = systemEl.value.trim();
 
@@ -172,6 +220,14 @@ export class ControlPane {
     if (cached) {
       prompt = `${cached}\n--- resume ---\n${promptKey}`;
     }
+
+    // Image-specific params
+    const imageParams = roomType === "image" ? {
+      aspectRatio: (this.container.querySelector(".chip--active[data-ratio]") as HTMLElement)?.dataset.ratio ?? "1:1",
+      negativePrompt: (this.container.querySelector("#negative-prompt") as HTMLTextAreaElement)?.value ?? "",
+      seed: parseInt((this.container.querySelector("#seed-input") as HTMLInputElement)?.value ?? "0", 10) || 0,
+      style: (this.container.querySelector("#style-select") as HTMLSelectElement)?.value ?? "",
+    } : undefined;
 
     // Create abort controller for this generation
     this.abortController = new AbortController();
@@ -186,6 +242,8 @@ export class ControlPane {
           model,
           prompt,
           systemPrompt,
+          modality: roomType,
+          imageParams,
           signal: this.abortController.signal,
           roomId,
           participantPubkey: myPk ?? undefined,
@@ -195,6 +253,10 @@ export class ControlPane {
           onChunk: (chunk) => {
             void appendStreamChunk(model, systemPrompt, promptKey, chunk);
             appendOutput(this.doc, chunk);
+          },
+          onImageUrl: (url, alt) => {
+            // Append as image output item (outputItems — Task 14)
+            appendOutputItem(this.doc, { type: "image", url, alt });
           },
           onDone: async (hash) => {
             void markStreamComplete(model, systemPrompt, promptKey, hash);
@@ -211,6 +273,7 @@ export class ControlPane {
                   model: `${provider}/${model}`,
                   timestamp: Date.now(),
                   prompt: prompt.slice(0, 200),
+                  type: roomType as "text" | "image" | "audio" | "video",
                 });
               } catch (e) {
                 console.warn("[ControlPane] failed to save receipt:", e);
