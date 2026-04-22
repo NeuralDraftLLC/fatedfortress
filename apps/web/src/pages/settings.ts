@@ -90,3 +90,29 @@ export async function mountSettings(container: HTMLElement): Promise<() => void>
 
   return () => {};
 }
+
+/**
+ * OAuth callback handler — attached to /github/callback route in main.ts.
+ * Exchanges the code, stores token + username on profile, redirects to /settings.
+ */
+export async function mountGitHubCallback(_container: HTMLElement): Promise<() => void> {
+  const params = new URLSearchParams(window.location.search);
+  const code = params.get("code");
+  const error = params.get("error");
+
+  if (error || !code) {
+    window.location.href = "/settings?github_error=1";
+    return () => {};
+  }
+
+  try {
+    await import("../net/github.js").then(m => m.exchangeGitHubCode(code));
+  } catch {
+    window.location.href = "/settings?github_error=1";
+    return () => {};
+  }
+
+  window.location.href = "/settings?github_connected=1";
+  return () => {};
+}
+}

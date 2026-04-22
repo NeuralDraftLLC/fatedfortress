@@ -52,10 +52,23 @@ export async function exchangeGitHubCode(code: string): Promise<string> {
   // Store token on profile
   const { data: { user } } = getSupabase().auth.getUser();
   if (user) {
-    await getSupabase()
-      .from("profiles")
-      .update({ github_token: data.access_token } as Record<string, unknown>)
-      .eq("id", user.id);
+    // Fetch GitHub profile to get username
+    const ghProfile = await fetch(
+      "https://api.github.com/user",
+      { headers: { Authorization: `Bearer ${data.access_token}`, Accept: "application/vnd.github.v3+json" } }
+    );
+    if (ghProfile.ok) {
+      const ghUser = await ghProfile.json() as { login: string };
+      await getSupabase()
+        .from("profiles")
+        .update({ github_token: data.access_token, github_username: ghUser.login } as Record<string, unknown>)
+        .eq("id", user.id);
+    } else {
+      await getSupabase()
+        .from("profiles")
+        .update({ github_token: data.access_token } as Record<string, unknown>)
+        .eq("id", user.id);
+    }
   }
 
   return data.access_token;

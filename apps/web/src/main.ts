@@ -51,13 +51,14 @@ type PageCleanup = (() => void) | void | Promise<() => void>;
 type PageLoader = (container: HTMLElement, ...params: string[]) => Promise<() => void>;
 
 const routes: Record<string, PageLoader> = {
-  "/login":       () => import("./pages/login.js").then(m => m.mountLogin),
-  "/create":      () => import("./pages/create.js").then(m => m.mountCreate),
-  "/tasks":       () => import("./pages/tasks.js").then(m => m.mountTasks),
-  "/reviews":     () => import("./pages/reviews.js").then(m => m.mountReviews),
-  "/project":     () => import("./pages/project.js").then(m => m.mountProject),
-  "/profile":     () => import("./pages/profile.js").then(m => m.mountProfile),
-  "/settings":    () => import("./pages/settings.js").then(m => m.mountSettings),
+  "/login":           () => import("./pages/login.js").then(m => m.mountLogin),
+  "/create":          () => import("./pages/create.js").then(m => m.mountCreate),
+  "/tasks":           () => import("./pages/tasks.js").then(m => m.mountTasks),
+  "/reviews":         () => import("./pages/reviews.js").then(m => m.mountReviews),
+  "/project":         () => import("./pages/project.js").then(m => m.mountProject),
+  "/profile":         () => import("./pages/profile.js").then(m => m.mountProfile),
+  "/settings":        () => import("./pages/settings.js").then(m => m.mountSettings),
+  "/github/callback": () => import("./pages/settings.js").then(m => m.mountGitHubCallback),
   // submit is handled specially with a taskId param
 };
 
@@ -80,7 +81,16 @@ async function route(path: string) {
 
   const container = getContainer();
 
-  // Handle /submit/:taskId specially
+  // Static routes — check before the submit param route
+  const routePath = "/" + path.split("/")[1];
+  const loader = routes[routePath];
+  if (loader) {
+    const page = await loader();
+    currentCleanup = page(container);
+    return;
+  }
+
+  // Handle /submit/:taskId specially (after static route check)
   const submitMatch = path.match(/^\/submit\/(.+)/);
   if (submitMatch) {
     const taskId = submitMatch[1];
@@ -89,16 +99,8 @@ async function route(path: string) {
     return;
   }
 
-  // Static routes
-  const routePath = "/" + path.split("/")[1];
-  const loader = routes[routePath];
-  if (!loader) {
-    container.innerHTML = `<div class="not-found"><h1>404</h1><p>Page not found</p><a href="/">Home</a></div>`;
-    return;
-  }
-
-  const page = await loader();
-  currentCleanup = page(container);
+  // 404 — no route matched
+  container.innerHTML = `<div class="not-found"><h1>404</h1><p>Page not found</p><a href="/">Home</a></div>`;
 }
 
 // ── Auth guard ────────────────────────────────────────────────────────────────
