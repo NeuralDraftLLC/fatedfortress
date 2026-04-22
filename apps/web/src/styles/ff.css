@@ -1,0 +1,271 @@
+/* FatedFortress UI skin — "Intel Classified" density.
+ * MUST comply with:
+ * - Palette: --ff-paper / --ff-ink (from design-system.css)
+ * - Fonts: Geist Mono + Iosevka (from public/fonts/*.css)
+ * - Borders: 1px solid var(--ff-ink), radius 0
+ */
+
+html, body {
+  height: 100%;
+}
+
+/* Layout shell */
+
+/* Layout shell */
+.ff-shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.ff-topbar {
+  height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  background: var(--ff-paper);
+  border-bottom: 1px solid var(--ff-ink);
+  font-family: var(--ff-font-mono);
+  text-transform: uppercase;
+  letter-spacing: -0.02em;
+  font-weight: 700;
+}
+
+.ff-brand {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.ff-brand__name {
+  font-weight: 900;
+  letter-spacing: 0.2em;
+  color: var(--ff-ink);
+}
+
+.ff-brand__badge {
+  font-size: 10px;
+  color: var(--ff-muted);
+  font-weight: 600;
+}
+
+.ff-shell__body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.ff-sidenav {
+  width: 256px;
+  background: var(--ff-paper);
+  border-right: 1px solid var(--ff-ink);
+  font-family: var(--ff-font-mono);
+  text-transform: uppercase;
+  font-size: 12px;
+  font-weight: 800;
+  display: flex;
+  flex-direction: column;
+}
+
+.ff-sidenav__header {
+  padding: 20px 16px;
+  border-bottom: 1px solid var(--ff-ink);
+}
+
+.ff-sidenav__title {
+  color: var(--ff-ink);
+  font-weight: 900;
+  letter-spacing: 0.2em;
+}
+
+.ff-sidenav__ver {
+  margin-top: 4px;
+  opacity: 0.6;
+  font-size: 10px;
+}
+
+.ff-nav {
+  padding: 12px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.ff-nav a {
+  text-decoration: none;
+  color: var(--ff-ink);
+  padding: 12px 16px;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  border-left: 4px solid transparent;
+}
+
+.ff-nav a:hover {
+  background: rgba(10, 10, 10, 0.04);
+}
+
+.ff-nav a[aria-current="page"] {
+  background: var(--ff-ink);
+  color: var(--ff-paper);
+  border-left-color: var(--ff-ink);
+}
+
+.ff-main {
+  flex: 1;
+  min-width: 0;
+  background: var(--ff-paper);
+  padding: 24px;
+  overflow: auto;
+}
+
+/* Panels */
+.ff-h1 {
+  margin: 0;
+  font-family: var(--ff-font-mono);
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.ff-subtitle {
+  margin: 6px 0 0;
+  font-family: var(--ff-font-mono);
+  font-size: 12px;
+  color: var(--ff-muted);
+}
+
+.ff-grid {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.ff-panel {
+  background: var(--ff-paper);
+  border: 1px solid var(--ff-ink);
+  padding: 16px;
+}
+
+.ff-panel--rust {
+  border-color: var(--ff-ink);
+}
+
+.ff-kpi__label {
+  font-family: var(--ff-font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 10px;
+  color: var(--ff-muted);
+}
+
+.ff-kpi__value {
+  margin-top: 6px;
+  font-family: var(--ff-font-mono);
+  font-weight: 900;
+  font-size: 36px;
+  line-height: 1.1;
+}
+
+/* Form controls (Forge) */
+.ff-form label {
+  display: block;
+  font-family: var(--ff-font-mono);
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  color: var(--ff-muted);
+  margin-bottom: 8px;
+}
+
+.ff-input, .ff-textarea, .ff-select {
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--ff-paper);
+  color: var(--ff-ink);
+  border: 1px solid var(--ff-ink);
+  padding: 12px 14px;
+  font-family: var(--ff-font-mono);
+  outline: none;
+  border-radius: 0;
+}
+
+.ff-textarea {
+  min-height: 220px;
+  resize: vertical;
+}
+
+.ff-input:focus, .ff-textarea:focus, .ff-select:focus {
+  outline: 2px solid var(--ff-ink);
+  outline-offset: 0;
+}
+
+.ff-btn {
+  width: 100%;
+  border: 1px solid var(--ff-ink);
+  background: var(--ff-ink);
+  color: var(--ff-paper);
+  font-family: var(--ff-font-mono);
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 16px 14px;
+  cursor: pointer;
+  border-radius: 0;
+}
+
+.ff-btn:active {
+  transform: scale(0.99);
+}
+
+/* Keep old pages usable if they still render */
+.btn { cursor: pointer; }
+
+/* Reviews card minimal skin */
+.review-card {
+  background: var(--ff-paper);
+  border: 1px solid var(--ff-ink);
+  padding: 14px;
+  margin-bottom: 12px;
+}
+
+.review-card.urgent { outline: 2px solid var(--ff-ink); }
+.review-card.warning { outline: 1px dashed var(--ff-ink); }
+
+.review-card__task-title {
+  font-family: var(--ff-font-mono);
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.review-card__project,
+.review-card__elapsed,
+.review-card__payout-range,
+.contributor-reliability {
+  font-family: var(--ff-font-mono);
+  font-size: 11px;
+  color: var(--ff-muted);
+}
+
+.review-card__actions .btn,
+.review-card__actions button {
+  background: var(--ff-paper);
+  border: 1px solid var(--ff-ink);
+  color: var(--ff-ink);
+  padding: 8px 10px;
+  font-family: var(--ff-font-mono);
+  text-transform: uppercase;
+  font-weight: 800;
+  cursor: pointer;
+  border-radius: 0;
+}
+
+.decision-modal__panel {
+  background: var(--ff-paper);
+  border: 1px solid var(--ff-ink);
+  color: var(--ff-ink);
+}
+

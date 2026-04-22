@@ -1,0 +1,43 @@
+/* Fated Fortress Design System (non-legacy import)
+ * Constraints:
+ * - Typography: Geist Mono + Iosevka only
+ * - Palette: ff-paper / ff-ink
+ * - Borders: 1px solid var(--ff-ink), radius 0
+ * - Tone: high-density, intel-classified, underlined links, monospace utility
+ */
+
+:root {
+  --ff-paper: #f4f4f2;
+  --ff-ink: #0a0a0a;
+  --ff-muted: rgba(10, 10, 10, 0.65);
+  --ff-faint: rgba(10, 10, 10, 0.25);
+
+  --ff-font-mono: "Geist Mono", "Iosevka", ui-monospace, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  --ff-step: 4px;
+}
+
+html, body {
+  height: 100%;
+}
+
+body.ff-body {
+  margin: 0;
+  background: var(--ff-paper);
+  color: var(--ff-ink);
+  font-family: var(--ff-font-mono);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+a {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+

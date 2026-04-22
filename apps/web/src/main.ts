@@ -20,6 +20,8 @@ import { scrubEvent } from "@fatedfortress/sentry-utils";
 import { getSupabase } from "./auth/index.js";
 import { getRedirectPath } from "./auth/middleware.js";
 import { subscribeToNotifications, unsubscribeFromNotifications } from "./net/notifications.js";
+import "./styles/design-system.css";
+import "./styles/ff.css";
 
 Sentry.init({
   dsn: typeof __SENTRY_DSN_WEB__ !== "undefined" ? __SENTRY_DSN_WEB__ : "",

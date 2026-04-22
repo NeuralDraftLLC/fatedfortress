@@ -24,6 +24,7 @@ import type {
   StructuredFeedback,
 } from "@fatedfortress/protocol";
 import { releasePayout, rejectSubmission, requestRevision } from "../handlers/payout.js";
+import { renderShell } from "../ui/shell.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -70,74 +71,114 @@ interface Cursor {
 export async function mountReviews(container: HTMLElement): Promise<() => void> {
   requireAuth();
 
-  container.innerHTML = `
-    <div class="reviews-page">
-      <header class="reviews-header">
-        <h1 class="reviews-title">Review Queue</h1>
-        <p class="reviews-subtitle">Approve, request revision, or reject</p>
-      </header>
-
-      <div class="reviews-filters">
-        <button class="filter-btn active" data-filter="under_review">Under Review <span class="badge" id="count-under-review">0</span></button>
-        <button class="filter-btn" data-filter="revision_requested">Revision Requested <span class="badge" id="count-revision">0</span></button>
-        <button class="filter-btn" data-filter="paid">Approved <span class="badge" id="count-approved">0</span></button>
+  container.innerHTML = renderShell({
+    title: "Intel Review Queue",
+    subtitle: "Mission control // submission_management_v4",
+    activePath: "/reviews",
+    contentHtml: `
+      <div class="ff-grid">
+        <section class="ff-panel ff-panel--rust" style="grid-column: span 4;">
+          <div class="ff-kpi__label">AVG_WAIT_TIME</div>
+          <div class="ff-kpi__value" id="kpi-wait">--</div>
+          <div class="ff-subtitle">minutes</div>
+        </section>
+        <section class="ff-panel" style="grid-column: span 4;">
+          <div class="ff-kpi__label">CRITICAL_LOAD</div>
+          <div class="ff-kpi__value" id="kpi-load">--</div>
+          <div class="ff-subtitle">queue pressure</div>
+        </section>
+        <section class="ff-panel" style="grid-column: span 4;">
+          <div class="ff-kpi__label">THROUGHPUT</div>
+          <div class="ff-kpi__value" id="kpi-throughput">--</div>
+          <div class="ff-subtitle">req/hr</div>
+        </section>
       </div>
 
-      <div class="reviews-list" id="reviews-list">
+      <div class="ff-panel" style="margin-top:12px">
+        <div style="display:flex; gap:8px; margin-bottom:12px; flex-wrap:wrap">
+          <button class="ff-btn filter-btn active" data-filter="under_review" style="width:auto; padding:10px 12px; background:#1a1614; border-color: var(--ff-rust);">
+            UNDER_REVIEW <span class="badge" id="count-under-review">0</span>
+          </button>
+          <button class="ff-btn filter-btn" data-filter="revision_requested" style="width:auto; padding:10px 12px; background:#1a1614; border-color: var(--ff-rust);">
+            REVISION <span class="badge" id="count-revision">0</span>
+          </button>
+          <button class="ff-btn filter-btn" data-filter="paid" style="width:auto; padding:10px 12px; background:#1a1614; border-color: var(--ff-rust);">
+            APPROVED <span class="badge" id="count-approved">0</span>
+          </button>
+        </div>
+
         <div class="reviews-empty hidden" id="reviews-empty">
-          <p>No submissions to review.</p>
+          <p class="ff-subtitle">No submissions to review.</p>
         </div>
-      </div>
 
-      <div class="reviews-load-more" id="reviews-load-more" style="display:none">
-        <button class="btn btn--ghost" id="btn-load-more">Load more</button>
-      </div>
+        <table class="ff-intel-table" style="width:100%; border-collapse: collapse; font-family: var(--ff-font-mono);">
+          <thead>
+            <tr>
+              <th style="text-align:left; padding:10px; border:1px solid var(--ff-ink);">QUEUE_ID</th>
+              <th style="text-align:left; padding:10px; border:1px solid var(--ff-ink);">SUBJECT_ENTITY</th>
+              <th style="text-align:left; padding:10px; border:1px solid var(--ff-ink);">TIMESTAMP</th>
+              <th style="text-align:left; padding:10px; border:1px solid var(--ff-ink);">STATUS</th>
+              <th style="text-align:right; padding:10px; border:1px solid var(--ff-ink);">ACTION</th>
+            </tr>
+          </thead>
+          <tbody id="reviews-list"></tbody>
+        </table>
 
-      <!-- Decision modal -->
-      <div class="decision-modal hidden" id="decision-modal">
-        <div class="decision-modal__backdrop"></div>
-        <div class="decision-modal__panel">
-          <h2 class="decision-modal__title" id="decision-modal-title">Make Decision</h2>
-          <p class="decision-modal__task-title" id="decision-modal-task"></p>
+        <div id="reviews-load-more" style="display:none; margin-top:12px">
+          <button class="ff-btn" style="background:#1a1614;border-color:var(--ff-rust); width:auto; padding:10px 12px" id="btn-load-more">LOAD_MORE</button>
+        </div>
 
-          <div class="decision-modal__reason">
-            <label for="decision-reason">Reason (required)</label>
-            <select id="decision-reason" required>
-              <option value="">Select a reason...</option>
-              ${DECISION_REASONS.map(r => `<option value="${r.value}">${r.label}</option>`).join("")}
-            </select>
-          </div>
+        <!-- Decision modal -->
+        <div class="decision-modal hidden" id="decision-modal">
+          <div class="decision-modal__backdrop"></div>
+          <div class="decision-modal__panel">
+            <h2 class="decision-modal__title" id="decision-modal-title">Make Decision</h2>
+            <p class="decision-modal__task-title" id="decision-modal-task"></p>
 
-          <div class="decision-modal__notes">
-            <label for="decision-notes">Notes (optional)</label>
-            <textarea id="decision-notes" rows="3" placeholder="Explain your decision..."></textarea>
-          </div>
-
-          <div class="decision-modal__structured-feedback" id="structured-feedback-section">
-            <label>Structured feedback (optional)</label>
-            <div class="feedback-dimensions" id="feedback-dimensions">
-              ${FEEDBACK_DIMENSIONS.map(d => `
-                <button class="feedback-dim-btn" data-dim="${d}">${d}</button>
-              `).join("")}
+            <div class="decision-modal__reason">
+              <label for="decision-reason">Reason (required)</label>
+              <select id="decision-reason" required>
+                <option value="">Select a reason...</option>
+                ${DECISION_REASONS.map(r => `<option value="${r.value}">${r.label}</option>`).join("")}
+              </select>
             </div>
-            <textarea id="structured-feedback-notes" rows="2" placeholder="Notes per dimension..."></textarea>
-          </div>
 
-          <div class="decision-modal__payout" id="decision-payout-row">
-            <label for="decision-payout">Approved payout (within range)</label>
-            <input type="number" id="decision-payout" step="0.01" min="0" placeholder="0.00" />
-          </div>
+            <div class="decision-modal__notes">
+              <label for="decision-notes">Notes (optional)</label>
+              <textarea id="decision-notes" rows="3" placeholder="Explain your decision..."></textarea>
+            </div>
 
-          <div class="decision-modal__actions">
-            <button class="btn btn--approve" id="action-approve">Approve &amp; Pay</button>
-            <button class="btn btn--revision" id="action-revision">Request Revision</button>
-            <button class="btn btn--reject" id="action-reject">Reject</button>
-            <button class="btn btn--ghost" id="action-cancel">Cancel</button>
+            <div class="decision-modal__structured-feedback" id="structured-feedback-section">
+              <label>Structured feedback (optional)</label>
+              <div class="feedback-dimensions" id="feedback-dimensions">
+                ${FEEDBACK_DIMENSIONS.map(d => `
+                  <button class="feedback-dim-btn" data-dim="${d}">${d}</button>
+                `).join("")}
+              </div>
+              <textarea id="structured-feedback-notes" rows="2" placeholder="Notes per dimension..."></textarea>
+            </div>
+
+            <div class="decision-modal__payout" id="decision-payout-row">
+              <label for="decision-payout">Approved payout (within range)</label>
+              <input type="number" id="decision-payout" step="0.01" min="0" placeholder="0.00" />
+            </div>
+
+            <div class="decision-modal__deadline" id="decision-deadline-row">
+              <label for="decision-deadline">Revision deadline (optional)</label>
+              <input type="datetime-local" id="decision-deadline" />
+            </div>
+
+            <div class="decision-modal__actions">
+              <button class="ff-btn" style="width:auto; padding:10px 12px" id="action-approve">Approve &amp; Pay</button>
+              <button class="ff-btn" style="width:auto; padding:10px 12px; background:#1a1614;border-color:var(--ff-rust)" id="action-revision">Request Revision</button>
+              <button class="ff-btn" style="width:auto; padding:10px 12px; background:#1a1614;border-color:var(--ff-error); color: var(--ff-error)" id="action-reject">Reject</button>
+              <button class="ff-btn" style="width:auto; padding:10px 12px; background:#1a1614;border-color:var(--ff-rust)" id="action-cancel">Cancel</button>
+            </div>
           </div>
         </div>
       </div>
-    </div>
-  `;
+    `,
+  });
 
   // ── State ──────────────────────────────────────────────────────────────
   let currentFilter: Task["status"] = "under_review";
@@ -329,14 +370,14 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
   }
 
   function attachCardListeners(): void {
-    $list.querySelectorAll(".review-card").forEach(card => {
-      const taskId = (card as HTMLElement).dataset.taskId!;
-      const submissionId = (card as HTMLElement).dataset.submissionId!;
+    $list.querySelectorAll("tr[data-task-id]").forEach(row => {
+      const taskId = (row as HTMLElement).dataset.taskId!;
+      const submissionId = (row as HTMLElement).dataset.submissionId!;
       const item = itemById(taskId, submissionId);
       if (!item) return;
 
-      card.querySelector(".btn--open-decision")?.addEventListener("click", () => openDecision(item));
-      card.querySelector(".btn--view-session")?.addEventListener("click", () => openReviewSession(item));
+      row.querySelector(".btn--open-decision")?.addEventListener("click", () => openDecision(item));
+      row.querySelector(".btn--view-session")?.addEventListener("click", () => openReviewSession(item));
     });
   }
 
@@ -348,45 +389,25 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
     const isStale = elapsedMs > STALENESS_THRESHOLD_MS;
     const urgency = isStale ? "urgent" : elapsedMs > 60 * 60 * 1000 ? "warning" : "";
 
+    const queueId = `#SUB-${String(item.submission.id).slice(0, 4).toUpperCase()}-${String(item.task.id).slice(0, 2).toUpperCase()}`;
+    const subject = (item.task.title ?? "").toUpperCase().replace(/\s+/g, "_").slice(0, 40);
+    const ts = item.task.submitted_at ? new Date(item.task.submitted_at).toISOString().replace("T", " // ").slice(0, 16) : "—";
+    const statusLabel = isStale ? "STALE_URGENT" : item.task.status.toUpperCase();
+    const statusChip = `<span style="border:1px solid var(--ff-ink); padding:2px 6px; font-size:10px; font-weight:900;">${escHtml(statusLabel)}</span>`;
+
     return `
-      <div class="review-card ${urgency}"
-           data-task-id="${item.task.id}"
-           data-submission-id="${item.submission.id}">
-        <div class="review-card__header">
-          <div class="review-card__meta">
-            <span class="review-card__task-title">${escHtml(item.task.title)}</span>
-            <span class="review-card__project">${escHtml((item.task as any).project?.title ?? "")}</span>
-            ${isStale ? `<span class="staleness-badge">Stale</span>` : ""}
-          </div>
-          <span class="review-card__status status--${item.task.status}">${item.task.status.replace("_", " ")}</span>
-        </div>
-
-        <div class="review-card__body">
-          <div class="review-card__description">
-            <h4>Acceptance Criteria</h4>
-            <p>${escHtml(item.task.description ?? "No description")}</p>
-          </div>
-          <div class="review-card__submission">
-            <h4>Submitted Deliverable</h4>
-            ${renderDeliverablePreview(item.submission)}
-          </div>
-        </div>
-
-        <div class="review-card__footer">
-          <div class="review-card__contributor">
-            <span class="contributor-name">${escHtml(item.contributorName)}</span>
-            ${item.contributorReliability > 0
-              ? `<span class="contributor-reliability">${Math.round(item.contributorReliability * 100)}% reliability</span>`
-              : ""}
-          </div>
-          <div class="review-card__elapsed ${urgency}">${elapsedMin < 1 ? "Just now" : `${elapsedMin}m ago`}</div>
-          <div class="review-card__payout-range">$${item.task.payout_min}–${item.task.payout_max}</div>
-          <div class="review-card__actions">
-            <button class="btn btn--sm btn--ghost btn--open-decision">Review</button>
-            ${item.reviewSession ? `<button class="btn btn--sm btn--ghost btn--view-session">Collab</button>` : ""}
-          </div>
-        </div>
-      </div>
+      <tr class="${urgency}" data-task-id="${item.task.id}" data-submission-id="${item.submission.id}">
+        <td style="padding:10px; border:1px solid var(--ff-ink);">${escHtml(queueId)}</td>
+        <td style="padding:10px; border:1px solid var(--ff-ink); font-weight:900; text-transform:uppercase;">
+          ${escHtml(subject)}
+          <div style="margin-top:4px; font-size:10px; color: var(--ff-muted);">${escHtml((item.task as any).project?.title ?? "")}</div>
+        </td>
+        <td style="padding:10px; border:1px solid var(--ff-ink); color: var(--ff-muted);">${escHtml(ts)}<div style="margin-top:4px; font-size:10px;">${elapsedMin < 1 ? "JUST_NOW" : `${elapsedMin}M_AGO`}</div></td>
+        <td style="padding:10px; border:1px solid var(--ff-ink);">${statusChip}</td>
+        <td style="padding:10px; border:1px solid var(--ff-ink); text-align:right;">
+          <button class="ff-btn btn--open-decision" style="width:auto; padding:10px 12px;">START_REVIEW</button>
+        </td>
+      </tr>
     `;
   }
 
@@ -427,6 +448,7 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
     (container.querySelector("#decision-reason") as HTMLSelectElement).value = "";
     (container.querySelector("#decision-notes") as HTMLTextAreaElement).value = "";
     (container.querySelector("#structured-feedback-notes") as HTMLTextAreaElement).value = "";
+    (container.querySelector("#decision-deadline") as HTMLInputElement).value = "";
 
     // Reset dimension buttons
     container.querySelectorAll(".feedback-dim-btn").forEach(btn => {
@@ -496,7 +518,9 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
     if (!reason) { alert("Please select a reason"); return; }
 
     try {
-      await requestRevision(activeItem.submission.id, reason, notes, buildStructuredFeedback());
+      const deadlineStr = (container.querySelector("#decision-deadline") as HTMLInputElement).value;
+      const deadline = deadlineStr ? new Date(deadlineStr) : undefined;
+      await requestRevision(activeItem.submission.id, reason, notes, buildStructuredFeedback(), deadline);
       closeDecision();
       items = items.filter(i => i.task.id !== activeItem!.task.id);
       render();

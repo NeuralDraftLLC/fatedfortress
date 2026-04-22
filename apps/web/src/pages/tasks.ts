@@ -12,6 +12,7 @@
 import { getSupabase } from "../auth/index.js";
 import { requireAuth } from "../auth/middleware.js";
 import type { Task } from "@fatedfortress/protocol";
+import { renderShell } from "../ui/shell.js";
 
 const SOFT_LOCK_HOURS = 24;
 
@@ -22,24 +23,40 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return () => {};
 
-  container.innerHTML = `
-    <div class="tasks-page">
-      <header class="tasks-header">
-        <h1 class="tasks-title">Available Tasks</h1>
-        <p class="tasks-subtitle">Start working on open tasks</p>
-      </header>
+  container.innerHTML = renderShell({
+    title: "Assignment Depot",
+    subtitle: "Browse · claim · invite gate",
+    activePath: "/tasks",
+    contentHtml: `
+      <div class="ff-grid">
+        <section class="ff-panel ff-panel--rust" style="grid-column: span 8;">
+          <div style="display:flex; gap:8px; margin-bottom:12px;">
+            <button class="ff-btn filter-btn active" data-filter="open" style="flex:1; background:#1a1614; border-color: var(--ff-rust);">OPEN</button>
+            <button class="ff-btn filter-btn" data-filter="claimed" style="flex:1; background:#1a1614; border-color: var(--ff-rust);">MY_CLAIMS</button>
+            <button class="ff-btn filter-btn" data-filter="submitted" style="flex:1; background:#1a1614; border-color: var(--ff-rust);">SUBMITTED</button>
+          </div>
+          <div id="tasks-list">
+            <div class="ff-subtitle">Loading tasks...</div>
+          </div>
+        </section>
 
-      <div class="tasks-filters">
-        <button class="filter-btn active" data-filter="open">Open</button>
-        <button class="filter-btn" data-filter="claimed">My Claims</button>
-        <button class="filter-btn" data-filter="submitted">Submitted</button>
+        <aside class="ff-panel" style="grid-column: span 4;">
+          <div class="ff-kpi__label">CONTRACTOR_STATUS</div>
+          <div class="ff-subtitle" style="margin-top:10px; font-family: var(--ff-mono);">
+            SIG_ID: ${user.id.slice(0, 8).toUpperCase()}<br/>
+            TRUST_RATING: derived from profiles.review_reliability<br/>
+            ACCESS: public OR accepted invitation
+          </div>
+          <div class="ff-panel" style="margin-top:12px">
+            <div class="ff-kpi__label">LIVE_ACTION_FEED</div>
+            <div class="ff-subtitle" style="margin-top:10px; font-family: var(--ff-mono);">
+              [feed] claims · submits · payouts (future)
+            </div>
+          </div>
+        </aside>
       </div>
-
-      <div class="tasks-list" id="tasks-list">
-        <div class="tasks-loading">Loading tasks...</div>
-      </div>
-    </div>
-  `;
+    `,
+  });
 
   let currentFilter = "open";
   let allTasks: Record<string, unknown>[] = [];
@@ -133,33 +150,44 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
       ? (ambiguityScore > 0.7 ? "High ambiguity" : ambiguityScore > 0.4 ? "Medium ambiguity" : "Low ambiguity")
       : "";
 
+    const status = (t.status as string).toUpperCase();
+    const statusTag = status === "OPEN"
+      ? `<span style="color: var(--ff-gold); font-family: var(--ff-mono); font-size: 10px; font-weight: 900;">ROUTINE</span>`
+      : status === "CLAIMED"
+        ? `<span style="color: var(--ff-gold); font-family: var(--ff-mono); font-size: 10px; font-weight: 900;">ENGAGED</span>`
+        : `<span style="color: var(--ff-dim); font-family: var(--ff-mono); font-size: 10px; font-weight: 900;">${escHtml(status)}</span>`;
+
     return `
-      <div class="task-card" data-task-id="${t.id}">
-        <div class="task-card__header">
-          <h3 class="task-card__title">${escHtml(t.title as string)}</h3>
-          <span class="task-card__status status--${t.status}">${(t.status as string).replace("_", " ")}</span>
+      <div class="ff-panel" style="margin-bottom:12px" data-task-id="${t.id}">
+        <div style="display:flex; justify-content:space-between; gap:12px; align-items:flex-start">
+          <div style="font-family: var(--ff-mono); font-weight: 900; text-transform: uppercase;">
+            ${escHtml(t.title as string)}
+            <div class="ff-subtitle" style="margin-top:6px">HOST: ${escHtml(String(hostName))}${hostReliability > 0 ? ` · ${Math.round(+hostReliability * 100)}% reliable` : ""}</div>
+          </div>
+          <div>${statusTag}</div>
         </div>
 
-        <p class="task-card__desc">${escHtml(((t.description as string) ?? "").slice(0, 200))}${(t.description as string)?.length > 200 ? "..." : ""}</p>
-
-        <div class="task-card__meta">
-          <span class="meta-chip">$${t.payout_min}–$${t.payout_max}</span>
-          <span class="meta-chip">~${t.estimated_minutes ?? "?"}min</span>
-          ${ambiguityScore ? `<span class="meta-chip ${ambiguityScore > 0.6 ? "meta-chip--warn" : ""}">${ambiguityLabel}</span>` : ""}
-          <span class="meta-chip">${hostName}${hostReliability > 0 ? ` · ${Math.round(+hostReliability * 100)}% reliable` : ""}</span>
+        <div class="ff-subtitle" style="margin-top:10px">
+          ${escHtml(((t.description as string) ?? "").slice(0, 220))}${(t.description as string)?.length > 220 ? "..." : ""}
         </div>
 
-        <div class="task-card__actions">
-          ${canClaim ? `<button class="btn btn--primary claim-btn" data-task-id="${t.id}" data-action="claim">Start Task</button>` : ""}
-          ${canReclaim ? `<button class="btn btn--primary claim-btn" data-task-id="${t.id}" data-action="claim">Reclaim (expired)</button>` : ""}
-          ${isMyClaim && t.status === "claimed" ? `<a class="btn btn--primary submit-btn" data-task-id="${t.id}" data-action="submit" href="/submit/${t.id}">Submit Deliverable</a>` : ""}
-          ${isMyClaim && ["submitted","under_review","revision_requested"].includes(t.status as string) ? `<button class="btn btn--ghost view-btn" data-task-id="${t.id}" data-action="view">View Submission</button>` : ""}
-          ${!isMyClaim && !isOpen && !canReclaim ? `<span class="task-card__locked">${t.status === "claimed" ? "Being worked on" : t.status}</span>` : ""}
+        <div style="margin-top:12px; display:flex; flex-wrap:wrap; gap:8px; font-family: var(--ff-mono); font-size: 11px;">
+          <span style="border:1px solid var(--ff-rust); padding:4px 8px;">PAYOUT $${t.payout_min}–$${t.payout_max}</span>
+          <span style="border:1px solid var(--ff-rust); padding:4px 8px;">ETA ~${t.estimated_minutes ?? "?"}min</span>
+          ${ambiguityScore ? `<span style="border:1px solid var(--ff-rust); padding:4px 8px;">${escHtml(ambiguityLabel)}</span>` : ""}
+        </div>
+
+        <div style="margin-top:12px; display:flex; gap:10px; align-items:center; flex-wrap:wrap">
+          ${canClaim ? `<button class="ff-btn claim-btn" data-task-id="${t.id}" data-action="claim" style="width:auto; padding:10px 12px;">CLAIM_TASK</button>` : ""}
+          ${canReclaim ? `<button class="ff-btn claim-btn" data-task-id="${t.id}" data-action="claim" style="width:auto; padding:10px 12px;">RECLAIM_EXPIRED</button>` : ""}
+          ${isMyClaim && t.status === "claimed" ? `<a class="ff-btn submit-btn" data-task-id="${t.id}" data-action="submit" href="/submit/${t.id}" style="width:auto; padding:10px 12px; text-decoration:none; display:inline-block;">SUBMIT</a>` : ""}
+          ${isMyClaim && ["submitted","under_review","revision_requested"].includes(t.status as string) ? `<button class="ff-btn view-btn" data-task-id="${t.id}" data-action="view" style="width:auto; padding:10px 12px; background:#1a1614; border-color: var(--ff-rust);">VIEW</button>` : ""}
+          ${!isMyClaim && !isOpen && !canReclaim ? `<span class="ff-subtitle">LOCKED: ${escHtml(String(t.status))}</span>` : ""}
         </div>
 
         ${t.soft_lock_expires_at && isMyClaim ? `
-          <div class="task-card__lock">
-            Soft lock: expires ${new Date(t.soft_lock_expires_at as string).toLocaleString()}
+          <div class="ff-subtitle" style="margin-top:10px; font-family: var(--ff-mono);">
+            SOFT_LOCK_EXPIRES: ${new Date(t.soft_lock_expires_at as string).toLocaleString()}
           </div>` : ""}
       </div>
     `;

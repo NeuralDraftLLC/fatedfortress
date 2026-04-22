@@ -75,6 +75,9 @@ create table if not exists public.projects (
   description text,
   references_urls text[] default '{}',
   template_id uuid references public.project_templates(id),
+  -- blueprint artifacts (from SCOPE)
+  readme_draft text,
+  folder_structure text[],
   status text not null default 'draft'
     check (status in ('draft', 'active', 'completed')) default 'draft',
 
