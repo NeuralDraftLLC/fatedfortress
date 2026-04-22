@@ -13,6 +13,10 @@ create table if not exists public.profiles (
   github_username text,
   avatar_url text,
 
+  -- Stripe Connect (hosts) and contributor payout accounts
+  stripe_account_id                 text,
+  contributor_stripe_account_id     text,
+
   -- review_reliability signals
   review_reliability decimal default 0,
   approval_rate      decimal default 0,
@@ -79,7 +83,7 @@ create table if not exists public.projects (
   readme_draft text,
   folder_structure text[],
   status text not null default 'draft'
-    check (status in ('draft', 'active', 'completed')) default 'draft',
+    check (status in ('draft', 'active', 'completed')),
 
   created_at timestamptz default now() not null,
   updated_at timestamptz default now() not null
@@ -147,12 +151,14 @@ create table if not exists public.tasks (
 
   -- Task state machine:
   -- draft → open → claimed → submitted → under_review
-  -- → revision_requested → approved/rejected → paid/expired
+  -- → revision_requested → paid (or back to open if rejected)
+  -- Note: 'approved' and 'rejected' are terminal in Stripe/decision logic,
+  -- but the task record itself goes to 'paid' (or back to 'open').
   status text not null default 'draft'
     check (status in (
       'draft', 'open', 'claimed', 'submitted', 'under_review',
-      'revision_requested', 'approved', 'rejected', 'paid', 'expired'
-    )) default 'draft',
+      'revision_requested', 'paid', 'expired'
+    )),
 
   claimed_by uuid references public.profiles(id),
   claimed_at timestamptz,
@@ -241,6 +247,8 @@ create table if not exists public.submissions (
   contributor_id uuid not null references public.profiles(id),
 
   asset_url text not null,
+  -- Stripe PaymentIntent id (manual capture flow)
+  payment_intent_id text,
   deliverable_type text
     check (deliverable_type in (
       'file', 'pr', 'code_patch', 'design_asset', 'text',
@@ -255,10 +263,9 @@ create table if not exists public.submissions (
 
 alter table public.submissions enable row level security;
 
--- One active (non-paid/non-rejected) submission per task
-create unique index if not exists idx_submissions_one_active_per_task
-  on public.submissions(task_id)
-  where status not in ('paid', 'rejected');
+-- Prevent duplicate revision numbers per task.
+create unique index if not exists idx_submissions_task_revision_unique
+  on public.submissions(task_id, revision_number);
 
 create policy "Submissions viewable by task participants"
   on public.submissions for select
@@ -429,7 +436,7 @@ create policy "System can insert audit log entries"
 create index if not exists idx_tasks_project_id   on public.tasks(project_id);
 create index if not exists idx_tasks_status        on public.tasks(status);
 create index if not exists idx_tasks_claimed_by   on public.tasks(claimed_by);
-create index if not exists idx_tasks_host_id       on public.tasks((select host_id from public.projects where id = project_id));
+create index if not exists idx_tasks_submitted_at on public.tasks(submitted_at) where submitted_at is not null;
 create index if not exists idx_submissions_task_id on public.submissions(task_id);
 create index if not exists idx_submissions_contributor_id on public.submissions(contributor_id);
 create index if not exists idx_notifications_user_id on public.notifications(user_id);

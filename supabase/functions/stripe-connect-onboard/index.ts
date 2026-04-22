@@ -10,11 +10,24 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-const STRIPE_SECRET_KEY = Deno.env.get("STRIPE_SECRET_KEY")!;
+function getStripeSecretKey(): string {
+  const key = Deno.env.get("STRIPE_SECRET_KEY");
+  if (!key) throw new Error("STRIPE_SECRET_KEY is not set");
+  return key;
+}
 
-// ---------------------------------------------------------------------------
-// Stripe API helper
-// ---------------------------------------------------------------------------
+function isFunctionAuthorized(req: Request): boolean {
+  const authHeader = req.headers.get("Authorization") ?? "";
+  const m = authHeader.match(/^Bearer\s+(.+)$/i);
+  if (!m) return false;
+  const token = m[1];
+  const allowed = [
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY"),
+    Deno.env.get("SUPABASE_ANON_KEY"),
+    Deno.env.get("SUPABASE_functions_KEY"),
+  ].filter((v): v is string => Boolean(v));
+  return allowed.includes(token);
+}
 
 async function stripeRequest(
   method: string,
@@ -24,7 +37,7 @@ async function stripeRequest(
   const response = await fetch(`https://api.stripe.com/v1/${path}`, {
     method,
     headers: {
-      "Authorization": `Bearer ${STRIPE_SECRET_KEY}`,
+      "Authorization": `Bearer ${getStripeSecretKey()}`,
       "Content-Type": "application/x-www-form-urlencoded",
     },
     body: body ? new URLSearchParams(body as Record<string, string>).toString() : undefined,
@@ -37,15 +50,8 @@ async function stripeRequest(
   return data;
 }
 
-// ---------------------------------------------------------------------------
-// Main handler
-// ---------------------------------------------------------------------------
-
 Deno.serve(async (req: Request) => {
-  const authHeader = req.headers.get("Authorization") ?? "";
-  const expectedKey = Deno.env.get("SUPABASE_functions_KEY");
-
-  if (expectedKey && authHeader !== `Bearer ${expectedKey}`) {
+  if (!isFunctionAuthorized(req)) {
     return new Response("Unauthorized", { status: 401 });
   }
 
@@ -56,34 +62,40 @@ Deno.serve(async (req: Request) => {
       return Response.json({ error: "Missing userId" }, { status: 400 });
     }
 
-    // Get user profile for email/name
     const supabase = createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
+    // Fetch display_name from profiles (exists) and email from auth.users directly
     const { data: profile } = await supabase
       .from("profiles")
-      .select("id, email, full_name")
+      .select("display_name")
       .eq("id", userId)
       .single();
 
-    // Create Express Connect account
+    const { data: authUser } = await supabase
+      .from("auth.users")
+      .select("email")
+      .eq("id", userId)
+      .single();
+
+    // Use proper Stripe capability key syntax (no quoted keys)
     const accountParams: Record<string, string> = {
       type: "express",
       country: "US",
-      capabilities["card_payments]": "active",
-      capabilities["transfers]": "active",
+      "capabilities[card_payments]": "active",
+      "capabilities[transfers]": "active",
     };
 
-    // Add email if available for the account
-    if (profile?.email) {
-      accountParams["email"] = profile.email;
+    // Email comes from auth.users, not profiles
+    if (authUser?.email) {
+      accountParams["email"] = authUser.email;
     }
 
-    // Add business profile if name is available
-    if (profile?.full_name) {
-      accountParams["business_profile[name]"] = profile.full_name;
+    // display_name exists on profiles; use it for business name
+    if (profile?.display_name) {
+      accountParams["business_profile[name]"] = profile.display_name;
     }
 
     const account = await stripeRequest(

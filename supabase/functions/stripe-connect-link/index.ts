@@ -2,20 +2,28 @@
  * supabase/functions/stripe-connect-link/index.ts
  *
  * Generates a Stripe Connect onboarding link for a host to complete their account setup.
- *
- * Flow:
- * 1. Host clicks "Connect Stripe" in settings
- * 2. Frontend calls this function with stripeAccountId
- * 3. Returns an onboarding URL for the host to complete Stripe setup
  */
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-const STRIPE_SECRET_KEY = Deno.env.get("STRIPE_SECRET_KEY")!;
+function getStripeSecretKey(): string {
+  const key = Deno.env.get("STRIPE_SECRET_KEY");
+  if (!key) throw new Error("STRIPE_SECRET_KEY is not set");
+  return key;
+}
 
-// ---------------------------------------------------------------------------
-// Stripe API helper
-// ---------------------------------------------------------------------------
+function isFunctionAuthorized(req: Request): boolean {
+  const authHeader = req.headers.get("Authorization") ?? "";
+  const m = authHeader.match(/^Bearer\s+(.+)$/i);
+  if (!m) return false;
+  const token = m[1];
+  const allowed = [
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY"),
+    Deno.env.get("SUPABASE_ANON_KEY"),
+    Deno.env.get("SUPABASE_functions_KEY"),
+  ].filter((v): v is string => Boolean(v));
+  return allowed.includes(token);
+}
 
 async function stripeRequest(
   method: string,
@@ -25,7 +33,7 @@ async function stripeRequest(
   const response = await fetch(`https://api.stripe.com/v1/${path}`, {
     method,
     headers: {
-      "Authorization": `Bearer ${STRIPE_SECRET_KEY}`,
+      "Authorization": `Bearer ${getStripeSecretKey()}`,
       "Content-Type": "application/x-www-form-urlencoded",
     },
     body: body ? new URLSearchParams(body as Record<string, string>).toString() : undefined,
@@ -38,15 +46,8 @@ async function stripeRequest(
   return data;
 }
 
-// ---------------------------------------------------------------------------
-// Main handler
-// ---------------------------------------------------------------------------
-
 Deno.serve(async (req: Request) => {
-  const authHeader = req.headers.get("Authorization") ?? "";
-  const expectedKey = Deno.env.get("SUPABASE_functions_KEY");
-
-  if (expectedKey && authHeader !== `Bearer ${expectedKey}`) {
+  if (!isFunctionAuthorized(req)) {
     return new Response("Unauthorized", { status: 401 });
   }
 
@@ -65,7 +66,6 @@ Deno.serve(async (req: Request) => {
       return Response.json({ error: "Missing stripeAccountId" }, { status: 400 });
     }
 
-    // Create an Account Link for onboarding completion
     const accountLink = await stripeRequest(
       "POST",
       "account_links",

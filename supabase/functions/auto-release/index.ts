@@ -28,7 +28,7 @@ const WARNING_HOURS = 24;
 const RELEASE_HOURS = 48;
 
 function platformFee(amount: number): number {
-  return Math.round(amount * (PLATFORM_FEE_BPS / 10000) / 100) * 100; // cents
+  return Math.round(amount * (PLATFORM_FEE_BPS / 10000)); // cents, matches payout.ts
 }
 
 Deno.serve(async (req: Request) => {
@@ -61,7 +61,12 @@ Deno.serve(async (req: Request) => {
   }
 
   // ── 48h: auto_released ─────────────────────────────────────────────────
-  const { data: releaseTasks } = await supabase
+  // Exclude tasks that were already warned at 24h to avoid double-processing
+  const warnedTaskIds = warningTasks && warningTasks.length > 0
+    ? warningTasks.map(t => t.id)
+    : null;
+
+  let releaseQuery = supabase
     .from("tasks")
     .select(`
       id,
@@ -72,6 +77,12 @@ Deno.serve(async (req: Request) => {
     `)
     .eq("status", "under_review")
     .lt("submitted_at", releaseCutoff);
+
+  if (warnedTaskIds) {
+    releaseQuery = releaseQuery.not.in("id", warnedTaskIds);
+  }
+
+  const { data: releaseTasks } = await releaseQuery;
 
   if (!releaseTasks || releaseTasks.length === 0) {
     return new Response(JSON.stringify({ warnings: warningTasks?.length ?? 0, released: 0 }), {
@@ -86,10 +97,19 @@ Deno.serve(async (req: Request) => {
       const projectId = project?.id as string;
       const approvedPayout = task.approved_payout ?? task.payout_max ?? 0;
 
+      // Look up host's Stripe Connect account for payout transfer
+      const { data: hostProfile } = await supabase
+        .from("profiles")
+        .select("stripe_account_id")
+        .eq("id", hostId)
+        .single();
+
+      const connectedAccountId = (hostProfile as Record<string, unknown>)?.stripe_account_id as string | null;
+
       // Get the latest submission for this task
       const { data: submission } = await supabase
         .from("submissions")
-        .select("id, contributor_id")
+        .select("id, contributor_id, payment_intent_id")
         .eq("task_id", task.id)
         .order("created_at", { ascending: false })
         .limit(1)
@@ -115,7 +135,8 @@ Deno.serve(async (req: Request) => {
             action: "capture",
             amount: approvedPayout,
             platformFee: platformFee(approvedPayout),
-            connectedAccountId: null, // host Stripe account
+            paymentIntentId: (submission as Record<string, unknown>)?.payment_intent_id,
+            connectedAccountId: connectedAccountId ?? null,
             submissionId: (submission as Record<string, unknown>)?.id,
             taskId: task.id,
           },

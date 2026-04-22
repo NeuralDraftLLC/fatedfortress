@@ -14,8 +14,27 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-const STRIPE_SECRET_KEY = Deno.env.get("STRIPE_SECRET_KEY")!;
 const PLATFORM_FEE_BPS = 1000; // 10%
+
+function getStripeSecretKey(): string {
+  const key = Deno.env.get("STRIPE_SECRET_KEY");
+  if (!key) throw new Error("STRIPE_SECRET_KEY is not set");
+  return key;
+}
+
+/** Allow service-role, anon, or optional legacy key (same-project callers). */
+function isFunctionAuthorized(req: Request): boolean {
+  const authHeader = req.headers.get("Authorization") ?? "";
+  const m = authHeader.match(/^Bearer\s+(.+)$/i);
+  if (!m) return false;
+  const token = m[1];
+  const allowed = [
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY"),
+    Deno.env.get("SUPABASE_ANON_KEY"),
+    Deno.env.get("SUPABASE_functions_KEY"),
+  ].filter((v): v is string => Boolean(v));
+  return allowed.includes(token);
+}
 
 // ---------------------------------------------------------------------------
 // Stripe API helper
@@ -29,7 +48,7 @@ async function stripeRequest(
   const response = await fetch(`https://api.stripe.com/v1/${path}`, {
     method,
     headers: {
-      "Authorization": `Bearer ${STRIPE_SECRET_KEY}`,
+      "Authorization": `Bearer ${getStripeSecretKey()}`,
       "Content-Type": "application/x-www-form-urlencoded",
     },
     body: body ? new URLSearchParams(body as Record<string, string>).toString() : undefined,
@@ -47,10 +66,7 @@ async function stripeRequest(
 // ---------------------------------------------------------------------------
 
 Deno.serve(async (req: Request) => {
-  const authHeader = req.headers.get("Authorization") ?? "";
-  const expectedKey = Deno.env.get("SUPABASE_functions_KEY");
-
-  if (expectedKey && authHeader !== `Bearer ${expectedKey}`) {
+  if (!isFunctionAuthorized(req)) {
     return new Response("Unauthorized", { status: 401 });
   }
 

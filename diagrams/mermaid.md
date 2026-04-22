@@ -1,216 +1,456 @@
-# Fated Fortress — System Diagram (v1.0)
+# Fated Fortress — System Diagram (v2.0)
+
+---
+
+## Supabase Architecture Overview
 
 ```mermaid
-%%{init: {"theme": "dark", "fontFamily": "Geist Mono, monospace", "fontSize": 12}}%%
-graph TD
-    %% ============================================================
-    %% STYLE DEFINITIONS
-    %% ============================================================
-    classDef page     fill:#171717,stroke:#fafafa,stroke-width:2px,color:#fafafa
-    classDef comp     fill:#0a0a0a,stroke:#525252,stroke-width:1px,color:#d4d4d4
-    classDef handler  fill:#1b2a49,stroke:#ffd166,stroke-width:1px,color:#ffd166
-    classDef db       fill:#0d1b2a,stroke:#2a9d8f,stroke-width:2px,color:#2a9d8f
-    classDef edgefn   fill:#0d1b2a,stroke:#e9c46a,stroke-width:1px,color:#ffd166
-    classDef zone     fill:#0d1b2a,stroke:#ef476f,stroke-width:2px,color:#ef476f
-    classDef ext      fill:#000000,stroke:#737373,stroke-width:1px,color:#737373
-    classDef state    fill:#1a1a2e,stroke:#a78bfa,stroke-width:1px,color:#a78bfa
+%%{init: {"theme": "dark", "fontFamily": "Geist Mono, monospace", "fontSize": 11}}%%
+graph TB
+    classDef db fill:#0d1b2a,stroke:#2a9d8f,stroke-width:2px,color:#2a9d8f
+    classDef ef fill:#1b2a1b,stroke:#52b788,stroke-width:2px,color:#52b788
+    classDef ext fill:#1a0d0d,stroke:#ef476f,stroke-width:1px,color:#ef476f
+    classDef secret fill:#1a0d2e,stroke:#a78bfa,stroke-width:1px,color:#a78bfa
+    classDef trigger fill:#1a1a0d,stroke:#ffd166,stroke-width:1px,color:#ffd166
+    classDef cron fill:#0d1a1a,stroke:#118ab2,stroke-width:1px,color:#118ab2
 
-    %% ============================================================
-    %% ZONE 1: BROWSER MAIN THREAD (Untrusted UI)
-    %% ============================================================
-    subgraph SPA ["🌐 Zone 1: Untrusted UI (apps/web)"]
-        subgraph Pages ["📄 Page Views"]
-            login_p["/login<br/>Magic link + OAuth"]:::page
-            create_p["/create<br/>Vision → FORGE BLUEPRINT → Publish"]:::page
-            tasks_p["/tasks<br/>Browse · Claim · Invite Gate"]:::page
-            submit_p["/submit/:taskId<br/>Upload → Verify"]:::page
-            reviews_p["/reviews<br/>Realtime Queue · Cursor Pagination"]:::page
-            project_p["/project/:id<br/>Wallet · Audit Feed · Blueprint"]:::page
-            profile_p["/profile<br/>Portfolio · Trust Signals"]:::page
-            settings_p["/settings<br/>GitHub · Stripe Connect"]:::page
+    subgraph SupabaseProject["🗄️ Supabase Project: pfrtxfuuatzgddenyttm (us-west-2)"]
+        direction TB
+
+        %% ── Vault / Secrets ──────────────────────────────────────────────
+        subgraph Vault["🔐 Vault — encrypted secrets for cron auth"]
+            VAULT_URL["fatedfortress_project_url<br/>https://pfrtxfuuatzgddenyttm.supabase.co"]:::secret
+            VAULT_CRON["fatedfortress_cron_bearer<br/>64-char bearer token (CRON_SECRET)"]:::secret
         end
 
-        subgraph Components ["🧩 UI Components"]
-            PV_Sidebar["BlueprintTree<br/>(project_p sidebar)"]:::comp
-            PV_Wallet["WalletGauge<br/>(project_p header)"]:::comp
-            PV_Kanban["TaskBoard<br/>(project_p tabs)"]:::comp
-            RV_Diff["SideBySide<br/>(reviews_p output pane)"]:::comp
-            RV_Decide["DecisionModal<br/>(structured feedback + revision_deadline)"]:::comp
+        %% ── Extensions ──────────────────────────────────────────────
+        subgraph Extensions["⚙️ Postgres Extensions"]
+            PG_CRON["pg_cron v1.6.4<br/>Job scheduler"]:::cron
+            PG_NET["pg_net v0.20.0<br/>Async HTTP client (for cron → Edge)"]:::cron
+            PG_VAULT["supabase_vault v0.3.1<br/>Encrypted secret storage"]:::cron
         end
 
-        subgraph Handlers ["⚡ Client Handlers"]
-            payout_h["handlers/payout.ts<br/>releasePayout · rejectSubmission · requestRevision<br/>fundProjectWallet · createConnectAccountLink"]:::handler
-            scope_h["handlers/scope.ts<br/>generateScopedTasks → ScopeProjectResult"]:::handler
+        %% ── Cron Schedules ────────────────────────────────────────────
+        subgraph CronJobs["⏰ pg_cron Jobs"]
+            CJ_AUTO["auto-release-every-30m<br/>*/30 * * * * — net.http_post to auto-release Edge Fn"]:::cron
+            CJ_CLAIM["expire-claims-every-5m<br/>*/5 * * * * — net.http_post to expire-claims Edge Fn"]:::cron
+        end
+        CJ_AUTO -->|"net.http_post<br/>URL: Vault decrypted + /functions/v1/auto-release<br/>Auth: Bearer fatedfortress_cron_bearer"| VAULT_CRON
+        CJ_CLAIM -->|"net.http_post<br/>URL: Vault decrypted + /functions/v1/expire-claims<br/>Auth: Bearer fatedfortress_cron_bearer"| VAULT_CRON
+
+        %% ── Edge Functions ────────────────────────────────────────────
+        subgraph EdgeFunctions["⚡ Edge Functions (Deno Runtime)"]
+            EF_AUTO["auto-release v2 ★<br/>Every 30 min (cron)<br/>24h warning → 48h auto-release<br/>Calls: stripe-payment, decisions,<br/>tasks, wallet, notifications, audit_log"]:::ef
+            EF_EXPIRE["expire-claims v2<br/>Every 5 min (cron)<br/>Resets soft_lock_expired tasks<br/>→ status=open, clears claimed_by,<br/>notifies contributor"]:::ef
+            EF_STRIPE_PY["stripe-payment v1<br/>create / capture / cancel / refund / create_transfer<br/>Uses: STRIPE_SECRET_KEY env var"]:::ef
+            EF_STRIPE_ONB["stripe-connect-onboard v2<br/>Creates Stripe Connect Express account<br/>Reads: profiles.stripe_account_id<br/>Uses: auth.users.email + profiles.display_name"]:::ef
+            EF_STRIPE_LNK["stripe-connect-link v1<br/>Generates Stripe onboarding account link<br/>Reads: stripe_account_id"]:::ef
         end
 
-        subgraph State ["📦 Client State"]
-            identity_s["state/identity.ts<br/>Ed25519 Keys (audit + receipt signing)"]:::state
-            ydoc_s["state/ydoc.ts<br/>Y.js — review_sessions ONLY"]:::state
-        end
+        EF_AUTO -->|"1. invoke stripe-payment (capture)"| EF_STRIPE_PY
+        EF_AUTO -->|"2. insert decisions (approved_fast_track)"| decisions
+        EF_AUTO -->|"3. update tasks.status=paid"| tasks
+        EF_AUTO -->|"4. wallet locked→released"| wallet
+        EF_AUTO -->|"5. audit_log (auto_released)"| audit_log
+        EF_AUTO -->|"6. notify host + contributor"| notifications
     end
 
-    %% ============================================================
-    %% ZONE 2: SECURE SANDBOX (keys.fatedfortress.com)
-    %% ============================================================
-    subgraph VaultZone ["🔒 Zone 2: Secure Sandbox (iframe)"]
-        W_Router["router.ts<br/>(Intent Switch)"]:::zone
-        W_Keys["keystore.ts<br/>(AES-256-GCM key storage)"]:::zone
+    EF_STRIPE_PY -->|"Stripe API"| StripeExt["🌍 Stripe Connect<br/>PaymentIntent capture<br/>10% application_fee"]:::ext
+    EF_STRIPE_ONB -->|"Stripe API"| StripeExt
+    EF_STRIPE_LNK -->|"Stripe API"| StripeExt
+
+    VAULT_URL -.->|"URL for cron http_post URL construction"| CJ_AUTO
+    VAULT_CRON -.->|"Bearer token for cron Authorization header"| CJ_AUTO
+    VAULT_CRON -.->|"Bearer token for cron Authorization header"| CJ_CLAIM
+
+    subgraph SupabaseDB["🗄️ Database Tables (all RLS enabled)"]
+        profiles -->|"host_id / claimed_by / contributor_id"| tasks
+        projects -->|"1:1 + FK"| wallet
+        projects -->|"1:many"| tasks
+        tasks -->|"1:many"| submissions
+        tasks -->|"1:many"| review_sessions
+        submissions -->|"1:many"| decisions
+        submissions -->|"1:1"| review_sessions
     end
-
-    %% ============================================================
-    %% ZONE 3: CLOUDFLARE EDGE (relay.fatedfortress.com / worker)
-    %% ============================================================
-    subgraph EdgeZone ["⚡ Zone 3: Stateless Edge (Cloudflare)"]
-        RelayDO["RelayDO<br/>(WebRTC Signaling — review sessions only)"]:::edgefn
-        VerifyWorker["VerifyWorker<br/>(VERIFY_SUBMISSION — pre-review auto-reject moat)"]:::edgefn
-        ScopeWorker["ScopeWorker<br/>(SCOPE_PROJECT — AI task generation)"]:::edgefn
-    end
-
-    %% ============================================================
-    %% PERSISTENCE LAYER (Supabase)
-    %% ============================================================
-    subgraph Supabase ["🗄️ Supabase Persistence Layer"]
-        subgraph Schema ["Schema — Three Sacred Objects + Support"]
-            profiles[("profiles<br/>role · review_reliability · approval_rate")]:::db
-            projects[("projects<br/>blueprint meta · status · template_id")]:::db
-            wallet[("project_wallet<br/>deposited · locked · released<br/>available = computed only")]:::db
-            tasks[("tasks<br/>state machine · soft_lock · payout range")]:::db
-            submissions[("submissions<br/>asset_url · deliverable_type · revision_number")]:::db
-            decisions[("decisions ★<br/>decision_reason · approved_payout<br/>structured_feedback · revision_deadline")]:::db
-            invitations[("invitations<br/>token · expires_at · invite gate")]:::db
-            rev_sess[("review_sessions<br/>ydoc_id · Y.js scope boundary")]:::db
-            notifications[("notifications<br/>typed enum · realtime feed")]:::db
-            audit_log[("audit_log<br/>every task transition · Ed25519 signed")]:::db
-            templates[("project_templates<br/>stub — nullable FK on projects")]:::db
-        end
-
-        subgraph EdgeFunctions ["Supabase Edge Functions (Cron)"]
-            auto_release["auto-release<br/>(30 min cron)<br/>24h warning → 48h release"]:::edgefn
-            expire_claims["expire-claims<br/>(5 min cron)<br/>soft_lock_expires_at enforcement"]:::edgefn
-        end
-    end
-
-    %% ============================================================
-    %% EXTERNAL WORLD
-    %% ============================================================
-    subgraph World ["🌍 External"]
-        Stripe[("Stripe Connect<br/>PaymentIntent capture<br/>10% application_fee")]:::ext
-        GitHub[("GitHub API<br/>createBranch · createPR · webhook")]:::ext
-        R2[("Cloudflare R2<br/>presigned upload · asset storage")]:::ext
-        SupabaseRT[("Supabase Realtime<br/>tasks · notifications subscriptions")]:::ext
-    end
-
-    %% ============================================================
-    %% FLOWS
-    %% ============================================================
-
-    %% Auth
-    login_p -->|"magic link / Google OAuth"| profiles
-
-    %% Creation Flow
-    create_p ==>|"1. FORGE BLUEPRINT intent"| ScopeWorker
-    ScopeWorker -->|"readmeDraft · folderStructure · ScopedTask[]"| scope_h
-    scope_h -->|"tasks status=draft"| tasks
-    scope_h -->|"projects status=active"| projects
-    scope_h -->|"wallet row deposited=0"| wallet
-
-    %% Page → Component wiring
-    project_p --> PV_Sidebar
-    project_p --> PV_Wallet
-    project_p --> PV_Kanban
-    PV_Wallet -->|"reads"| wallet
-    PV_Kanban -->|"reads"| tasks
-    PV_Sidebar -->|"reads"| projects
-
-    %% Claim Flow
-    tasks_p -->|"2. access check"| invitations
-    invitations -.->|"accepted_at not null"| tasks
-    tasks_p -->|"soft-lock claim"| tasks
-
-    %% Submission Flow
-    submit_p ==>|"3. presigned upload"| R2
-    submit_p -->|"4. VERIFY_SUBMISSION intent"| VerifyWorker
-    VerifyWorker -->|"code tasks: build check"| GitHub
-    VerifyWorker -->|"passed → submission row"| submissions
-    VerifyWorker -.->|"auto_reject=true → decision quality_issue"| decisions
-    VerifyWorker -.->|"auto_reject → task=revision_requested"| tasks
-    VerifyWorker -.->|"notify verification_failed"| notifications
-
-    %% Review Queue — Realtime (NOT RelayDO)
-    reviews_p <-->|"Supabase Realtime<br/>status=under_review subscription"| SupabaseRT
-    SupabaseRT -->|"push new items"| tasks
-
-    %% Review Session — Y.js (only on session open)
-    reviews_p -->|"session open → activate Y.js"| ydoc_s
-    ydoc_s <-->|"WebRTC signaling"| RelayDO
-    ydoc_s -->|"ydoc_id binding"| rev_sess
-
-    %% Review Decision Flow
-    reviews_p --> RV_Diff
-    RV_Diff --> RV_Decide
-    RV_Decide ==>|"Approve: decisionReason · approvedPayout"| payout_h
-
-    %% releasePayout internal order (critical path)
-    payout_h -->|"1. insert decision"| decisions
-    payout_h -->|"2. lock wallet (atomic RPC)"| wallet
-    payout_h -->|"3. capture PaymentIntent + 10% fee"| Stripe
-    payout_h -->|"4. tasks.status=paid"| tasks
-    payout_h -->|"5. wallet released++"| wallet
-    payout_h -->|"6. audit entry"| audit_log
-    payout_h -->|"7. session resolved"| rev_sess
-    payout_h -->|"8. update review_reliability"| profiles
-    payout_h -->|"9. notify payment_released"| notifications
-
-    %% Reject / Revision paths
-    RV_Decide -->|"Reject / Request Revision"| payout_h
-    payout_h -.->|"reject: task=rejected / revision: task=revision_requested"| tasks
-    payout_h -.->|"structured_feedback · revision_deadline"| decisions
-    payout_h -.->|"notify contributor"| notifications
-
-    %% Autonomous Ops
-    auto_release ==>|"48h: calls releasePayout approved_fast_track"| payout_h
-    auto_release -.->|"24h: notify auto_release_warning"| notifications
-    expire_claims ==>|"reset status=open · clear claimed_by"| tasks
-    expire_claims -.->|"notify claim_expired"| notifications
-
-    %% GitHub Integration
-    settings_p -->|"OAuth connect"| GitHub
-    submit_p -.->|"pr deliverable: createBranch · createPR"| GitHub
-
-    %% Secure Sandbox
-    W_Keys <-->|"worker-bridge.ts"| W_Router
-    W_Router -->|"SCOPE_PROJECT"| ScopeWorker
-    W_Router -->|"VERIFY_SUBMISSION"| VerifyWorker
-
-    %% Identity / Audit
-    identity_s -->|"Ed25519 sign"| audit_log
 ```
 
 ---
 
-## System Overview
+## Database Schema (ER Diagram)
 
-Fated Fortress is a **review-centered task marketplace** with three sacred objects: **Task**, **Submission**, **Decision**.
+```mermaid
+%%{init: {"theme": "dark", "fontFamily": "Geist Mono, "fontSize": 9}}%%
+erDiagram
+    "auth.users" ||--o| "public.profiles" : "handle_new_user() trigger on INSERT"
 
-- **Host** creates a project → AI generates tasks via SCOPE → publishes
-- **Contributor** claims a task → submits a deliverable → gets verified automatically
-- **Host** reviews in a FIFO queue → approves (and pays) / rejects / requests revision
-- **Auto-release** fires if the host doesn't act in 48h
-- **Soft-lock** expires if contributor doesn't submit in 24h
+    "public.profiles" {
+        uuid id PK "→ auth.users(id)"
+        text display_name ""
+        text role "'host' | 'contributor'"
+        text github_username ""
+        text avatar_url ""
+        text stripe_account_id "★ nullable (host Stripe Connect)"
+        text contributor_stripe_account_id "★ nullable"
+        decimal review_reliability "default 0"
+        decimal approval_rate "default 0"
+        decimal avg_revision_count "default 0"
+        int avg_response_time_minutes "default 0"
+        int total_approved "default 0"
+        int total_submitted "default 0"
+        int total_rejected "default 0"
+        timestamptz created_at ""
+    }
+
+    "public.project_templates" {
+        uuid id PK
+        text title ""
+        text description ""
+        timestamptz created_at ""
+    }
+
+    "public.projects" {
+        uuid id PK
+        uuid host_id "→ profiles(id)"
+        text title ""
+        text description ""
+        text[] references_urls "[]"
+        uuid template_id "→ project_templates(id)"
+        text readme_draft ""
+        text[] folder_structure ""
+        text status "'draft' | 'active' | 'completed'"
+        timestamptz created_at ""
+        timestamptz updated_at ""
+    }
+
+    "public.project_wallet" {
+        uuid id PK
+        uuid project_id UK "→ projects(id) unique"
+        decimal deposited "default 0"
+        decimal locked "default 0"
+        decimal released "default 0"
+        timestamptz created_at ""
+        "available = deposited - locked - released (computed, not stored)"
+    }
+
+    "public.tasks" {
+        uuid id PK
+        uuid project_id "→ projects(id)"
+        text title ""
+        text description ""
+        decimal payout_min "default 0"
+        decimal payout_max "default 0"
+        decimal approved_payout "★ denorm cache; source = decisions.approved_payout"
+        decimal ambiguity_score ""
+        int estimated_minutes ""
+        text task_access "'invite' | 'public'"
+        text status "'draft'→'open'→'claimed'→'submitted'→'under_review'→'revision_requested'→'paid'|'expired'"
+        uuid claimed_by "→ profiles(id)"
+        timestamptz claimed_at ""
+        timestamptz soft_lock_expires_at "24h ownership window"
+        timestamptz submitted_at "★ partial index (for auto-release cutoff)"
+        timestamptz reviewed_at ""
+        timestamptz created_at ""
+        timestamptz updated_at ""
+    }
+
+    "public.invitations" {
+        uuid id PK
+        uuid project_id "→ projects(id)"
+        uuid task_id "→ tasks(id)"
+        text invited_email ""
+        uuid invited_user_id "→ profiles(id)"
+        text token UK "unique"
+        timestamptz accepted_at ""
+        timestamptz expires_at "default now()+7days"
+        timestamptz created_at ""
+    }
+
+    "public.submissions" {
+        uuid id PK
+        uuid task_id "→ tasks(id)"
+        uuid contributor_id "→ profiles(id)"
+        text asset_url ""
+        text payment_intent_id "★ nullable (Stripe manual capture)"
+        text deliverable_type "'file'|'pr'|'code_patch'|'design_asset'|'text'|'audio'|'video'|'3d_model'|'figma_link'"
+        text ai_summary ""
+        int revision_number "default 1 (UK with task_id)"
+        timestamptz created_at ""
+        timestamptz updated_at ""
+    }
+
+    "public.decisions" {
+        uuid id PK
+        uuid submission_id "→ submissions(id)"
+        uuid host_id "→ profiles(id)"
+        text decision_reason "'requirements_not_met'|'quality_issue'|'scope_mismatch'|'missing_files'|'great_work'|'approved_fast_track'"
+        text review_notes ""
+        jsonb structured_feedback ""
+        decimal approved_payout "★ authoritative source (tasks.approved_payout is denorm cache)"
+        timestamptz revision_deadline ""
+        timestamptz created_at ""
+    }
+
+    "public.review_sessions" {
+        uuid id PK
+        uuid task_id "→ tasks(id)"
+        uuid submission_id "→ submissions(id)"
+        uuid host_id "→ profiles(id)"
+        uuid contributor_id "→ profiles(id)"
+        text ydoc_id "Y.js doc ID"
+        text status "'active'|'resolved'|'archived'"
+        timestamptz created_at ""
+        timestamptz updated_at ""
+    }
+
+    "public.notifications" {
+        uuid id PK
+        uuid user_id "→ profiles(id)"
+        text type "'task_claimed'|'submission_received'|'revision_requested'|'payment_released'|'submission_rejected'|'claim_expired'|'verification_failed'|'auto_release_warning'|'auto_released'"
+        uuid task_id "→ tasks(id)"
+        bool read "default false"
+        timestamptz created_at ""
+    }
+
+    "public.audit_log" {
+        uuid id PK
+        uuid actor_id "→ profiles(id)"
+        uuid task_id "→ tasks(id)"
+        text action "'claimed'|'submitted'|'approved'|'rejected'|'payment_released'|'revision_requested'|'task_created'|'task_published'|'verification_failed'|'auto_released'|'claim_expired'"
+        jsonb payload "{}"
+        timestamptz created_at ""
+        "★ IMMUTABLE: UPDATE and DELETE blocked by triggers"
+    }
+
+    "public.profiles" ||--o{ "public.projects" : "host_id"
+    "public.profiles" ||--o{ "public.tasks" : "claimed_by"
+    "public.profiles" ||--o{ "public.submissions" : "contributor_id"
+    "public.profiles" ||--o{ "public.decisions" : "host_id"
+    "public.profiles" ||--o{ "public.notifications" : "user_id"
+    "public.project_templates" ||--o{ "public.projects" : "template_id"
+    "public.projects" ||--|{ "public.project_wallet" : "project_id 1:1"
+    "public.projects" ||--|{ "public.tasks" : "project_id"
+    "public.projects" ||--o{ "public.invitations" : "project_id"
+    "public.invitations" ||--o{ "public.tasks" : "task_id"
+    "public.tasks" ||--|{ "public.submissions" : "task_id"
+    "public.tasks" ||--|{ "public.review_sessions" : "task_id"
+    "public.tasks" ||--o{ "public.notifications" : "task_id"
+    "public.tasks" ||--o{ "public.audit_log" : "task_id"
+    "public.submissions" ||--|{ "public.decisions" : "submission_id"
+    "public.submissions" ||--|{ "public.review_sessions" : "submission_id"
+```
+
+---
+
+## RLS + Trigger Map
+
+```mermaid
+%%{init: {"theme": "dark", "fontFamily": "Geist Mono, monospace", "fontSize": 10}}%%
+graph LR
+    classDef rls_on fill:#0d2b1b,stroke:#2a9d8f,stroke-width:2px,color:#2a9d8f
+    classDef trigger fill:#1a1a0d,stroke:#ffd166,stroke-width:1px,color:#ffd166
+
+    subgraph RLS["🔒 Row Level Security — all tables in public schema"]
+
+        profiles["profiles<br/>RLS: ✅ ON<br/>select: everyone<br/>update: auth.uid=id<br/>Stripe fields: auth.uid=id"]:::rls_on
+
+        projects["projects<br/>RLS: ✅ ON<br/>select/insert/update: auth.uid=host_id"]:::rls_on
+
+        wallet["project_wallet<br/>RLS: ✅ ON<br/>select: host + active contributors<br/>all: host only<br/>UK on project_id: ✅"]:::rls_on
+
+        tasks["tasks<br/>RLS: ✅ ON<br/>select: host + claimed_by + public<br/>insert/update: host only<br/>submitted_at partial idx: ✅"]:::rls_on
+
+        submissions["submissions<br/>RLS: ✅ ON<br/>select: task participants<br/>insert: contributor only<br/>update: host only<br/>task_revision UK: ✅"]:::rls_on
+
+        decisions["decisions<br/>RLS: ✅ ON<br/>select: host + contributor + claimant<br/>insert: host only"]:::rls_on
+
+        invitations["invitations<br/>RLS: ✅ ON<br/>select: host + invitee<br/>insert: host<br/>update: invitee (accept)"]:::rls_on
+
+        review_sessions["review_sessions<br/>RLS: ✅ ON<br/>select: host + contributor<br/>insert/update: host only"]:::rls_on
+
+        notifications["notifications<br/>RLS: ✅ ON<br/>select/update: auth.uid=user_id"]:::rls_on
+
+        audit_log["audit_log<br/>RLS: ✅ ON<br/>select: actor + host + claimant<br/>insert: system only (with check true)<br/><br/>🚫 IMMUTABLE:<br/>BEFORE UPDATE trigger → raise 'audit_log is immutable'<br/>BEFORE DELETE trigger → raise 'audit_log is immutable'<br/>REVOKE update, delete FROM anon, authenticated"]:::rls_on
+    end
+
+    subgraph Triggers["⚡ Postgres Triggers"]
+        T1["on_auth_user_created<br/>AFTER INSERT on auth.users<br/>→ handle_new_user() → insert profiles"]:::trigger
+        T2["trg_prevent_audit_log_update<br/>BEFORE UPDATE on audit_log<br/>→ raise exception"]:::trigger
+        T3["trg_prevent_audit_log_delete<br/>BEFORE DELETE on audit_log<br/>→ raise exception"]:::trigger
+    end
+
+    T1 -->|"fires on user creation"| profiles
+    T2 --> audit_log
+    T3 --> audit_log
+```
+
+---
+
+## Stripe Connect Payout Flow
+
+```mermaid
+%%{init: {"theme": "dark", "fontFamily": "Geist Mono, monospace", "fontSize": 10}}%%
+sequenceDiagram
+    actor H as Host
+    actor C as Contributor
+    actor FF as FatedFortress Frontend
+    actor SU as Supabase Edge Fn
+    actor ST as Stripe API
+
+    rect #1b2a49
+        Note over H,ST: CONNECT ONBOARDING (one-time per host)
+        H->>FF: /settings → "Connect Stripe"
+        FF->>SU: stripe-connect-onboard({ userId })
+        SU->>ST: POST /accounts<br/>(type=express, country=US<br/>capabilities[card_payments]=active<br/>capabilities[transfers]=active
+        ST-->>SU: { id: acct_xxx }
+        SU->>FF: { stripeAccountId: acct_xxx }
+        FF->>SU: profiles.update({ stripe_account_id: acct_xxx })
+        H->>ST: Completes Stripe onboarding (browser redirect)
+    end
+
+    rect #0d1b2a
+        Note over H,ST: CLAIM + SUBMIT (no money moves)
+        H->>FF: Creates project + tasks
+        C->>FF: browse /tasks
+        C->>FF: claim task → tasks.status='claimed'
+        C->>FF: submit deliverable
+        FF->>SU: stripe-payment create({ amount, taskId, submissionId })
+        SU->>ST: POST /payment_intents<br/>(capture_method=manual)
+        ST-->>SU: { id: pi_xxx, client_secret }
+        SU->>FF: Update submissions.payment_intent_id=pi_xxx
+        Note over C,ST: No capture yet; funds not moved
+    end
+
+    rect #1b2a49
+        Note over H,ST: RELEASE PAYOUT (only place capture happens)
+        H->>FF: Reviews → Approve
+        FF->>SU: releasePayout({ submissionId, approvedPayout, decisionReason })
+        SU->>FF: 1. Insert decisions row
+        SU->>ST: 2. POST /payment_intents/pi_xxx/capture<br/>application_fee=Math.round(approvedPayout×1000/10000)
+        ST-->>SU: { status: 'succeeded' }
+        SU->>FF: 3. tasks.status='paid'<br/>4. wallet locked→released<br/>5. audit_log<br/>6. notifications<br/>7. updateHostReliability
+        Note over H,ST: Host receives transfer via Stripe Connect<br/>Platform keeps 10% application_fee
+    end
+
+    rect #0d1b2a
+        Note over H,ST: AUTO-RELEASE (48h timeout)
+        Note over SU: pg_cron fires auto-release (30min)
+        SU->>FF: Find under_review tasks >48h (excl. 24h cohort)
+        FF->>SU: invoke stripe-payment capture (approved_fast_track)
+        SU->>ST: POST /payment_intents/pi_xxx/capture
+        FF->>FF: Same wallet + notification steps
+        Note over H,C: auto_released notification sent
+    end
+
+    rect #1b2a49
+        Note over H,ST: REJECT / REVISION
+        H->>FF: Reviews → Reject or Request Revision
+        FF->>SU: rejectSubmission / requestRevision
+        SU->>ST: POST /payment_intents/pi_xxx/cancel (reject only)
+        FF->>FF: tasks.status='open' (back to queue)<br/>notifications sent to contributor
+    end
+```
+
+---
+
+## Autonomous Ops — Cron + Edge Functions
+
+```mermaid
+%%{init: {"theme": "dark", "fontFamily": "Geist Mono, monospace", "fontSize": 10}}%%
+graph TD
+    classDef cron fill:#0d1a1a,stroke:#118ab2,stroke-width:2px,color:#118ab2
+    classDef ef fill:#1b2a1b,stroke:#52b788,stroke-width:2px,color:#52b788
+    classDef db fill:#0d1b2a,stroke:#2a9d8f,stroke-width:1px,color:#2a9d8f
+    classDef secret fill:#1a0d2e,stroke:#a78bfa,stroke-width:1px,color:#a78bfa
+
+    subgraph Cron["⏰ pg_cron"]
+        C1["auto-release-every-30m<br/>*/30 * * * *"]:::cron
+        C2["expire-claims-every-5m<br/>*/5 * * * *"]:::cron
+    end
+
+    subgraph Vault["🔐 Vault (decrypted at query time)"]
+        V_URL["fatedfortress_project_url<br/>https://pfrtxfuuatzgddenyttm.supabase.co"]:::secret
+        V_KEY["fatedfortress_cron_bearer<br/>(64-char bearer token)"]:::secret
+    end
+
+    subgraph Edge["⚡ Edge Functions (Deno)"]
+        E1["auto-release v2<br/>Auth: Bearer CRON_SECRET checked<br/><br/>24h path:<br/> SELECT under_review tasks WHERE submitted_at < now()-24h<br/>→ INSERT notifications (auto_release_warning)<br/><br/>48h path (excl. 24h cohort):<br/> SELECT under_review tasks WHERE submitted_at < now()-48h<br/>  → INSERT decisions (approved_fast_track)<br/>  → invoke stripe-payment (capture)<br/>  → UPDATE tasks.status='paid'<br/>  → UPDATE wallet (locked→released)<br/>  → INSERT audit_log (auto_released)<br/>  → INSERT notifications (host + contributor)"]:::ef
+
+        E2["expire-claims v2<br/>Auth: Bearer CRON_SECRET checked<br/><br/>SELECT tasks<br/> WHERE status='claimed'<br/> AND soft_lock_expires_at < now()<br/><br/>→ UPDATE tasks: status='open', claimed_by=null<br/>→ INSERT audit_log (claim_expired)<br/>→ INSERT notifications (claim_expired)"]:::ef
+    end
+
+    C1 -->|"net.http_post<br/>URL: V_URL + /functions/v1/auto-release<br/>Auth: Bearer V_KEY"| E1
+    C2 -->|"net.http_post<br/>URL: V_URL + /functions/v1/expire-claims<br/>Auth: Bearer V_KEY"| E2
+
+    E1 -->|"SELECT under_review >48h"| TSK["tasks<br/>submitted_at partial index"]:::db
+    E1 -->|"INSERT"| DEC["decisions<br/>(approved_fast_track)"]:::db
+    E1 -->|"capture"| STRIPE["🌍 Stripe API"]:::db
+    E1 -->|"UPDATE paid"| TSK
+    E1 -->|"UPDATE released"| WAL["project_wallet"]:::db
+    E1 -->|"INSERT auto_released"| AUD["audit_log ★ (immutable)"]:::db
+    E1 -->|"INSERT host + contributor"| NF["notifications"]:::db
+
+    E2 -->|"SELECT expired"| TSK2["tasks<br/>claimed_by + soft_lock_expires_at"]:::db
+    E2 -->|"UPDATE open + null claim fields"| TSK2
+    E2 -->|"INSERT claim_expired"| AUD2["audit_log ★"]:::db
+    E2 -->|"INSERT claim_expired"| NF2["notifications"]:::db
+```
+
+---
+
+## persist_scoped_project RPC
+
+```mermaid
+%%{init: {"theme": "dark", "fontFamily": "Geist Mono, monospace", "fontSize": 11}}%%
+graph LR
+    classDef rpc fill:#1b2a1b,stroke:#52b788,stroke-width:2px,color:#52b788
+    classDef db fill:#0d1b2a,stroke:#2a9d8f,stroke-width:1px,color:#2a9d8f
+
+    RPC["public.persist_scoped_project(<br/>  p_project_id uuid,<br/>  p_host_id uuid,<br/>  p_title text,<br/>  p_description text,<br/>  p_references_urls text[],<br/>  p_readme_draft text,<br/>  p_folder_structure text[],<br/>  p_tasks jsonb ★<br/>) → returns uuid<br/><br/>LANGUAGE plpgsql SECURITY DEFINER<br/>GRANT EXECUTE TO authenticated"]:::rpc
+
+    RPC -->|"auth.uid() IS NULL → 403"| E1["raise exception 'Not authenticated'"]
+    RPC -->|"p_host_id ≠ auth.uid() → 403"| E2["raise exception 'Host mismatch'"]
+
+    RPC -->|"1. INSERT projects<br/>(id, host_id, title, description,<br/> references_urls, status='draft',<br/> readme_draft, folder_structure)"| PJ["projects"]:::db
+
+    RPC -->|"2. jsonb_array_elements(p_tasks)<br/>Loop per task object:<br/> INSERT tasks (<br/>   project_id, title, description,<br/>   payout_min, payout_max,<br/>   ambiguity_score, estimated_minutes,<br/>   status='draft', task_access='invite'<br/> )"| TK["tasks"]:::db
+
+    RPC -->|"3. INSERT audit_log<br/>(actor_id=p_host_id,<br/> action='project_scoped',<br/> payload={projectId})"| AL["audit_log ★"]:::db
+
+    RPC -->|"4. RETURN p_project_id"| RET["returns uuid"]
+```
 
 ---
 
 ## Key Design Decisions
 
-- **Stripe capture only in `releasePayout`** — never on claim or submit
-- **`decisions` is the authoritative record** — `submissions` has no decision columns
-- **`project_wallet.available`** is computed, never stored
-- **Invite-first** — `?invite=<token>` URL param on claim flow
-- **VERIFY runs before the host queue** — auto-reject saves host time
-- **Y.js = review sessions only** — not room-based presence
-- **Supabase Realtime** for notifications and the review queue
-- **Ed25519 signed audit_log** — tamper-evident every task transition
-- **10% Stripe application_fee** on every captured PaymentIntent
+| Decision | Rationale |
+|---|---|
+| **Stripe capture only in `releasePayout`** | Manual capture: no funds held on claim/submit; capture is the one atomic moment |
+| **`decisions` is authoritative** | `submissions` has no decision columns; approved payout sourced from decisions |
+| **`project_wallet.available` is computed** | `available = deposited - locked - released` — never stored, never stale |
+| **Invite-first** | `?invite=<token>` URL param; invitation gate enforced at query/app level |
+| **VERIFY before host queue** | Auto-reject saves host time; `verification_failed` notification |
+| **Y.js = review sessions only** | `ydoc_id` is the boundary; not room-based general presence |
+| **Supabase Realtime** | `tasks`, `notifications`, `audit_log` in `supabase_realtime` publication |
+| **Audit log immutable** | `trg_prevent_audit_log_update/delete` + `revoke update/delete on anon, authenticated` |
+| **10% Stripe `application_fee`** | `Math.round(amount × 1000 / 10000)` on every captured PaymentIntent |
+| **Vault for cron auth** | `fatedfortress_project_url` + `fatedfortress_cron_bearer` in `supabase_vault`; pg_cron reads decrypted values |
+| **24h cohort excluded from 48h** | `auto-release` release query excludes tasks already warned at 24h |
+| **`soft_lock_expires_at`** | 24h window after claim; `expire-claims` reclaims if no submission |
+
+---
+
+## Migrations Applied (in order)
+
+| Version | Name | Effect |
+|---|---|---|
+| `20260422_base_schema_v2` | Full schema | 11 tables, all RLS, all constraints, indexes, triggers |
+| `20260422_post_refactor_v1_assertions` | Assertions | `decisions.decision_reason` constraint, wallet UK |
+| `20260422_persist_blueprint` | RPC | `persist_scoped_project()` — atomic project+task creation |
+| `20260422_security_realtime_cron` | Security + Cron | audit_log immutability triggers, realtime publication, pg_cron schedules, Vault secrets |
+| `20260422_fix5_profiles_stripe_account_id` | Profiles stripe | `stripe_account_id` + `contributor_stripe_account_id` columns |
+| `20260422_fix7_tasks_status_and_submitted_at_index` | Tasks constraints | Remove dead `approved`/`rejected` from status; `idx_tasks_submitted_at` |
+| `20260422_fix2_persist_scoped_project` | RPC fix | Remove non-existent `deliverable_type` from tasks INSERT |
 
 ---
 
@@ -218,16 +458,16 @@ Fated Fortress is a **review-centered task marketplace** with three sacred objec
 
 ```env
 # Supabase
-VITE_SUPABASE_URL=
-VITE_SUPABASE_ANON_KEY=
+VITE_SUPABASE_URL=https://pfrtxfuuatzgddenyttm.supabase.co
+VITE_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 
-# Stripe
-STRIPE_SECRET_KEY=          # server-side only
-VITE_STRIPE_PUBLISHABLE_KEY= # client-side
+# Stripe (set in Supabase Dashboard → Edge Functions → Secrets)
+STRIPE_SECRET_KEY=sk_live_...          # server-side only
+VITE_STRIPE_PUBLISHABLE_KEY=pk_live_... # client-side
 
 # GitHub
 VITE_GITHUB_CLIENT_ID=
-GITHUB_TOKEN=               # server-side (verify worker)
+GITHUB_TOKEN=                          # server-side (verify worker)
 
 # Worker bridge
 VITE_WORKER_ORIGIN=https://keys.fatedfortress.com
