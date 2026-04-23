@@ -256,16 +256,36 @@ export async function mountSubmit(container: HTMLElement, taskId: string): Promi
       $progressFill.style.width = "100%";
       $progressText.textContent = "Verifying...";
 
-      // 3. VERIFY_SUBMISSION — runs before submission reaches host queue
-      const verifyResult = await runVerification(uploadedAssetUrl, selectedType);
+      // 3. Create submission row FIRST (needed for verify-submission to have a real UUID FK)
+      //    payment_intent_id is updated by stripe-payment capture on approval; initially null.
+      const { data: submission, error: submitError } = await supabase
+        .from("submissions")
+        .insert({
+          task_id: taskId,
+          contributor_id: user.id,
+          asset_url: uploadedAssetUrl,
+          deliverable_type: selectedType,
+          revision_number: 1,
+        } as Record<string, unknown>)
+        .select()
+        .single();
+
+      if (submitError || !submission) {
+        throw new Error(submitError?.message ?? "Failed to create submission row");
+      }
+
+      const submissionId = (submission as Record<string, unknown>).id as string;
+
+      // 4. VERIFY_SUBMISSION — runs before submission reaches host queue
+      const verifyResult = await runVerification(submissionId, uploadedAssetUrl, selectedType);
 
       if (verifyResult.auto_reject) {
-        await handleAutoReject(verifyResult);
+        await handleAutoReject(verifyResult, submissionId);
         return;
       }
 
-      // 4. Passed verification — create submission row
-      await finalizeSubmission(uploadedAssetUrl, selectedType);
+      // 5. Passed verification — transition task to under_review, notify host
+      await finalizeSubmission(submissionId, uploadedAssetUrl, selectedType);
 
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Submission failed";
@@ -273,14 +293,18 @@ export async function mountSubmit(container: HTMLElement, taskId: string): Promi
     }
   });
 
-  async function runVerification(assetUrl: string, deliverableType: DeliverableType): Promise<VerificationResult> {
+  async function runVerification(
+    submissionId: string,
+    assetUrl: string,
+    deliverableType: DeliverableType
+  ): Promise<VerificationResult> {
     $progress.classList.add("hidden");
     $verifyStatus.classList.remove("hidden");
     $verifyText.textContent = "Running verification...";
 
     try {
       const { data, error } = await supabase.functions.invoke<VerificationResult>("verify-submission", {
-        body: { submissionId: "pending", assetUrl, deliverableType },
+        body: { submissionId, assetUrl, deliverableType },
       });
 
       if (error || !data) {
@@ -303,11 +327,20 @@ export async function mountSubmit(container: HTMLElement, taskId: string): Promi
     }
   }
 
-  async function handleAutoReject(result: VerificationResult): Promise<void> {
+  async function handleAutoReject(result: VerificationResult, submissionId: string): Promise<void> {
+    // Look up the project's host_id so the decision row has a valid FK reference
+    const { data: taskRow } = await supabase
+      .from("tasks")
+      .select("project:projects(host_id)")
+      .eq("id", taskId)
+      .single();
+
+    const hostId = (taskRow?.project as Record<string, unknown>)?.host_id as string | null;
+
     // Insert decisions row (quality_issue) so the auto-reject is audited
     const { error: decisionError } = await supabase.from("decisions").insert({
-      submission_id: "pending", // placeholder until submission row exists
-      host_id: "00000000-0000-0000-0000-000000000000", // system decision — no host
+      submission_id: submissionId,
+      host_id: hostId ?? "00000000-0000-0000-0000-000000000000",
       decision_reason: result.suggested_decision_reason ?? "quality_issue",
       review_notes: result.failure_summary ?? "Automated verification failed",
       structured_feedback: null,
@@ -349,22 +382,7 @@ export async function mountSubmit(container: HTMLElement, taskId: string): Promi
     $verifyFailMsg.textContent = result.failure_summary ?? "Your submission failed automated verification.";
   }
 
-  async function finalizeSubmission(assetUrl: string, deliverableType: DeliverableType): Promise<void> {
-    // Create submission row
-    const { data: submission, error: submitError } = await supabase
-      .from("submissions")
-      .insert({
-        task_id: taskId,
-        contributor_id: user.id,
-        asset_url: assetUrl,
-        deliverable_type: deliverableType,
-        revision_number: 1,
-      } as Record<string, unknown>)
-      .select()
-      .single();
-
-    if (submitError) throw submitError;
-
+  async function finalizeSubmission(submissionId: string, assetUrl: string, deliverableType: DeliverableType): Promise<void> {
     // Transition task to under_review
     await supabase
       .from("tasks")
@@ -379,7 +397,7 @@ export async function mountSubmit(container: HTMLElement, taskId: string): Promi
       actor_id: user.id,
       task_id: taskId,
       action: "submitted",
-      payload: { submissionId: (submission as Record<string, unknown>).id, assetUrl, deliverableType },
+      payload: { submissionId, assetUrl, deliverableType },
     } as Record<string, unknown>);
 
     // Notify host
