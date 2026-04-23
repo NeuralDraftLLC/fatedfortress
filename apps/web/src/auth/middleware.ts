@@ -43,14 +43,15 @@ export function getRedirectPath(isLoggedIn: boolean, currentPath: string): strin
   return null;
 }
 
-/** Returns true if there is an authenticated session (synchronous check) */
-export function isAuthenticated(): boolean {
-  return !!getSupabase().auth.getSession().session;
+/** Returns true if there is an authenticated session */
+export async function isAuthenticated(): Promise<boolean> {
+  const { data: { session } } = await getSupabase().auth.getSession();
+  return !!session;
 }
 
 /** Redirect to /login if not authenticated. Call at top of protected page mounts. */
-export function requireAuth(): void {
-  if (!isAuthenticated()) {
+export async function requireAuth(): Promise<void> {
+  if (!(await isAuthenticated())) {
     window.location.href = "/login";
   }
 }

@@ -7,7 +7,7 @@ import { requireAuth } from "../auth/middleware.js";
 import { renderShell } from "../ui/shell.js";
 
 export async function mountProject(container: HTMLElement, projectId: string): Promise<() => void> {
-  requireAuth();
+  await requireAuth();
 
   const supabase = getSupabase();
   const { data: { user } } = await supabase.auth.getUser();

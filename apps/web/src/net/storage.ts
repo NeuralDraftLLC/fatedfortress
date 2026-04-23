@@ -34,7 +34,7 @@ export async function createPresignedUploadUrl(
   deliverableType: DeliverableType
 ): Promise<PresignedUploadUrl> {
   const { data, error } = await getSupabase()
-    .functions()
+    .functions
     .invoke("supabase-storage-upload", {
       body: { taskId, contributorId, fileName, contentType, deliverableType },
     });
@@ -106,7 +106,7 @@ export async function createPortfolioUploadUrl(
   contentType: string
 ): Promise<PresignedUploadUrl> {
   const { data, error } = await getSupabase()
-    .functions()
+    .functions
     .invoke("supabase-storage-upload", {
       body: {
         isPortfolio: true,

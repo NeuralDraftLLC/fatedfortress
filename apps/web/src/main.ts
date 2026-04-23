@@ -47,20 +47,21 @@ function getContainer(): HTMLElement {
 
 // ── Route registry ────────────────────────────────────────────────────────────
 
-type PageCleanup = (() => void) | void | Promise<() => void>;
-type PageLoader = (container: HTMLElement, ...params: string[]) => Promise<() => void>;
+type PageLoader = (container: HTMLElement) => Promise<() => void>;
+type RouteInitializer = () => Promise<() => PageLoader>;
 
-const routes: Record<string, PageLoader> = {
-  "/login":           () => import("./pages/login.js").then(m => m.mountLogin),
-  "/create":          () => import("./pages/create.js").then(m => m.mountCreate),
-  "/tasks":           () => import("./pages/tasks.js").then(m => m.mountTasks),
-  "/reviews":         () => import("./pages/reviews.js").then(m => m.mountReviews),
-  "/project":         () => import("./pages/project.js").then(m => m.mountProject),
-  "/profile":         () => import("./pages/profile.js").then(m => m.mountProfile),
-  "/settings":        () => import("./pages/settings.js").then(m => m.mountSettings),
-  "/github/callback": () => import("./pages/settings.js").then(m => m.mountGitHubCallback),
-  // submit is handled specially with a taskId param
+const routes: Record<string, RouteInitializer> = {
+  "/login":           () => import("./pages/login.js").then(m => () => m.mountLogin),
+  "/create":          () => import("./pages/create.js").then(m => () => m.mountCreate),
+  "/tasks":           () => import("./pages/tasks.js").then(m => () => m.mountTasks),
+  "/reviews":         () => import("./pages/reviews.js").then(m => () => m.mountReviews),
+  "/profile":         () => import("./pages/profile.js").then(m => () => m.mountProfile),
+  "/settings":        () => import("./pages/settings.js").then(m => () => m.mountSettings),
+  "/github/callback": () => import("./pages/settings.js").then(m => () => m.mountGitHubCallback),
+  // submit and project are handled specially with params
 };
+
+type PageCleanup = (() => void) | void | Promise<() => void>;
 
 let currentCleanup: PageCleanup = null;
 let notifChannel: ReturnType<typeof subscribeToNotifications> | null = null;
@@ -83,10 +84,10 @@ async function route(path: string) {
 
   // Static routes — check before the submit param route
   const routePath = "/" + path.split("/")[1];
-  const loader = routes[routePath];
-  if (loader) {
-    const page = await loader();
-    currentCleanup = page(container);
+  const routeInit = routes[routePath];
+  if (routeInit) {
+    const getPage = await routeInit();
+    currentCleanup = await getPage()(container);
     return;
   }
 
@@ -95,7 +96,16 @@ async function route(path: string) {
   if (submitMatch) {
     const taskId = submitMatch[1];
     const mod = await import("./pages/submit.js");
-    currentCleanup = mod.mountSubmit(container, taskId);
+    currentCleanup = await mod.mountSubmit(container, taskId);
+    return;
+  }
+
+  // Handle /project/:projectId specially
+  const projectMatch = path.match(/^\/project\/(.+)/);
+  if (projectMatch) {
+    const projectId = projectMatch[1];
+    const mod = await import("./pages/project.js");
+    currentCleanup = await mod.mountProject(container, projectId);
     return;
   }
 

@@ -40,7 +40,7 @@ export function initiateGitHubOAuth(): void {
  */
 export async function exchangeGitHubCode(code: string): Promise<string> {
   const { data, error } = await getSupabase()
-    .functions()
+    .functions
     .invoke("github-oauth", {
       body: { code, redirect_uri: GITHUB_REDIRECT_URI },
     });
@@ -50,7 +50,7 @@ export async function exchangeGitHubCode(code: string): Promise<string> {
   }
 
   // Store token on profile
-  const { data: { user } } = getSupabase().auth.getUser();
+  const { data: { user } } = await getSupabase().auth.getUser();
   if (user) {
     // Fetch GitHub profile to get username
     const ghProfile = await fetch(

@@ -82,7 +82,7 @@ export async function mountLogin(container: HTMLElement): Promise<() => void> {
     btn.textContent = "Sending...";
     try {
       await signInWithEmailMagicLink(email);
-      container.querySelector(".login-form")?.setHTML("Check your email for a magic link!");
+      container.querySelector(".login-form")!.innerHTML = "<p>Check your email for a magic link!</p>";
     } catch (err: any) {
       btn.disabled = false;
       btn.textContent = "Send magic link";

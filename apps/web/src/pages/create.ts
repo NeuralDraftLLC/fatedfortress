@@ -17,7 +17,7 @@ import type { ScopedTask } from "@fatedfortress/protocol";
 import { renderShell } from "../ui/shell.js";
 
 export async function mountCreate(container: HTMLElement): Promise<() => void> {
-  requireAuth();
+  await requireAuth();
 
   const supabase = getSupabase();
   const { data: { user } } = await supabase.auth.getUser();
@@ -283,7 +283,7 @@ export async function mountCreate(container: HTMLElement): Promise<() => void> {
               payout_max: payout,
               updated_at: new Date().toISOString(),
             } as Record<string, unknown>)
-            .eq("id", taskId)
+            .eq("id", taskId) as unknown as Promise<unknown>
         );
       }
     });

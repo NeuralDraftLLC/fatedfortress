@@ -69,7 +69,7 @@ interface Cursor {
 // ---------------------------------------------------------------------------
 
 export async function mountReviews(container: HTMLElement): Promise<() => void> {
-  requireAuth();
+  await requireAuth();
 
   container.innerHTML = renderShell({
     title: "Intel Review Queue",

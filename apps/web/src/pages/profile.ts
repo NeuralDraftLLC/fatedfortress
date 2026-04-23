@@ -8,7 +8,7 @@ import { updateMyProfile } from "../auth/index.js";
 import { createPortfolioUploadUrl, uploadToR2 } from "../net/storage.js";
 
 export async function mountProfile(container: HTMLElement): Promise<() => void> {
-  requireAuth();
+  await requireAuth();
 
   const supabase = getSupabase();
   const { data: { user } } = await supabase.auth.getUser();

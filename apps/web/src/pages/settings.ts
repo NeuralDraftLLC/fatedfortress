@@ -9,7 +9,7 @@ import { signOut } from "../auth/index.js";
 import { exchangeGitHubCode, initiateGitHubOAuth } from "../net/github.js";
 
 export async function mountSettings(container: HTMLElement): Promise<() => void> {
-  requireAuth();
+  await requireAuth();
 
   const supabase = getSupabase();
   const { data: { user } } = await supabase.auth.getUser();

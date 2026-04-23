@@ -49,8 +49,8 @@ export async function generateScopedTasks(
     throw new Error(error?.message ?? "SCOPE failed");
   }
 
-  if (data.error) {
-    throw new Error(data.error);
+  if (error) {
+    throw new Error(error.message ?? "SCOPE failed");
   }
 
   // Normalize and cap at HARD_MAX_TASKS

@@ -17,7 +17,7 @@ import { renderShell } from "../ui/shell.js";
 const SOFT_LOCK_HOURS = 24;
 
 export async function mountTasks(container: HTMLElement): Promise<() => void> {
-  requireAuth();
+  await requireAuth();
 
   const supabase = getSupabase();
   const { data: { user } } = await supabase.auth.getUser();
@@ -144,7 +144,7 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
 
     const host = (t.project as Record<string, unknown>)?.host as Record<string, unknown> | undefined;
     const hostName = host?.display_name ?? "Unknown host";
-    const hostReliability = host?.review_reliability ?? 0;
+    const hostReliability = (host?.review_reliability as number | null) ?? 0;
     const ambiguityScore = t.ambiguity_score as number | null;
     const ambiguityLabel = ambiguityScore != null
       ? (ambiguityScore > 0.7 ? "High ambiguity" : ambiguityScore > 0.4 ? "Medium ambiguity" : "Low ambiguity")

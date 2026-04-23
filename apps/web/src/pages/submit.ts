@@ -26,7 +26,7 @@ const ALL_DELIVERABLE_TYPES: DeliverableType[] = [
 ];
 
 export async function mountSubmit(container: HTMLElement, taskId: string): Promise<() => void> {
-  requireAuth();
+  await requireAuth();
 
   const supabase = getSupabase();
   const { data: { user } } = await supabase.auth.getUser();
@@ -52,7 +52,7 @@ export async function mountSubmit(container: HTMLElement, taskId: string): Promi
       <header class="submit-header">
         <a href="/tasks" class="back-link">← Back to tasks</a>
         <h1 class="submit-title">Submit Deliverable</h1>
-        <p class="submit-project">${escHtml(t.project?.title ?? "")}</p>
+        <p class="submit-project">${escHtml((t.project as { title?: string })?.title ?? "")}</p>
       </header>
 
       <div class="submit-task-info">
@@ -141,11 +141,11 @@ export async function mountSubmit(container: HTMLElement, taskId: string): Promi
   // ── File selection ─────────────────────────────────────────────────────
   function selectFile(file: File): void {
     selectedFile = file;
-    const validation = validateFile(file, 500); // 500MB limit per Section 3.3
-    if (!validation.ok) {
-      showError(validation.error);
-      return;
-    }
+  const validation = validateFile(file, 500); // 500MB limit per Section 3.3
+  if (!validation.ok) {
+    showError((validation as { ok: false; error: string }).error);
+    return;
+  }
 
     $dropzoneInner.innerHTML = `
       <div class="file-selected">
@@ -277,10 +277,10 @@ export async function mountSubmit(container: HTMLElement, taskId: string): Promi
       const submissionId = (submission as Record<string, unknown>).id as string;
 
       // 4. VERIFY_SUBMISSION — runs before submission reaches host queue
-      const verifyResult = await runVerification(submissionId, uploadedAssetUrl, selectedType);
+      const verifyResult = await runVerification(submissionId, taskId, uploadedAssetUrl, selectedType);
 
       if (verifyResult.auto_reject) {
-        await handleAutoReject(verifyResult, submissionId);
+        await handleAutoReject(verifyResult, submissionId, taskId);
         return;
       }
 
@@ -295,6 +295,7 @@ export async function mountSubmit(container: HTMLElement, taskId: string): Promi
 
   async function runVerification(
     submissionId: string,
+    taskId: string,
     assetUrl: string,
     deliverableType: DeliverableType
   ): Promise<VerificationResult> {
@@ -304,7 +305,7 @@ export async function mountSubmit(container: HTMLElement, taskId: string): Promi
 
     try {
       const { data, error } = await supabase.functions.invoke<VerificationResult>("verify-submission", {
-        body: { submissionId, assetUrl, deliverableType },
+        body: { submissionId, taskId, assetUrl, deliverableType },
       });
 
       if (error || !data) {
@@ -327,27 +328,7 @@ export async function mountSubmit(container: HTMLElement, taskId: string): Promi
     }
   }
 
-  async function handleAutoReject(result: VerificationResult, submissionId: string): Promise<void> {
-    // Look up the project's host_id so the decision row has a valid FK reference
-    const { data: taskRow } = await supabase
-      .from("tasks")
-      .select("project:projects(host_id)")
-      .eq("id", taskId)
-      .single();
-
-    const hostId = (taskRow?.project as Record<string, unknown>)?.host_id as string | null;
-
-    // Insert decisions row (quality_issue) so the auto-reject is audited
-    const { error: decisionError } = await supabase.from("decisions").insert({
-      submission_id: submissionId,
-      host_id: hostId ?? "00000000-0000-0000-0000-000000000000",
-      decision_reason: result.suggested_decision_reason ?? "quality_issue",
-      review_notes: result.failure_summary ?? "Automated verification failed",
-      structured_feedback: null,
-    } as Record<string, unknown>);
-
-    if (decisionError) console.error("Auto-reject decision insert failed:", decisionError);
-
+  async function handleAutoReject(result: VerificationResult, submissionId: string, taskId: string): Promise<void> {
     // Transition task back to revision_requested
     await supabase
       .from("tasks")
@@ -402,7 +383,7 @@ export async function mountSubmit(container: HTMLElement, taskId: string): Promi
 
     // Notify host
     await supabase.from("notifications").insert({
-      user_id: t.project?.host_id,
+      user_id: (t.project as { host_id?: string })?.host_id,
       type: "submission_received",
       task_id: taskId,
     } as Record<string, unknown>);

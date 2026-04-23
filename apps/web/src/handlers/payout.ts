@@ -33,7 +33,7 @@ export async function createConnectAccountLink(userId: string): Promise<string> 
   const origin = window.location.origin;
 
   const { data, error } = await getSupabase()
-    .functions()
+    .functions
     .invoke("stripe-connect-link", {
       body: { stripeAccountId, returnUrl: `${origin}/settings`, refreshUrl: `${origin}/settings` },
     });
@@ -56,7 +56,7 @@ async function getOrCreateConnectAccount(userId: string): Promise<string> {
   }
 
   const { data, error } = await getSupabase()
-    .functions()
+    .functions
     .invoke("stripe-connect-onboard", { body: { userId } });
 
   if (error || !data?.stripeAccountId) {
@@ -258,7 +258,7 @@ export async function releasePayout(
     | undefined;
 
   const { data: paymentData, error: paymentError } = await supabase
-    .functions()
+    .functions
     .invoke("stripe-payment", {
       body: {
         action: "capture",
