@@ -130,7 +130,7 @@ Deno.serve(async (req: Request) => {
       case "capture": {
         // Capture a previously created PaymentIntent on task approval
         const {
-          paymentIntentId,
+          paymentIntentId: paymentIntentIdParam,
           amount,
           platformFee,
           connectedAccountId,
@@ -146,6 +146,20 @@ Deno.serve(async (req: Request) => {
           submissionId?: string;
           taskId?: string;
         };
+
+        let paymentIntentId = paymentIntentIdParam;
+        if (!paymentIntentId && submissionId) {
+          const supabase = createClient(
+            Deno.env.get("SUPABASE_URL")!,
+            Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+          );
+          const { data: sub } = await supabase
+            .from("submissions")
+            .select("payment_intent_id")
+            .eq("id", submissionId)
+            .maybeSingle();
+          paymentIntentId = (sub as { payment_intent_id?: string } | null)?.payment_intent_id;
+        }
 
         if (!paymentIntentId) {
           return Response.json({ success: false, error: "Missing paymentIntentId" }, { status: 400 });

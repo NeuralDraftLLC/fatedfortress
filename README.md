@@ -119,6 +119,16 @@ cd apps/relay && npm install && npx wrangler dev
 
 Vite injects relay/worker/Sentry **defaults** in `vite.config.ts` via `VITE_RELAY_*`, `VITE_WORKER_ORIGIN`, `VITE_FF_ORIGIN`, etc. Override when your deploy URLs differ from the defaults in the config.
 
+### E2E smoke (Playwright)
+
+Full-path test: forge → claim → R2 upload → bind PaymentIntent → host approve → Stripe `succeeded`. Requires a real dev Supabase project (email+password auth, deployed Edge Functions, OpenAI/R2/Stripe test keys). See **[`e2e/README.md`](e2e/README.md)** and copy **`e2e/.env.example`** to **`e2e/.env`**.
+
+```bash
+npm install                    # repo root
+npx playwright install chromium
+npm run test:e2e
+```
+
 ---
 
 ## Repository layout
@@ -141,6 +151,8 @@ apps/
 packages/
   protocol/              # Shared types and protocol
   sentry-utils/          # Sentry scrubber
+
+e2e/                     # Playwright: full-stack happy path (see e2e/README.md)
 
 supabase/
   functions/

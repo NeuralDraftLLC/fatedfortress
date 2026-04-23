@@ -43,6 +43,12 @@ export async function signInWithEmailMagicLink(email: string): Promise<void> {
   if (error) throw error;
 }
 
+/** Email + password (requires Email provider with password enabled in Supabase; used for E2E). */
+export async function signInWithPassword(email: string, password: string): Promise<void> {
+  const { error } = await getSupabase().auth.signInWithPassword({ email, password });
+  if (error) throw error;
+}
+
 /** Sign in with Google OAuth */
 export async function signInWithGoogle(): Promise<void> {
   const { error } = await getSupabase().auth.signInWithOAuth({

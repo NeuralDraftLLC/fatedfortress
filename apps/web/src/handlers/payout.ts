@@ -253,6 +253,10 @@ export async function releasePayout(
 
   const platformAmount = platformFee(approvedPayout);
 
+  const paymentIntentId = (submission as Record<string, unknown>).payment_intent_id as
+    | string
+    | undefined;
+
   const { data: paymentData, error: paymentError } = await supabase
     .functions()
     .invoke("stripe-payment", {
@@ -260,6 +264,7 @@ export async function releasePayout(
         action: "capture",
         amount: approvedPayout,
         platformFee: platformAmount,
+        paymentIntentId,
         contributorStripeAccountId: (submission as Record<string, unknown>).contributor_stripe_account_id as string | undefined,
         connectedAccountId: hostProfile?.stripe_account_id,
         submissionId,
