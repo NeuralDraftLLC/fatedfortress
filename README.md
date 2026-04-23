@@ -1,203 +1,209 @@
 # FatedFortress
 
-**A task marketplace for AI generation workflows — where contributors earn for precise delivery and hosts pay only when approved.**
+**A task marketplace for AI generation workflows — contributors deliver against a brief; hosts pay only when they approve.**
 
-Built with Supabase, Stripe Connect, and a browser-isolated keystore that ensures AI provider credentials never touch a FatedFortress server.
+Supabase and Stripe Connect handle data and money. Optional paths use a **browser-isolated keystore** (separate origin + Web Worker) so AI provider credentials never pass through an app server you control.
 
 ---
 
 ## What is this?
 
-FatedFortress connects **hosts** who have AI generation tasks with **contributors** who deliver against a brief. Think of it as a professional services marketplace, but scoped to structured AI workflows: scoping, submission, review, and payment all happen on-platform.
+FatedFortress connects **hosts** who post AI-scoped work with **contributors** who complete tasks. Scoping, submission, review, and payment stay on-platform and map to a clear state machine: **Task → Submission → Decision** (the payout source of truth).
 
-**The core loop:**
+**Core loop:**
 
 ```
 Host creates project
     └→ AI scopes tasks + payouts (SCOPE)
     └→ Contributors browse and claim
     └→ Contributor submits deliverable
-    └→ Host reviews: Approve / Reject / Request Revision
+    └→ Host reviews: Approve / Reject / Request revision
     └→ Payment captured via Stripe Connect — only on approval
 ```
 
-**No payment held on claim. No payment captured on submit. Payment moves only when the host says "done."**
+**No capture on claim. No capture on submit. Funds move when the host approves** (or after the auto-release window if configured).
 
 ---
 
 ## Architecture
 
-The system is split into three independent apps, three lockfiles, zero monorepo overhead:
+Three deployable apps, **separate `package.json` / lockfiles** (no monorepo tooling required):
 
 | App | Role | Tech |
 |-----|------|------|
-| `apps/web` | User-facing SPA | Vanilla TypeScript, Vite |
-| `apps/worker` | Browser-isolated AI keystore | Vite IIFE, Web Workers |
-| `apps/relay` | Y.js signaling + WebRTC | Cloudflare Workers + Durable Objects |
+| `apps/web` | User-facing SPA | TypeScript, Vite |
+| `apps/worker` | Browser AI keystore + provider adapters | Vite IIFE, Web Workers |
+| `apps/relay` | Y.js signaling + WebRTC (TURN metadata) | Cloudflare Workers, Durable Objects |
 
-**The keystore is the key architectural bet.** Your AI provider credentials run inside a sandboxed Web Worker at an isolated origin. The main thread never has access to them — not to the code, not to the keys. This is enforced by the browser's same-origin policy, not by a promise.
+**Keystore (optional for pure browse/claim/review flows):** API keys run in a sandboxed worker at an **isolated origin**. The main app’s thread does not read those secrets; the browser’s same-origin policy is the enforcement boundary.
 
 ---
 
-## Tech Stack
+## Tech stack
 
 | Layer | Technology |
-|-------|-----------|
-| Database + Auth | Supabase (PostgreSQL + RLS + Edge Functions) |
-| Payments | Stripe Connect (Express accounts, manual capture, 10% platform fee) |
-| Real-time sync | Y.js CRDTs over WebRTC (Cloudflare Durable Objects relay) |
-| AI credentials | Browser-isolated Web Worker, AES-256-GCM encrypted |
-| Hosting | Cloudflare Pages (web) + Cloudflare Workers (relay) |
-| Error tracking | Sentry (web + worker, PII-scrubbed) |
-| Package manager | npm (per-app lockfiles) |
+|-------|------------|
+| Database + auth | Supabase (Postgres, RLS, Edge Functions) |
+| Payments | Stripe Connect (Express, **manual** capture, 10% platform fee) |
+| Real-time / CRDT | Y.js over WebRTC; relay on Cloudflare |
+| AI scoping | OpenAI (edge: `scope-tasks`) |
+| Object storage | Cloudflare R2 (presigned uploads via `r2-upload-url`) |
+| Hosting | e.g. Cloudflare Pages (web) + Workers (relay) |
+| Errors | Sentry (web + worker; PII scrubbed via `packages/sentry-utils`) |
+| Package manager | npm (per app) |
 
 ---
 
-## Pages & Routes
+## Pages and routes
 
 | Route | Who | What |
-|-------|-----|-------|
-| `/login` | Everyone | Supabase Auth (magic link + Google OAuth) |
-| `/create` | Host | Brief → SCOPE AI → review tasks → publish |
-| `/tasks` | Contributor | Browse open tasks, claim with 24h soft-lock |
-| `/submit/:taskId` | Contributor | Upload deliverable, submit for review |
-| `/reviews` | Host | Review queue with real-time updates, decision modal |
-| `/project/:id` | Host | Project detail, wallet balance, audit log |
-| `/profile` | Everyone | Profile, reliability score, portfolio |
-| `/settings` | Host | Stripe Connect onboarding, sign out |
+|-------|-----|------|
+| `/login` | Public | Magic link + Google OAuth (Supabase) |
+| `/create` | Host | Brief → SCOPE → edit tasks → publish |
+| `/tasks` | Contributor | Open tasks, claim, 24h soft-lock |
+| `/submit/:taskId` | Contributor | Upload (R2), verify, submit for review |
+| `/reviews` | Host | Review queue, decisions |
+| `/project/:id` | Host | Project detail, wallet, activity |
+| `/profile` | Signed-in | Profile, reliability, portfolio |
+| `/settings` | Signed-in | GitHub connect, **Stripe Connect (hosts)**, sign out |
+| `/github/callback` | Signed-in | GitHub OAuth return URL |
+
+The SPA router in `apps/web/src/main.ts` does not register `/`; use `/login` or a feature route as the entry you bookmark for local dev.
 
 ---
 
-## Data Model
+## Data model
 
-Three sacred objects, one immutable decision trail:
+Three core aggregates and an immutable decision trail:
 
 ```
 Project
-  └→ Task              (atomic unit of work, payout range in cents)
-        └→ Submission  (contributor's deliverable, revision-tracked)
-              └→ Decision (host's verdict — THE source of truth for payout)
+  └→ Task              (payout range in cents, status, claim, etc.)
+        └→ Submission  (deliverable, revision)
+              └→ Decision  (host verdict — authoritative for payout)
 ```
 
-**Escrow is tracked in `project_wallet`:**
-- `deposited` — total the host has added
-- `locked` — held against currently-claimed tasks
-- `released` — paid out to contributors
-
-Available = deposited − locked − released. **The platform never holds funds longer than the review window.**
+**`project_wallet`** (per project): `deposited`, `locked`, `released`.  
+**Available (conceptually)** ≈ deposited − locked − released. The host pre-funds; capture happens on approval, not on claim.
 
 ---
 
-## Developer Setup
+## Developer setup
 
 ```bash
-# 1. Clone and install
-git clone https://github.com/NeuralDraftLLC/fatedfortress
+git clone https://github.com/NeuralDraftLLC/fatedfortress.git
 cd fatedfortress
 
-# 2. Web app (minimum for local dev)
-cd apps/web && npm install
-
-# 3. Add apps/web/.env.local:
-#    VITE_SUPABASE_URL=https://your-project.supabase.co
-#    VITE_SUPABASE_ANON_KEY=your_anon_key
-#    VITE_RELAY_ORIGIN=wss://your-relay.workers.dev
-#    VITE_WORKER_ORIGIN=https://your-worker.pages.dev
+# Web app (minimum to run the UI against your Supabase project)
+cd apps/web
+npm install
+cp .env.example .env.local
+# Edit .env.local: VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY (required)
+# Optional: VITE_GITHUB_CLIENT_ID, VITE_R2_PUBLIC_URL — see /env-vars.md
 
 npm run dev
 # → http://localhost:5173
+```
 
-# 4. Optional: keystore worker (for AI generation flows)
+**Full env reference:** [`env-vars.md`](env-vars.md) (Supabase secrets for Edge Functions, R2, Stripe, GitHub, cron).
+
+**Optional local services**
+
+```bash
+# Keystore + AI adapters (isolated origin in production; local port for dev)
 cd apps/worker && npm install && npx vite --port 5174
 
-# 5. Optional: relay (for Y.js / real-time collab)
+# Y.js relay
 cd apps/relay && npm install && npx wrangler dev
 ```
 
-**First route:** [`/login`](http://localhost:5173/login) — the root `/` is not registered in the SPA router.
+Vite injects relay/worker/Sentry **defaults** in `vite.config.ts` via `VITE_RELAY_*`, `VITE_WORKER_ORIGIN`, `VITE_FF_ORIGIN`, etc. Override when your deploy URLs differ from the defaults in the config.
 
 ---
 
-## Repo Structure
+## Repository layout
 
 ```
 apps/
-  web/               # Main SPA — pages, handlers, state
-    public/           # Static assets (fonts, icons)
+  web/                 # Main SPA
+    public/            # Static assets
     src/
-      auth/          # Supabase auth + route guards
-      handlers/      # Business logic (scope, payout)
-      net/           # Networking (signaling, storage, github)
-      pages/         # Route mounts (login, create, tasks, reviews, ...)
-      state/         # Client-side state
-      styles/        # CSS (design system + fatedfortress)
-      ui/            # Shell, shared UI primitives
-      workers/       # Verification worker
-  worker/            # Browser keystore + AI provider adapters
-  relay/             # Cloudflare Worker + Durable Objects for Y.js signaling
+      auth/            # Supabase client, route guards
+      handlers/        # scope, payout, etc.
+      net/             # storage (R2), GitHub, signaling, notifications
+      pages/           # Route entrypoints
+      state/           # Yjs / session state
+      styles/          # Design system + app CSS
+      ui/              # Shell, shared UI
+  worker/              # Keystore bundle (iframe target)
+  relay/                 # WebRTC / signaling worker
 
 packages/
-  protocol/           # Shared TypeScript types, crypto helpers
-  sentry-utils/       # PII scrubber for Sentry
+  protocol/              # Shared types and protocol
+  sentry-utils/          # Sentry scrubber
 
 supabase/
-  functions/          # Edge Functions (Stripe, cron)
-    auto-release/     # 24h warning / 48h auto-approve
-    expire-claims/     # Reclaim soft-locked tasks
-    stripe-payment/   # PaymentIntent create/capture/cancel
-    stripe-connect-*/ # Stripe Connect onboarding
-  migrations/         # PostgreSQL migrations
-  schema.sql          # Full schema with RLS policies
+  functions/
+    _shared/             # Shared Edge helpers (e.g. auth)
+    auto-release/        # Cron: warnings + 48h auto-approve path
+    expire-claims/       # Cron: release expired task locks
+    scope-tasks/         # OpenAI: scope brief → tasks JSON
+    r2-upload-url/       # Presigned PUT to R2
+    verify-submission/   # Deliverable checks (incl. GitHub PR when applicable)
+    github-oauth/        # Server-side GitHub token exchange
+    stripe-payment/      # PaymentIntents: create, capture, cancel, refund, transfer
+    stripe-connect-*/    # Connect account + account links
+  migrations/
+  schema.sql             # Reference schema + RLS (see migrations for history)
 ```
 
----
-
-## Key Design Decisions
-
-### No funds held on claim
-When a contributor claims a task, nothing moves. The host pre-funds their project wallet. Money is only captured when the host explicitly approves.
-
-### Platform fee as Stripe `application_fee_amount`
-On approval, the 10% platform fee is set as `application_fee_amount` during PaymentIntent capture. Stripe routes the net to the host's Connect account and the fee to the platform automatically. No separate transfer API call.
-
-### Decision is the audit trail
-Every host action (approve, reject, request-revision) inserts a `decisions` row. `tasks.approved_payout` is a denormalized cache. `decisions.approved_payout` is the Stripe source of truth. The full history is queryable independently of Stripe events.
-
-### 48h auto-release
-If a host doesn't review within 48 hours, the system auto-approves with `decision_reason: 'approved_fast_track'`, captures the payment, and notifies both parties. A 24h warning fires first.
+**Edge Functions and auth:** User-facing invokes send the **Supabase session JWT** in `Authorization`. Shared code resolves that JWT (or a **service role** bearer for server-to-server calls like cron-driven flows). See `supabase/functions/_shared/auth.ts` and each function’s handler.
 
 ---
 
-## Status
+## Design notes
 
-**MVP phase — core payout loop is built and wired.**
+### No capture on claim
 
-| Feature | Status |
-|---------|--------|
-| Supabase schema + RLS | ✅ |
-| Stripe Connect onboarding | ✅ |
-| Claim + 24h soft-lock | ✅ |
-| Submit + revision tracking | ✅ |
-| Review queue + decisions | ✅ |
-| Payment capture + transfer | ✅ |
-| Auto-release at 48h | ✅ |
-| Cron jobs (expire-claims, auto-release) | ✅ |
-| AI task scoping (SCOPE) | 🔴 Edge function needed |
-| File upload to R2/CDN | 🔴 Edge function needed |
-| Automated submission verification | 🟡 Fails open (submissions work) |
-| Y.js collaborative review UI | 🟡 UI scaffolded, stub |
-| GitHub OAuth integration | 🟡 Stub |
-| here.now permanent publishing | 🟡 Stub |
+Claiming reserves workflow, not a card charge. The host’s project wallet must be funded; **capture** runs on host approval (or the automated release path).
+
+### Platform fee (10%)
+
+Handled as Stripe **`application_fee_amount`** on capture where the Connect model applies, so the fee and net payout are explicit in Stripe.
+
+### `decisions` as audit trail
+
+Approve / reject / request revision all write a **`decisions`** row. Task-level payout caches can mirror that; the decision record plus Stripe IDs are the cross-checks.
+
+### Auto-release
+
+If a submission sits in review, a **24h** warning can fire, then a **48h** path may auto-approve (`approved_fast_track`), capture, and notify. See `auto-release` and cron/`CRON_SECRET` in `env-vars.md`.
+
+---
+
+## Status (high level)
+
+| Area | Notes |
+|------|--------|
+| Supabase schema + RLS | In place; review `migrations/` for your project |
+| Stripe Connect + PaymentIntents | Wired via Edge Functions + web handlers |
+| Claim, submit, review, pay | Core loop implemented in `apps/web` + functions |
+| SCOPE (`scope-tasks`) | **Edge function**; requires `OPENAI_API_KEY` secret |
+| R2 uploads (`r2-upload-url`) | **Edge function**; R2 + `VITE_R2_PUBLIC_URL` for clients |
+| Submission verification | `verify-submission` (configurable; some paths “fail open” by design) |
+| Y.js live review UI | Partial / scaffold; relay exists for real-time |
+| GitHub / here.now | Varies by route; see code and `env-vars.md` |
+
+For a visual of services and migrations, see [`diagrams/mermaid.md`](diagrams/mermaid.md) (replace placeholders with your own project refs if you copy diagrams).
 
 ---
 
 ## Contributing
 
-1. Read `ARCHITECTURE.md` for the component and design token reference.
-2. Read `packages/protocol/src/index.ts` — all shared types live there.
-3. `apps/web/src/main.ts` documents the route registry; `ARCHITECTURE.md` section 1 has the full repo map.
-4. New types for MVP features go in `packages/protocol/src/index.ts` — do not mix with legacy room types.
-5. CSP entries are required for any new network endpoints — see `apps/web/index.html`.
+1. **Architecture and UI** — `ARCHITECTURE.md` and `apps/web/src/main.ts` (route table).
+2. **Shared types** — `packages/protocol/src/index.ts`.
+3. **CSP / new endpoints** — `apps/web/index.html` connect-src and related directives when adding APIs or origins.
+4. **Supabase** — keep RLS in mind for any new tables; document new secrets in `env-vars.md`.
 
 ---
 
