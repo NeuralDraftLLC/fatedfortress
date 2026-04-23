@@ -34,8 +34,8 @@ interface ImportMetaEnv {
   readonly VITE_SUPABASE_ANON_KEY: string;
   /** GitHub OAuth App client ID */
   readonly VITE_GITHUB_CLIENT_ID?: string;
-  /** R2 public bucket base URL (same as server R2_PUBLIC_BASE_URL) */
-  readonly VITE_R2_PUBLIC_URL?: string;
+  /** Supabase Storage public URL for asset downloads (bucket must be public) */
+  readonly VITE_SUPABASE_STORAGE_URL?: string;
   /** When "true", show email+password sign-in for Playwright E2E (Supabase must allow email/password). */
   readonly VITE_E2E_PASSWORD_LOGIN?: string;
 }

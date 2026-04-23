@@ -15,7 +15,7 @@ const hostEmail = process.env.E2E_HOST_EMAIL;
 const hostPassword = process.env.E2E_HOST_PASSWORD;
 const contEmail = process.env.E2E_CONTRIBUTOR_EMAIL;
 const contPassword = process.env.E2E_CONTRIBUTOR_PASSWORD;
-const r2Public = process.env.VITE_R2_PUBLIC_URL;
+const supabaseStorageUrl = process.env.VITE_SUPABASE_STORAGE_URL;
 
 const ready =
   hostEmail &&
@@ -105,12 +105,12 @@ test("forge → claim → R2 → bind PI → approve → Stripe succeeded", asyn
   })();
   expect(submission?.asset_url).toBeTruthy();
   const assetUrl = submission!.asset_url;
-  if (r2Public) {
-    const host = new URL(r2Public).hostname;
-    expect(assetUrl, "asset on R2 public base").toContain(host);
+  if (supabaseStorageUrl) {
+    const host = new URL(supabaseStorageUrl).hostname;
+    expect(assetUrl, "asset on Supabase Storage public base").toContain(host);
   }
   const head = await fetch(assetUrl, { method: "HEAD" });
-  expect(head.ok, `R2 object HEAD ${head.status}`).toBe(true);
+  expect(head.ok, `Supabase Storage object HEAD ${head.status}`).toBe(true);
 
   const trow = await getTaskById(supabase, taskId);
   expect(trow).toBeTruthy();

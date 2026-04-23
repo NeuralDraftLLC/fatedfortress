@@ -2,7 +2,7 @@
 
 **A task marketplace for AI generation workflows — contributors deliver against a brief; hosts pay only when they approve.**
 
-Supabase and Stripe Connect handle data and money. Optional paths use a **browser-isolated keystore** (separate origin + Web Worker) so AI provider credentials never pass through an app server you control.
+Supabase and Stripe Connect handle data and money. The repo also contains an optional **browser-isolated keystore + relay** stack (separate origin + Web Worker + Cloudflare relay) for CRDT/AI-room workflows; the current marketplace flow (`/create → /tasks → /submit → /reviews`) does not require it.
 
 ---
 
@@ -32,10 +32,10 @@ Three deployable apps, **separate `package.json` / lockfiles** (no monorepo tool
 | App | Role | Tech |
 |-----|------|------|
 | `apps/web` | User-facing SPA | TypeScript, Vite |
-| `apps/worker` | Browser AI keystore + provider adapters | Vite IIFE, Web Workers |
-| `apps/relay` | Y.js signaling + WebRTC (TURN metadata) | Cloudflare Workers, Durable Objects |
+| `apps/worker` | (Optional) Browser AI keystore + provider adapters | Vite IIFE, Web Workers |
+| `apps/relay` | (Optional) Y.js signaling + WebRTC (TURN metadata) | Cloudflare Workers, Durable Objects |
 
-**Keystore (optional for pure browse/claim/review flows):** API keys run in a sandboxed worker at an **isolated origin**. The main app’s thread does not read those secrets; the browser’s same-origin policy is the enforcement boundary.
+**Keystore (optional):** API keys run in a sandboxed worker at an **isolated origin**. The main app’s thread does not read those secrets; the browser’s same-origin policy is the enforcement boundary. (Some keystore wiring is currently intentionally inert in `apps/web`.)
 
 ---
 
@@ -47,7 +47,7 @@ Three deployable apps, **separate `package.json` / lockfiles** (no monorepo tool
 | Payments | Stripe Connect (Express, **manual** capture, 10% platform fee) |
 | Real-time / CRDT | Y.js over WebRTC; relay on Cloudflare |
 | AI scoping | OpenAI (edge: `scope-tasks`) |
-| Object storage | Cloudflare R2 (presigned uploads via `r2-upload-url`) |
+| Object storage | Supabase Storage (presigned uploads via `supabase-storage-upload`) |
 | Hosting | e.g. Cloudflare Pages (web) + Workers (relay) |
 | Errors | Sentry (web + worker; PII scrubbed via `packages/sentry-utils`) |
 | Package manager | npm (per app) |
@@ -61,7 +61,7 @@ Three deployable apps, **separate `package.json` / lockfiles** (no monorepo tool
 | `/login` | Public | Magic link + Google OAuth (Supabase) |
 | `/create` | Host | Brief → SCOPE → edit tasks → publish |
 | `/tasks` | Contributor | Open tasks, claim, 24h soft-lock |
-| `/submit/:taskId` | Contributor | Upload (R2), verify, submit for review |
+| `/submit/:taskId` | Contributor | Upload (Supabase Storage), verify, submit for review |
 | `/reviews` | Host | Review queue, decisions |
 | `/project/:id` | Host | Project detail, wallet, activity |
 | `/profile` | Signed-in | Profile, reliability, portfolio |
@@ -99,7 +99,7 @@ cd apps/web
 npm install
 cp .env.example .env.local
 # Edit .env.local: VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY (required)
-# Optional: VITE_GITHUB_CLIENT_ID, VITE_R2_PUBLIC_URL — see /env-vars.md
+# Optional: VITE_GITHUB_CLIENT_ID, VITE_SUPABASE_STORAGE_URL — see /env-vars.md
 
 npm run dev
 # → http://localhost:5173
@@ -121,7 +121,7 @@ Vite injects relay/worker/Sentry **defaults** in `vite.config.ts` via `VITE_RELA
 
 ### E2E smoke (Playwright)
 
-Full-path test: forge → claim → R2 upload → bind PaymentIntent → host approve → Stripe `succeeded`. Requires a real dev Supabase project (email+password auth, deployed Edge Functions, OpenAI/R2/Stripe test keys). See **[`e2e/README.md`](e2e/README.md)** and copy **`e2e/.env.example`** to **`e2e/.env`**.
+Full-path test: forge → claim → Supabase Storage upload → bind PaymentIntent → host approve → Stripe `succeeded`. Requires a real dev Supabase project (email+password auth, deployed Edge Functions, OpenAI/Supabase Storage/Stripe test keys). See **[`e2e/README.md`](e2e/README.md)** and copy **`e2e/.env.example`** to **`e2e/.env`**.
 
 ```bash
 npm install                    # repo root
@@ -140,7 +140,7 @@ apps/
     src/
       auth/            # Supabase client, route guards
       handlers/        # scope, payout, etc.
-      net/             # storage (R2), GitHub, signaling, notifications
+      net/             # storage (Supabase), GitHub, signaling, notifications
       pages/           # Route entrypoints
       state/           # Yjs / session state
       styles/          # Design system + app CSS
@@ -160,7 +160,7 @@ supabase/
     auto-release/        # Cron: warnings + 48h auto-approve path
     expire-claims/       # Cron: release expired task locks
     scope-tasks/         # OpenAI: scope brief → tasks JSON
-    r2-upload-url/       # Presigned PUT to R2
+    supabase-storage-upload/ # Presigned PUT to Supabase Storage
     verify-submission/   # Deliverable checks (incl. GitHub PR when applicable)
     github-oauth/        # Server-side GitHub token exchange
     stripe-payment/      # PaymentIntents: create, capture, cancel, refund, transfer
@@ -201,18 +201,16 @@ If a submission sits in review, a **24h** warning can fire, then a **48h** path 
 | Stripe Connect + PaymentIntents | Wired via Edge Functions + web handlers |
 | Claim, submit, review, pay | Core loop implemented in `apps/web` + functions |
 | SCOPE (`scope-tasks`) | **Edge function**; requires `OPENAI_API_KEY` secret |
-| R2 uploads (`r2-upload-url`) | **Edge function**; R2 + `VITE_R2_PUBLIC_URL` for clients |
+| Supabase Storage uploads (`supabase-storage-upload`) | **Edge function**; Supabase Storage + `VITE_SUPABASE_STORAGE_URL` for clients |
 | Submission verification | `verify-submission` (configurable; some paths “fail open” by design) |
 | Y.js live review UI | Partial / scaffold; relay exists for real-time |
 | GitHub / here.now | Varies by route; see code and `env-vars.md` |
-
-For a visual of services and migrations, see [`diagrams/mermaid.md`](diagrams/mermaid.md) (replace placeholders with your own project refs if you copy diagrams).
 
 ---
 
 ## Contributing
 
-1. **Architecture and UI** — `ARCHITECTURE.md` and `apps/web/src/main.ts` (route table).
+1. **Architecture and UI** — `apps/web/src/main.ts` (route table) and the route entrypoints in `apps/web/src/pages/`.
 2. **Shared types** — `packages/protocol/src/index.ts`.
 3. **CSP / new endpoints** — `apps/web/index.html` connect-src and related directives when adding APIs or origins.
 4. **Supabase** — keep RLS in mind for any new tables; document new secrets in `env-vars.md`.

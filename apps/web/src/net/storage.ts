@@ -1,7 +1,7 @@
 /**
- * apps/web/src/net/storage.ts — R2 presigned URL generation for uploads.
+ * apps/web/src/net/storage.ts — Supabase Storage presigned URL generation for uploads.
  *
- * Uses Cloudflare Workers R2 with presigned URLs so large files never
+ * Uses Supabase Storage with signed upload URLs so large files never
  * pass through the app server. Extends archive.ts which handles OPFS.
  */
 
@@ -23,7 +23,7 @@ export interface PresignedUploadUrl {
 }
 
 /**
- * Request a presigned PUT URL for uploading a deliverable to R2.
+ * Request a presigned PUT URL for uploading a deliverable to Supabase Storage.
  * Returns { uploadUrl, assetUrl, key, expiresAt }.
  */
 export async function createPresignedUploadUrl(
@@ -35,7 +35,7 @@ export async function createPresignedUploadUrl(
 ): Promise<PresignedUploadUrl> {
   const { data, error } = await getSupabase()
     .functions()
-    .invoke("r2-upload-url", {
+    .invoke("supabase-storage-upload", {
       body: { taskId, contributorId, fileName, contentType, deliverableType },
     });
 
@@ -47,7 +47,7 @@ export async function createPresignedUploadUrl(
 }
 
 /**
- * Upload a file to R2 using a presigned URL.
+ * Upload a file to Supabase Storage using a presigned URL.
  * Returns the permanent asset URL on success.
  */
 export async function uploadToR2(
@@ -68,11 +68,11 @@ export async function uploadToR2(
       if (xhr.status >= 200 && xhr.status < 300) {
         resolve(presigned.assetUrl);
       } else {
-        reject(new Error(`R2 upload failed: ${xhr.status} ${xhr.statusText}`));
+        reject(new Error(`Supabase Storage upload failed: ${xhr.status} ${xhr.statusText}`));
       }
     });
 
-    xhr.addEventListener("error", () => reject(new Error("R2 upload network error")));
+    xhr.addEventListener("error", () => reject(new Error("Supabase Storage upload network error")));
 
     xhr.open("PUT", presigned.uploadUrl);
     xhr.setRequestHeader("Content-Type", file.type);
@@ -107,7 +107,7 @@ export async function createPortfolioUploadUrl(
 ): Promise<PresignedUploadUrl> {
   const { data, error } = await getSupabase()
     .functions()
-    .invoke("r2-upload-url", {
+    .invoke("supabase-storage-upload", {
       body: {
         isPortfolio: true,
         userId,

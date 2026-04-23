@@ -6,8 +6,8 @@
 
 1. **Host** — `/create` → FORGE (OpenAI `scope-tasks` Edge Function) → publish.
 2. **Service role** — set tasks to `task_access = public` (default from SCOPE is `invite`, so contributors would not see the task).
-3. **Contributor** — claim on `/tasks`, upload a file on `/submit/:id` (R2 presigned URL).
-4. **Assertions** — `HEAD` the public `asset_url` (object exists in R2).
+3. **Contributor** — claim on `/tasks`, upload a file on `/submit/:id` (Supabase Storage presigned URL).
+4. **Assertions** — `HEAD` the public `asset_url` (object exists in Supabase Storage).
 5. **Service role** — call `stripe-payment` `action: create` to attach a **manual-capture** PaymentIntent to the submission (the browser submit path does not do this today).
 6. **Host** — `/reviews` → **Approve & Pay** (captures via `stripe-payment`).
 7. **Stripe API** — `paymentIntents.retrieve` — expect `status === succeeded` (test mode).
@@ -15,8 +15,8 @@
 ## Prereqs
 
 - **Supabase:** Email auth with **password** enabled; `E2E_HOST_*` and `E2E_CONTRIBUTOR_*` in `e2e/.env`.
-- **Edge Functions deployed** (or local) for `scope-tasks`, `r2-upload-url`, `verify-submission` (optional; app may fail open), `stripe-payment`.
-- **Secrets** in Supabase: `OPENAI_API_KEY`, R2 keys, `STRIPE_SECRET_KEY`, etc. (see root `env-vars.md`).
+- **Edge Functions deployed** (or local) for `scope-tasks`, `supabase-storage-upload`, `verify-submission` (optional; app may fail open), `stripe-payment`.
+- **Secrets** in Supabase: `OPENAI_API_KEY`, `STRIPE_SECRET_KEY`, etc. (see root `env-vars.md`).
 - **Browser:** `npx playwright install chromium`
 - **Host Connect account:** set `E2E_HOST_STRIPE_CONNECT_ACCOUNT=acct_...` (test mode) for the full Connect + capture path. Optional for a minimal PI without `transfer_data`.
 

@@ -29,6 +29,8 @@ export class DemoRateLimitError extends Error {
   }
 }
 
+// Pivot note: keystore iframe worker is no longer used in the web app.
+// Keep WorkerBridge functional but inert (no iframe mounting / messaging).
 const WORKER_ORIGIN = typeof __WORKER_ORIGIN__ !== "undefined"
   ? __WORKER_ORIGIN__
   : "https://keys.fatedfortress.com";
@@ -107,8 +109,7 @@ export class WorkerBridge {
   }
 
   private constructor() {
-    this.mountWorker();
-    window.addEventListener("message", this.handleMessage.bind(this));
+    // No-op: keystore not mounted.
   }
 
   public static getInstance(): WorkerBridge {
@@ -119,23 +120,7 @@ export class WorkerBridge {
   }
 
   private mountWorker() {
-    if (typeof document === "undefined") return;
-
-    const setupIframe = () => {
-      this.workerIframe = document.createElement("iframe");
-      this.workerIframe.src = `${WORKER_ORIGIN}/worker.html`;
-      this.workerIframe.title = "Fortress keystore worker";
-      this.workerIframe.className = "ff-keystore-iframe";
-      const slot =
-        document.getElementById("ff-keystore-slot") ?? document.body;
-      slot.appendChild(this.workerIframe);
-    };
-
-    if (document.body) {
-      setupIframe();
-    } else {
-      window.addEventListener("DOMContentLoaded", setupIframe);
-    }
+    // No-op.
   }
 
   private handleMessage(event: MessageEvent) {
