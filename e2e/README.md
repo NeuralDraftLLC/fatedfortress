@@ -22,9 +22,11 @@
 
 ## Local run
 
+Env is loaded in this order: **`apps/web/.env.local`** (shared with Vite), then **`e2e/.env`** (overrides). Put Supabase + `VITE_*` in either file; put **`SUPABASE_SERVICE_ROLE_KEY`**, **`E2E_*`**, and **`STRIPE_SECRET_KEY`** in `e2e/.env` so they never ship to the client bundle.
+
 ```bash
 cp e2e/.env.example e2e/.env
-# fill e2e/.env
+# fill e2e/.env (and ensure apps/web/.env.local has VITE_SUPABASE_URL + VITE_SUPABASE_ANON_KEY if not in e2e/.env)
 
 # from repo root
 npm install

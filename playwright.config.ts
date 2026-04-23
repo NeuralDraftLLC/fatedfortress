@@ -2,6 +2,8 @@ import { defineConfig, devices } from "@playwright/test";
 import * as path from "node:path";
 import { config as loadDotenv } from "dotenv";
 
+// Web app secrets first; e2e/.env overrides (E2E_*, service role, Stripe).
+loadDotenv({ path: path.resolve(process.cwd(), "apps", "web", ".env.local") });
 loadDotenv({ path: path.resolve(process.cwd(), "e2e", ".env") });
 loadDotenv();
 

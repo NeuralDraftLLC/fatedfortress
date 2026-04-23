@@ -4,6 +4,7 @@ import { config as loadDotenv } from "dotenv";
 
 import { setProfileRole } from "./helpers/supabaseService";
 
+loadDotenv({ path: path.resolve(process.cwd(), "apps", "web", ".env.local") });
 loadDotenv({ path: path.resolve(process.cwd(), "e2e", ".env") });
 loadDotenv();
 
