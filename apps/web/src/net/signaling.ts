@@ -10,7 +10,6 @@
  * New code must not create Y.js sessions outside review_sessions.
  *
  * See also: Section 6 of the Post-Refactor Implementation Brief.
- */
  *
  * Spectate (Task 2): joinRoom(..., { spectate }) sends spectator=1 — relay skips WebRTC signaling
  * routing for those peers (they still get Y.js sync). Client ignores offer/answer/ICE when spectating.

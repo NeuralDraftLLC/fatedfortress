@@ -45,7 +45,7 @@ export function getRedirectPath(isLoggedIn: boolean, currentPath: string): strin
 
 /** Returns true if there is an authenticated session (synchronous check) */
 export function isAuthenticated(): boolean {
-  return !!getSupabase().auth.getSession().data.session;
+  return !!getSupabase().auth.getSession().session;
 }
 
 /** Redirect to /login if not authenticated. Call at top of protected page mounts. */

@@ -11,7 +11,6 @@
  * All new Y.js usage must be review_sessions-scoped only.
  *
  * See also: Section 6 of the Post-Refactor Implementation Brief.
- */
  *
  * SCHEMA IS IMMUTABLE after v1 ships. New fields are ADDITIVE ONLY.
  * See schema-migrations.ts for forward-compatibility rules.
