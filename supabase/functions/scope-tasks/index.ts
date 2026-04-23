@@ -4,34 +4,16 @@
  * AI-powered task scoping: takes a project brief and generates structured tasks
  * using GPT-4o with JSON object output mode.
  *
- * Two modes:
- *   preview (no projectId):  Returns tasks for the host to review/edit before saving
- *   persist (projectId set):  Atomically writes project + tasks via persist_scoped_project RPC
+ * The browser calls this with a `projectId` for correlation, then persists with the
+ * user's session via `persist_scoped_project` in create.ts (RPC needs auth.uid()).
  *
  * Platform fee: 10% (1000 bps) baked into payout_min/payout_max
  */
 
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { resolveAuth, serviceRoleClient } from "../_shared/auth.ts";
 
 const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY")!;
-
-const supabase = createClient(
-  Deno.env.get("SUPABASE_URL")!,
-  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
-);
 const MODEL = "gpt-4o";
-
-function userIdFromToken(authHeader: string): string | null {
-  const m = authHeader.match(/^Bearer\s+(.+)$/i);
-  if (!m) return null;
-  const token = m[1];
-  try {
-    const payload = JSON.parse(atob(token.split(".")[1]));
-    return payload.sub ?? null;
-  } catch {
-    return null;
-  }
-}
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -162,15 +144,23 @@ Deno.serve(async (req: Request) => {
     return new Response("ok", { headers: CORS_HEADERS });
   }
 
-  const authHeader = req.headers.get("Authorization") ?? "";
-  const allowed = [
-    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY"),
-    Deno.env.get("SUPABASE_ANON_KEY"),
-  ].filter(Boolean);
-  const m = authHeader.match(/^Bearer\s+(.+)$/i);
-  if (!m || !allowed.includes(m[1])) {
+  const auth = await resolveAuth(req);
+  if (auth.kind !== "user") {
     return new Response(JSON.stringify({ error: "Unauthorized" }), {
       status: 401,
+      headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
+    });
+  }
+
+  const admin = serviceRoleClient();
+  const { data: profile } = await admin
+    .from("profiles")
+    .select("role")
+    .eq("id", auth.user.id)
+    .single();
+  if ((profile as { role?: string } | null)?.role !== "host") {
+    return new Response(JSON.stringify({ error: "Only hosts can scope projects" }), {
+      status: 403,
       headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
     });
   }
@@ -185,37 +175,27 @@ Deno.serve(async (req: Request) => {
       );
     }
 
-    const userPrompt = buildUserPrompt(intent);
-    const result = await callOpenAI(userPrompt);
-
-    // Persist if projectId provided
     if (intent.projectId) {
-      const hostId = userIdFromToken(authHeader);
-      if (!hostId) {
-        return new Response(JSON.stringify({ error: "Unauthorized" }), {
-          status: 401,
-          headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
-        });
-      }
-
-      const { error: persistErr } = await supabase.rpc("persist_scoped_project", {
-        p_project_id: intent.projectId,
-        p_host_id: hostId,
-        p_title: intent.title,
-        p_description: intent.description,
-        p_references_urls: intent.referenceUrls ?? [],
-        p_readme_draft: result.readmeDraft,
-        p_folder_structure: result.folderStructure ?? [],
-        p_tasks: result.tasks,
-      });
-
-      if (persistErr) {
-        return new Response(JSON.stringify({ error: `persist_scoped_project failed: ${persistErr.message}` }), {
-          status: 500,
+      const { data: proj } = await admin
+        .from("projects")
+        .select("host_id")
+        .eq("id", intent.projectId)
+        .maybeSingle();
+      const hostId = (proj as { host_id?: string } | null)?.host_id;
+      if (hostId != null && hostId !== auth.user.id) {
+        return new Response(JSON.stringify({ error: "Forbidden" }), {
+          status: 403,
           headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
         });
       }
     }
+
+    const userPrompt = buildUserPrompt(intent);
+    const result = await callOpenAI(userPrompt);
+
+    // Persistence is done by the browser with the user's session JWT via
+    // `persist_scoped_project` in create.ts (RPC requires auth.uid(); service-role
+    // invocations from this function would leave auth.uid() null and fail).
 
     return new Response(JSON.stringify(result), {
       headers: { ...CORS_HEADERS, "Content-Type": "application/json" },

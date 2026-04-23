@@ -13,6 +13,7 @@
  */
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { resolveAuth } from "../_shared/auth.ts";
 
 const PLATFORM_FEE_BPS = 1000; // 10%
 
@@ -20,20 +21,6 @@ function getStripeSecretKey(): string {
   const key = Deno.env.get("STRIPE_SECRET_KEY");
   if (!key) throw new Error("STRIPE_SECRET_KEY is not set");
   return key;
-}
-
-/** Allow service-role, anon, or optional legacy key (same-project callers). */
-function isFunctionAuthorized(req: Request): boolean {
-  const authHeader = req.headers.get("Authorization") ?? "";
-  const m = authHeader.match(/^Bearer\s+(.+)$/i);
-  if (!m) return false;
-  const token = m[1];
-  const allowed = [
-    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY"),
-    Deno.env.get("SUPABASE_ANON_KEY"),
-    Deno.env.get("SUPABASE_functions_KEY"),
-  ].filter((v): v is string => Boolean(v));
-  return allowed.includes(token);
 }
 
 // ---------------------------------------------------------------------------
@@ -66,7 +53,8 @@ async function stripeRequest(
 // ---------------------------------------------------------------------------
 
 Deno.serve(async (req: Request) => {
-  if (!isFunctionAuthorized(req)) {
+  const auth = await resolveAuth(req);
+  if (auth.kind === "none") {
     return new Response("Unauthorized", { status: 401 });
   }
 

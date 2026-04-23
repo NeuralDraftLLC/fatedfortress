@@ -14,12 +14,12 @@ graph TB
     classDef trigger fill:#1a1a0d,stroke:#ffd166,stroke-width:1px,color:#ffd166
     classDef cron fill:#0d1a1a,stroke:#118ab2,stroke-width:1px,color:#118ab2
 
-    subgraph SupabaseProject["🗄️ Supabase Project: pfrtxfuuatzgddenyttm (us-west-2)"]
+    subgraph SupabaseProject["🗄️ Supabase Project: your-ref (region)"]
         direction TB
 
         %% ── Vault / Secrets ──────────────────────────────────────────────
         subgraph Vault["🔐 Vault — encrypted secrets for cron auth"]
-            VAULT_URL["fatedfortress_project_url<br/>https://pfrtxfuuatzgddenyttm.supabase.co"]:::secret
+            VAULT_URL["fatedfortress_project_url<br/>https://xxx.supabase.co"]:::secret
             VAULT_CRON["fatedfortress_cron_bearer<br/>64-char bearer token (CRON_SECRET)"]:::secret
         end
 
@@ -368,7 +368,7 @@ graph TD
     end
 
     subgraph Vault["🔐 Vault (decrypted at query time)"]
-        V_URL["fatedfortress_project_url<br/>https://pfrtxfuuatzgddenyttm.supabase.co"]:::secret
+        V_URL["fatedfortress_project_url<br/>https://xxx.supabase.co"]:::secret
         V_KEY["fatedfortress_cron_bearer<br/>(64-char bearer token)"]:::secret
     end
 
@@ -458,8 +458,8 @@ graph LR
 
 ```env
 # Supabase
-VITE_SUPABASE_URL=https://pfrtxfuuatzgddenyttm.supabase.co
-VITE_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+VITE_SUPABASE_URL=https://YOUR_PROJECT_REF.supabase.co
+VITE_SUPABASE_ANON_KEY=eyJ...   # public anon key from Supabase dashboard
 
 # Stripe (set in Supabase Dashboard → Edge Functions → Secrets)
 STRIPE_SECRET_KEY=sk_live_...          # server-side only

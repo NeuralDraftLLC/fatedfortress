@@ -123,7 +123,6 @@ cd apps/relay && npm install && npx wrangler dev
 ```
 apps/
   web/               # Main SPA — pages, handlers, state
-    legacy/           # Archived room-era code (excluded from build)
     public/           # Static assets (fonts, icons)
     src/
       auth/          # Supabase auth + route guards

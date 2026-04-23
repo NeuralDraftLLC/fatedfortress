@@ -16,6 +16,8 @@
  *   R2_PUBLIC_BASE_URL         — e.g. "https://pub-xxxxxxxx.r2.dev"
  */
 
+import { resolveAuth, serviceRoleClient } from "../_shared/auth.ts";
+
 const R2_ACCOUNT_ID  = Deno.env.get("CLOUDFLARE_R2_ACCOUNT_ID")!;
 const R2_BUCKET     = Deno.env.get("R2_BUCKET_NAME")!;
 const R2_ACCESS_KEY = Deno.env.get("R2_ACCESS_KEY_ID")!;
@@ -172,21 +174,6 @@ function inferContentType(fileName: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Auth guard
-// ---------------------------------------------------------------------------
-
-function isAuthorized(req: Request): boolean {
-  const authHeader = req.headers.get("Authorization") ?? "";
-  const m = authHeader.match(/^Bearer\s+(.+)$/i);
-  if (!m) return false;
-  const token = m[1];
-  return [
-    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY"),
-    Deno.env.get("SUPABASE_ANON_KEY"),
-  ].filter(Boolean).includes(token);
-}
-
-// ---------------------------------------------------------------------------
 // Handler
 // ---------------------------------------------------------------------------
 
@@ -195,12 +182,15 @@ Deno.serve(async (req: Request) => {
     return new Response("ok", { headers: CORS_HEADERS });
   }
 
-  if (!isAuthorized(req)) {
+  const auth = await resolveAuth(req);
+  if (auth.kind !== "user") {
     return new Response(JSON.stringify({ error: "Unauthorized" }), {
       status: 401,
       headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
     });
   }
+  const { user } = auth;
+  const admin = serviceRoleClient();
 
   try {
     const body = await req.json();
@@ -247,6 +237,42 @@ Deno.serve(async (req: Request) => {
       });
     }
 
+    if (isPortfolio) {
+      if (!userId || userId !== user.id) {
+        return new Response(JSON.stringify({ error: "Invalid userId for portfolio upload" }), {
+          status: 403, headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
+        });
+      }
+    } else {
+      if (!contributorId || contributorId !== user.id) {
+        return new Response(JSON.stringify({ error: "contributorId must match signed-in user" }), {
+          status: 403, headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
+        });
+      }
+      const { data: task, error: taskErr } = await admin
+        .from("tasks")
+        .select("claimed_by,status")
+        .eq("id", taskId ?? "")
+        .maybeSingle();
+      if (taskErr || !task) {
+        return new Response(JSON.stringify({ error: "Task not found" }), {
+          status: 404, headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
+        });
+      }
+      const t = task as { claimed_by: string | null; status: string };
+      if (t.claimed_by !== user.id) {
+        return new Response(JSON.stringify({ error: "Not the assignee for this task" }), {
+          status: 403, headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
+        });
+      }
+      if (!["claimed", "revision_requested"].includes(t.status)) {
+        return new Response(
+          JSON.stringify({ error: "Task is not in a state that allows upload" }),
+          { status: 403, headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
+        );
+      }
+    }
+
     const safeName = sanitizeName(fileName);
     const timestamp = Date.now();
     const resolvedContentType = contentType && contentType !== "application/octet-stream"
@@ -265,9 +291,6 @@ Deno.serve(async (req: Request) => {
 
     // Generate PUT (upload) URL
     const { url: uploadUrl } = await buildPresignedUrl(objectKey, "PUT", resolvedContentType, expiresAt);
-
-    // Generate GET (download) URL (no content-type header needed for GET)
-    const { url: getUrl } = await buildPresignedUrl(objectKey, "GET", "", expiresAt);
 
     return new Response(
       JSON.stringify({

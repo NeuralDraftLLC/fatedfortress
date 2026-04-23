@@ -28,4 +28,12 @@ declare const __APP_VERSION__: string;
  */
 interface ImportMetaEnv {
   readonly VITE_HERENOW_CLIENT_ID?: string;
+  /** Supabase project URL */
+  readonly VITE_SUPABASE_URL: string;
+  /** Supabase anon (public) key */
+  readonly VITE_SUPABASE_ANON_KEY: string;
+  /** GitHub OAuth App client ID */
+  readonly VITE_GITHUB_CLIENT_ID?: string;
+  /** R2 public bucket base URL (same as server R2_PUBLIC_BASE_URL) */
+  readonly VITE_R2_PUBLIC_URL?: string;
 }

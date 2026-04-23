@@ -6,7 +6,7 @@ import { getSupabase } from "../auth/index.js";
 import { requireAuth } from "../auth/middleware.js";
 import { createConnectAccountLink } from "../handlers/payout.js";
 import { signOut } from "../auth/index.js";
-import { initiateGitHubOAuth } from "../net/github.js";
+import { exchangeGitHubCode, initiateGitHubOAuth } from "../net/github.js";
 
 export async function mountSettings(container: HTMLElement): Promise<() => void> {
   requireAuth();
@@ -43,7 +43,7 @@ export async function mountSettings(container: HTMLElement): Promise<() => void>
       ${isHost ? `
       <section class="settings-section">
         <h2>Stripe Connect</h2>
-        <p class="settings-desc">Connect your Stripe account to receive payouts when your work is approved by hosts.</p>
+        <p class="settings-desc">Connect Stripe to add funds to your project wallet and pay contributors when you approve their work.</p>
         <div class="stripe-status" id="stripe-status">
           ${(profile as any)?.stripe_account_id
             ? `<span class="status--active">Stripe connected</span>`
@@ -106,7 +106,7 @@ export async function mountGitHubCallback(_container: HTMLElement): Promise<() =
   }
 
   try {
-    await import("../net/github.js").then(m => m.exchangeGitHubCode(code));
+    await exchangeGitHubCode(code);
   } catch {
     window.location.href = "/settings?github_error=1";
     return () => {};
@@ -114,5 +114,4 @@ export async function mountGitHubCallback(_container: HTMLElement): Promise<() =
 
   window.location.href = "/settings?github_connected=1";
   return () => {};
-}
 }

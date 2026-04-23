@@ -108,7 +108,13 @@ export async function createPortfolioUploadUrl(
   const { data, error } = await getSupabase()
     .functions()
     .invoke("r2-upload-url", {
-      body: { taskId: `portfolio-${userId}`, contributorId: userId, fileName, contentType, deliverableType: "file" },
+      body: {
+        isPortfolio: true,
+        userId,
+        fileName,
+        contentType,
+        deliverableType: "file" as const,
+      },
     });
 
   if (error || !data?.uploadUrl) {

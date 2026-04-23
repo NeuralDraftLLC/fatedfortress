@@ -9,24 +9,12 @@
  */
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { resolveAuth } from "../_shared/auth.ts";
 
 function getStripeSecretKey(): string {
   const key = Deno.env.get("STRIPE_SECRET_KEY");
   if (!key) throw new Error("STRIPE_SECRET_KEY is not set");
   return key;
-}
-
-function isFunctionAuthorized(req: Request): boolean {
-  const authHeader = req.headers.get("Authorization") ?? "";
-  const m = authHeader.match(/^Bearer\s+(.+)$/i);
-  if (!m) return false;
-  const token = m[1];
-  const allowed = [
-    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY"),
-    Deno.env.get("SUPABASE_ANON_KEY"),
-    Deno.env.get("SUPABASE_functions_KEY"),
-  ].filter((v): v is string => Boolean(v));
-  return allowed.includes(token);
 }
 
 async function stripeRequest(
@@ -51,7 +39,8 @@ async function stripeRequest(
 }
 
 Deno.serve(async (req: Request) => {
-  if (!isFunctionAuthorized(req)) {
+  const auth = await resolveAuth(req);
+  if (auth.kind !== "user") {
     return new Response("Unauthorized", { status: 401 });
   }
 
@@ -60,6 +49,10 @@ Deno.serve(async (req: Request) => {
 
     if (!userId) {
       return Response.json({ error: "Missing userId" }, { status: 400 });
+    }
+
+    if (userId !== auth.user.id) {
+      return Response.json({ error: "userId must match session" }, { status: 403 });
     }
 
     const supabase = createClient(

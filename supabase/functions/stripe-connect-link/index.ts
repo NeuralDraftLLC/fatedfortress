@@ -4,25 +4,12 @@
  * Generates a Stripe Connect onboarding link for a host to complete their account setup.
  */
 
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { resolveAuth, serviceRoleClient } from "../_shared/auth.ts";
 
 function getStripeSecretKey(): string {
   const key = Deno.env.get("STRIPE_SECRET_KEY");
   if (!key) throw new Error("STRIPE_SECRET_KEY is not set");
   return key;
-}
-
-function isFunctionAuthorized(req: Request): boolean {
-  const authHeader = req.headers.get("Authorization") ?? "";
-  const m = authHeader.match(/^Bearer\s+(.+)$/i);
-  if (!m) return false;
-  const token = m[1];
-  const allowed = [
-    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY"),
-    Deno.env.get("SUPABASE_ANON_KEY"),
-    Deno.env.get("SUPABASE_functions_KEY"),
-  ].filter((v): v is string => Boolean(v));
-  return allowed.includes(token);
 }
 
 async function stripeRequest(
@@ -47,7 +34,8 @@ async function stripeRequest(
 }
 
 Deno.serve(async (req: Request) => {
-  if (!isFunctionAuthorized(req)) {
+  const auth = await resolveAuth(req);
+  if (auth.kind !== "user") {
     return new Response("Unauthorized", { status: 401 });
   }
 
@@ -64,6 +52,16 @@ Deno.serve(async (req: Request) => {
 
     if (!stripeAccountId) {
       return Response.json({ error: "Missing stripeAccountId" }, { status: 400 });
+    }
+
+    const admin = serviceRoleClient();
+    const { data: profile } = await admin
+      .from("profiles")
+      .select("stripe_account_id")
+      .eq("id", auth.user.id)
+      .single();
+    if ((profile as { stripe_account_id?: string | null } | null)?.stripe_account_id !== stripeAccountId) {
+      return Response.json({ error: "Account does not belong to this user" }, { status: 403 });
     }
 
     const accountLink = await stripeRequest(

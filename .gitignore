@@ -19,6 +19,9 @@ dist/
 .wrangler/
 .dev.vars
 
+# Supabase CLI cache
+supabase/.temp/
+
 # OS
 .DS_Store
 Thumbs.db

@@ -20,6 +20,8 @@ Set via: `supabase secrets set KEY=value`
 
 ## apps/web/.env.local
 
+Copy `apps/web/.env.example` to `apps/web/.env.local` and fill in values.
+
 Set before `vite build` or `vite dev`
 
 | Variable | Used By | Notes |
