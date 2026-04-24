@@ -75,32 +75,18 @@ async function getOrCreateConnectAccount(userId: string): Promise<string> {
 // Project wallet — fund / withdraw
 // ---------------------------------------------------------------------------
 
-/** Pre-fund project wallet — writes to project_wallet.deposited. */
+/** Pre-fund project wallet via atomic RPC — no racy read-then-update. */
 export async function fundProjectWallet(
   projectId: string,
   amount: number
 ): Promise<void> {
   const supabase = getSupabase();
 
-  // Upsert: create wallet row if it doesn't exist, add to deposited
-  const { data: existing } = await supabase
-    .from("project_wallet")
-    .select("id, deposited")
-    .eq("project_id", projectId)
-    .maybeSingle();
-
-  if (existing) {
-    const { error } = await supabase
-      .from("project_wallet")
-      .update({ deposited: existing.deposited + amount })
-      .eq("id", existing.id);
-    if (error) throw error;
-  } else {
-    const { error } = await supabase
-      .from("project_wallet")
-      .insert({ project_id: projectId, deposited: amount });
-    if (error) throw error;
-  }
+  const { error } = await supabase.rpc("upsert_wallet_deposited", {
+    p_project_id: projectId,
+    p_amount: amount,
+  });
+  if (error) throw error;
 }
 
 // ---------------------------------------------------------------------------
@@ -286,22 +272,11 @@ export async function releasePayout(
     } as Record<string, unknown>)
     .eq("id", taskId);
 
-  // 4. Update project_wallet: locked -= approvedPayout, released += approvedPayout
-  const { data: wallet } = await supabase
-    .from("project_wallet")
-    .select("id, locked, released")
-    .eq("project_id", project.id)
-    .maybeSingle();
-
-  if (wallet) {
-    await supabase
-      .from("project_wallet")
-      .update({
-        locked: Math.max(0, (wallet.locked ?? 0) - approvedPayout),
-        released: (wallet.released ?? 0) + approvedPayout,
-      } as Record<string, unknown>)
-      .eq("id", wallet.id);
-  }
+  // 4. Release locked funds atomically (moves locked → released)
+  await supabase.rpc("release_wallet_lock", {
+    p_project_id: project.id,
+    p_amount: approvedPayout,
+  });
 
   // 5. Audit log
   await writeAudit(supabase, hostId, taskId, "payment_released", {

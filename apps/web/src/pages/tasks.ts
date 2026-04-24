@@ -243,6 +243,24 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
         return;
       }
 
+      // V2: Create Stripe PaymentIntent with manual capture at claim time.
+      // Host must have a valid payment method before contributor does work.
+      // The PI id is stored on tasks.payment_intent_id for capture-time lookup.
+      try {
+        const amount = Math.round((Number(t.payout_max) || 0) * 100); // cents
+        if (amount > 0) {
+          const { data: piData } = await supabase.functions.invoke("create-payment-intent", {
+            body: { taskId, amount, connectedAccountId: (t as Record<string, unknown>).stripe_account_id as string | undefined },
+          });
+          if (!piData?.success) {
+            console.warn("create-payment-intent failed — task is claimed but PI not set:", piData?.error);
+          }
+        }
+      } catch (piErr) {
+        // Non-fatal: task is still claimed; PI can be created later by stripe-webhook
+        console.warn("create-payment-intent invocation error:", piErr);
+      }
+
       // Audit log
       await supabase.from("audit_log").insert({
         actor_id: user!.id,

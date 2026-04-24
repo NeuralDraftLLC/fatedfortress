@@ -151,22 +151,11 @@ Deno.serve(async (req: Request) => {
         .update({ status: "paid", reviewed_at: new Date().toISOString() } as Record<string, unknown>)
         .eq("id", task.id);
 
-      // Update wallet: locked -= approvedPayout, released += approvedPayout
-      const { data: wallet } = await supabase
-        .from("project_wallet")
-        .select("id, locked, released")
-        .eq("project_id", projectId)
-        .maybeSingle();
-
-      if (wallet) {
-        await supabase
-          .from("project_wallet")
-          .update({
-            locked: Math.max(0, (wallet.locked ?? 0) - approvedPayout),
-            released: (wallet.released ?? 0) + approvedPayout,
-          } as Record<string, unknown>)
-          .eq("id", wallet.id);
-      }
+      // Release locked funds atomically (moves locked → released)
+      await supabase.rpc("release_wallet_lock", {
+        p_project_id: projectId,
+        p_amount: approvedPayout,
+      });
 
       // Audit log
       await supabase.from("audit_log").insert({

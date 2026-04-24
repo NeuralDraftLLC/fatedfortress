@@ -68,6 +68,23 @@ Deno.serve(async (req: Request) => {
     });
   }
 
+  // Release any wallet locks held by the expired claims (funds return to available).
+  // unlock_wallet is a no-op if no lock exists — safe to call for all expired tasks.
+  const unlockResults = await Promise.allSettled(
+    expiredTasks.map(t =>
+      supabase.rpc("unlock_wallet", {
+        p_project_id: t.project_id,
+        p_amount: t.payout_max ?? 0,
+      }).then(() => ({ taskId: t.id, ok: true }))
+      .catch(err => ({ taskId: t.id, ok: false, err }))
+    )
+  );
+
+  const unlockFailures = unlockResults.filter(r => r.status === "rejected" || !r.value.ok);
+  if (unlockFailures.length > 0) {
+    console.warn("expire-claims: unlock_wallet failures:", unlockFailures.slice(0, 3));
+  }
+
   // Notify each prior contributor
   const notifications = priorClaimants.map(p => ({
     user_id: p.claimedBy,
