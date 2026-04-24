@@ -7,14 +7,16 @@
  *   has accepted invitation (invitations.accepted_at is not null).
  * Claim requires: task_access = 'public' OR valid accepted invitation.
  * Invitation token passed via ?invite=<token> URL param on the claim flow.
+ *
+ * v2 note: task claiming MUST go through the `claim-task` edge function.
+ * The client no longer updates tasks.status/claimed_by directly — that is
+ * enforced atomically in Postgres via claim_task_atomic.
  */
 
 import { getSupabase } from "../auth/index.js";
 import { requireAuth } from "../auth/middleware.js";
 import type { Task } from "@fatedfortress/protocol";
 import { renderShell } from "../ui/shell.js";
-
-const SOFT_LOCK_HOURS = 24;
 
 export async function mountTasks(container: HTMLElement): Promise<() => void> {
   await requireAuth();
@@ -217,75 +219,85 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
           return;
         }
 
-        // Accept invitation
+        // Accept invitation (soft client-side convenience; server still enforces access)
         await supabase
           .from("invitations")
           .update({ accepted_at: new Date().toISOString() } as Record<string, unknown>)
           .eq("id", invitation.id);
       }
 
-      const expiresAt = new Date(Date.now() + SOFT_LOCK_HOURS * 60 * 60 * 1000).toISOString();
-
-      const { error } = await supabase
-        .from("tasks")
-        .update({
-          status: "claimed",
-          claimed_by: user!.id,
-          claimed_at: new Date().toISOString(),
-          soft_lock_expires_at: expiresAt,
-        } as Record<string, unknown>)
-        .eq("id", taskId)
-        .eq("status", "open");
-
-      if (error) {
-        alert("Failed to claim task — it may have been taken by someone else.");
-        await fetchTasks();
-        return;
-      }
-
-      // V2: Create Stripe PaymentIntent with manual capture at claim time.
-      // Host must have a valid payment method before contributor does work.
-      // The PI id is stored on tasks.payment_intent_id for capture-time lookup.
       try {
-        const amount = Math.round((Number(t.payout_max) || 0) * 100); // cents
-        if (amount > 0) {
-          const { data: piData } = await supabase.functions.invoke("create-payment-intent", {
-            body: { taskId, amount, connectedAccountId: (t as Record<string, unknown>).stripe_account_id as string | undefined },
-          });
-          if (!piData?.success) {
-            console.warn("create-payment-intent failed — task is claimed but PI not set:", piData?.error);
+        const { data, error } = await supabase
+          .functions
+          .invoke("claim-task", { body: { taskId } });
+
+        if (error) {
+          console.error("claim-task invoke error", error);
+          alert("Failed to claim task. Please try again.");
+          await fetchTasks();
+          return;
+        }
+
+        const payload = data as {
+          success?: boolean;
+          error?: string;
+          message?: string;
+          onboarding_url?: string;
+          claim_expires_at?: string;
+        } | null;
+
+        if (!payload?.success) {
+          if (payload?.error === "stripe_onboarding_required" && payload.onboarding_url) {
+            // Hard redirect to onboarding so contributor can finish setup
+            window.location.href = payload.onboarding_url;
+            return;
+          }
+
+          alert(payload?.message ?? "Failed to claim task. It may have been taken by someone else.");
+          await fetchTasks();
+          return;
+        }
+
+        const claimExpiresAt = payload.claim_expires_at;
+
+        // Audit log — lightweight client-side telemetry
+        await supabase.from("audit_log").insert({
+          actor_id: user!.id,
+          task_id: taskId,
+          action: "claimed",
+          payload: { claimExpiresAt },
+        } as Record<string, unknown>);
+
+        // Notify host
+        const { data: task } = await supabase
+          .from("tasks")
+          .select("project:projects(host_id)")
+          .eq("id", taskId)
+          .single();
+
+        if (task) {
+          const hostProject = task as Record<string, unknown>;
+          const hostId = (hostProject.project as Record<string, unknown>)?.host_id as string | undefined;
+          if (hostId) {
+            await supabase.from("notifications").insert({
+              user_id: hostId,
+              type: "task_claimed",
+              task_id: taskId,
+            } as Record<string, unknown>);
           }
         }
-      } catch (piErr) {
-        // Non-fatal: task is still claimed; PI can be created later by stripe-webhook
-        console.warn("create-payment-intent invocation error:", piErr);
+
+        if (payload.message) {
+          // Soft feedback; in the future this should be a toast instead of alert
+          console.info(payload.message);
+        }
+
+        await fetchTasks();
+      } catch (err) {
+        console.error("claim-task unexpected error", err);
+        alert("Failed to claim task. Please try again.");
+        await fetchTasks();
       }
-
-      // Audit log
-      await supabase.from("audit_log").insert({
-        actor_id: user!.id,
-        task_id: taskId,
-        action: "claimed",
-        payload: { expiresAt },
-      } as Record<string, unknown>);
-
-      // Notify host
-      const { data: task } = await supabase
-        .from("tasks")
-        .select("project:projects(host_id)")
-        .eq("id", taskId)
-        .single();
-
-      if (task) {
-        const hostId = (task as Record<string, unknown>).project as Record<string, unknown>;
-        await supabase.from("notifications").insert({
-          user_id: hostId?.host_id,
-          type: "task_claimed",
-          task_id: taskId,
-        } as Record<string, unknown>);
-      }
-
-      await fetchTasks();
     }
   }
 
