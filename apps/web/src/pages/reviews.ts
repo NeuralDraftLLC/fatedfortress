@@ -10,6 +10,9 @@
  *    an empty queue every time.
  *  - FIX 3: Realtime channel was never removed on unmount — leaked a subscription on every
  *    page navigation. Teardown now calls supabase.removeChannel(channel).
+ *  - FIX 4: Decision handlers now call reviewSubmission() (review-submission edge function)
+ *    instead of the deprecated client-side releasePayout/rejectSubmission/requestRevision.
+ *    Stripe capture, wallet movements, and decisions are now handled server-side only.
  *  - IMPROVED: Decision handlers (approve/revise/reject) are awaited with per-row error
  *    display instead of fire-and-forget.
  *  - IMPROVED: Staleness uses submission.created_at not task.updated_at.
@@ -25,7 +28,7 @@ import type {
   ReviewSession,
   DecisionReason,
 } from "@fatedfortress/protocol";
-import { releasePayout, rejectSubmission, requestRevision } from "../handlers/payout.js";
+import { reviewSubmission } from "../handlers/review.js";
 import { renderShell } from "../ui/shell.js";
 
 const PAGE_SIZE = 20;
@@ -209,7 +212,7 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
         const { taskId, submissionId } = btn.dataset as Record<string, string>;
         try {
           btn.disabled = true;
-          await releasePayout(submissionId, 0, "great_work" as DecisionReason);
+          await reviewSubmission(submissionId, "approved", "great_work" as DecisionReason, {});
           removeRow(taskId);
         }
         catch (err) { showRowError(taskId, err instanceof Error ? err.message : "Approval failed"); btn.disabled = false; }
@@ -220,7 +223,7 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
         const { taskId, submissionId } = btn.dataset as Record<string, string>;
         try {
           btn.disabled = true;
-          await requestRevision(submissionId, "requirements_not_met" as DecisionReason, "");
+          await reviewSubmission(submissionId, "revision_requested", "requirements_not_met" as DecisionReason, {});
           removeRow(taskId);
         }
         catch (err) { showRowError(taskId, err instanceof Error ? err.message : "Revision request failed"); btn.disabled = false; }
@@ -231,7 +234,7 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
         const { taskId, submissionId } = btn.dataset as Record<string, string>;
         try {
           btn.disabled = true;
-          await rejectSubmission(submissionId, "quality_issue" as DecisionReason, "");
+          await reviewSubmission(submissionId, "rejected", "quality_issue" as DecisionReason, {});
           removeRow(taskId);
         }
         catch (err) { showRowError(taskId, err instanceof Error ? err.message : "Rejection failed"); btn.disabled = false; }
