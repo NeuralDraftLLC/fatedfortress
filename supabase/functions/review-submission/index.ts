@@ -89,6 +89,45 @@ async function writeStripeArtefacts(
     .eq("id", decisionId);
 }
 
+/**
+ * Write an immutable payout_ledger row for every money movement.
+ * Failures are logged but never fatal — the decision is already committed.
+ */
+async function writeLedger(
+  admin: ReturnType<typeof serviceRoleClient>,
+  opts: {
+    taskId: string;
+    submissionId: string;
+    projectId: string;
+    contributorId: string | null;
+    hostId: string;
+    paymentIntentId: string;
+    event: "captured" | "cancelled" | "refunded";
+    grossAmountCents: number;
+    platformFeeCents: number;
+    netAmountCents: number;
+    stripeStatus: string;
+  }
+): Promise<void> {
+  try {
+    await admin.from("payout_ledger").insert({
+      task_id:              opts.taskId,
+      submission_id:        opts.submissionId,
+      project_id:           opts.projectId,
+      contributor_id:       opts.contributorId,
+      host_id:              opts.hostId,
+      payment_intent_id:    opts.paymentIntentId,
+      event:                opts.event,
+      gross_amount_cents:   opts.grossAmountCents,
+      platform_fee_cents:   opts.platformFeeCents,
+      net_amount_cents:     opts.netAmountCents,
+      stripe_status:        opts.stripeStatus,
+    });
+  } catch (e) {
+    console.error("review-submission: writeLedger failed (non-fatal)", e);
+  }
+}
+
 // ── main handler ─────────────────────────────────────────────────────────────
 
 Deno.serve(async (req: Request) => {
@@ -252,7 +291,6 @@ Deno.serve(async (req: Request) => {
     if (!stripeRes.success) {
       // Stripe capture failed — log + alert but DO NOT roll back the decision.
       // The decision is the source of truth; Stripe can be retried manually.
-      // In production, pipe this to an ops alert (PagerDuty / Slack webhook).
       console.error("review-submission: Stripe capture failed", stripeRes.error);
     } else {
       payoutCaptured = r.final_payout;
@@ -266,6 +304,7 @@ Deno.serve(async (req: Request) => {
       );
 
       // Atomically move wallet: locked → released
+      // release_wallet_lock(p_project_id, p_amount) — correct RPC name and args
       const { error: walletErr } = await admin.rpc("release_wallet_lock", {
         p_project_id: r.project_id,
         p_amount:     r.final_payout,
@@ -279,10 +318,36 @@ Deno.serve(async (req: Request) => {
         .from("tasks")
         .update({ status: "paid", updated_at: new Date().toISOString() })
         .eq("id", r.task_id);
+
+      // Immutable ledger entry
+      await writeLedger(admin, {
+        taskId:           r.task_id!,
+        submissionId,
+        projectId:        r.project_id!,
+        contributorId:    r.contributor_id ?? null,
+        hostId:           auth.user.id,
+        paymentIntentId:  stripeRes.paymentIntentId as string,
+        event:            "captured",
+        grossAmountCents: r.final_payout,
+        platformFeeCents: fee,
+        netAmountCents:   r.final_payout - fee,
+        stripeStatus,
+      });
     }
   }
 
+  // FIX: was calling non-existent cancel_wallet_lock and passing PI id string as amount.
+  // The correct RPC is unlock_wallet(p_project_id, p_amount).
+  // We need the actual hold amount — fetch it from the task row.
   if (verdict === "rejected" && r.payment_intent_id) {
+    // Get the hold amount from the task before we cancel
+    const { data: taskRow } = await admin
+      .from("tasks")
+      .select("payout_max")
+      .eq("id", r.task_id)
+      .single();
+    const holdAmount = Number((taskRow as Record<string, unknown> | null)?.payout_max ?? 0);
+
     const stripeRes = await invokeStripe("cancel", {
       paymentIntentId: r.payment_intent_id,
     });
@@ -295,10 +360,31 @@ Deno.serve(async (req: Request) => {
         r.payment_intent_id,
         stripeStatus
       );
-      // Atomically release the lock back into available funds
-      await admin.rpc("cancel_wallet_lock", {
-        p_project_id: r.project_id,
-        p_amount:     r.payment_intent_id, // amount derived inside RPC
+
+      // unlock_wallet returns locked funds to available pool — correct RPC, correct arg type
+      if (holdAmount > 0) {
+        const { error: walletErr } = await admin.rpc("unlock_wallet", {
+          p_project_id: r.project_id,
+          p_amount:     holdAmount,
+        });
+        if (walletErr) {
+          console.error("review-submission: unlock_wallet failed", walletErr.message);
+        }
+      }
+
+      // Immutable ledger entry
+      await writeLedger(admin, {
+        taskId:           r.task_id!,
+        submissionId,
+        projectId:        r.project_id!,
+        contributorId:    r.contributor_id ?? null,
+        hostId:           auth.user.id,
+        paymentIntentId:  r.payment_intent_id,
+        event:            "cancelled",
+        grossAmountCents: holdAmount,
+        platformFeeCents: 0,
+        netAmountCents:   0,
+        stripeStatus,
       });
     }
   }
