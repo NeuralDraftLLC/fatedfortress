@@ -13,8 +13,7 @@ import { getSupabase } from "../auth/index.js";
 import { requireAuth } from "../auth/middleware.js";
 import type { Task } from "@fatedfortress/protocol";
 import { renderShell } from "../ui/shell.js";
-
-const SOFT_LOCK_HOURS = 24;
+import { getStripe } from "../net/stripe.js";
 
 export async function mountTasks(container: HTMLElement): Promise<() => void> {
   await requireAuth();
@@ -63,10 +62,6 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
   let pollInterval: ReturnType<typeof setInterval>;
 
   async function fetchTasks(): Promise<void> {
-    // Invitation-aware query: show tasks that are public, or where user
-    // has an accepted invitation, or where user is the host.
-    // We fetch open tasks and filter client-side for simplicity; for large
-    // scale this should move to an RPC or a DB view.
     const { data, error } = await supabase
       .from("tasks")
       .select(`
@@ -81,7 +76,6 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
       return;
     }
 
-    // Client-side invitation filter
     const { data: invitations } = await supabase
       .from("invitations")
       .select("task_id, accepted_at")
@@ -194,37 +188,39 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
   }
 
   async function handleAction(taskId: string, action: string): Promise<void> {
-    if (action === "claim") {
-      // Read invitation token from URL if present
-      const urlParams = new URLSearchParams(window.location.search);
-      const invitationToken = urlParams.get("invite");
+    if (action !== "claim") return;
 
-      // If task is invite-only, validate invitation
-      if (invitationToken) {
-        const { data: invitation } = await supabase
-          .from("invitations")
-          .select("id, task_id, invited_user_id, accepted_at, expires_at")
-          .eq("token", invitationToken)
-          .maybeSingle();
+    // Read invitation token from URL if present
+    const urlParams = new URLSearchParams(window.location.search);
+    const invitationToken = urlParams.get("invite");
 
-        if (!invitation || new Date(invitation.expires_at) < new Date()) {
-          alert("Invalid or expired invitation link.");
-          return;
-        }
+    if (invitationToken) {
+      const { data: invitation } = await supabase
+        .from("invitations")
+        .select("id, task_id, invited_user_id, accepted_at, expires_at")
+        .eq("token", invitationToken)
+        .maybeSingle();
 
-        if (invitation.accepted_at) {
-          alert("Invitation already used.");
-          return;
-        }
-
-        // Accept invitation
-        await supabase
-          .from("invitations")
-          .update({ accepted_at: new Date().toISOString() } as Record<string, unknown>)
-          .eq("id", invitation.id);
+      if (!invitation || new Date(invitation.expires_at) < new Date()) {
+        alert("Invalid or expired invitation link.");
+        return;
       }
 
-      const { data: claimResult, error: claimError } = await supabase.functions.invoke("claim-task", { body: { taskId } });
+      if (invitation.accepted_at) {
+        alert("Invitation already used.");
+        return;
+      }
+
+      await supabase
+        .from("invitations")
+        .update({ accepted_at: new Date().toISOString() } as Record<string, unknown>)
+        .eq("id", invitation.id);
+    }
+
+    try {
+      const { data: claimResult, error: claimError } = await supabase
+        .functions
+        .invoke("claim-task", { body: { taskId } });
 
       if (claimError) {
         console.error("claim-task invoke error", claimError);
@@ -238,6 +234,7 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
         error?: string;
         message?: string;
         onboarding_url?: string;
+        payment_intent_client_secret?: string;
         claim_expires_at?: string;
       } | null;
 
@@ -266,9 +263,35 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
         return;
       }
 
+      const clientSecret = payload.payment_intent_client_secret;
+      if (!clientSecret) {
+        console.error("claim-task: missing payment_intent_client_secret");
+        alert("Claim failed: payment could not be initialized.");
+        await fetchTasks();
+        return;
+      }
+
+      let stripeErrorMessage: string | null = null;
+      try {
+        const stripe = await getStripe();
+        const { error: stripeErr } = await stripe.confirmCardPayment(clientSecret);
+        if (stripeErr) {
+          console.error("Stripe confirmCardPayment error", stripeErr);
+          stripeErrorMessage = stripeErr.message ?? "Payment authorization failed. Your claim was not completed.";
+        }
+      } catch (e) {
+        console.error("Stripe.js error", e);
+        stripeErrorMessage = "Payment authorization failed. Your claim was not completed.";
+      }
+
+      if (stripeErrorMessage) {
+        alert(stripeErrorMessage);
+        await fetchTasks();
+        return;
+      }
+
       const claimExpiresAt = payload.claim_expires_at;
 
-      // Audit log
       await supabase.from("audit_log").insert({
         actor_id: user!.id,
         task_id: taskId,
@@ -276,7 +299,6 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
         payload: { claimExpiresAt },
       } as Record<string, unknown>);
 
-      // Notify host
       const { data: taskRow } = await supabase
         .from("tasks")
         .select("project:projects(host_id)")
@@ -299,8 +321,13 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
         console.info(payload.message);
       }
 
-      // Navigate to submit page on successful claim
       window.location.href = `/submit/${taskId}`;
+    } catch (err) {
+      console.error("claim-task unexpected error", err);
+      alert("Failed to claim task. Please try again.");
+      await fetchTasks();
+    }
+  }
 
   container.querySelectorAll(".filter-btn").forEach(btn => {
     btn.addEventListener("click", () => {
