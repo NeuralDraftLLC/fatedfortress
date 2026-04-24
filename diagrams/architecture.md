@@ -68,7 +68,7 @@ graph TD
             projects[(projects<br/>Blueprint Metadata)]:::db
             wallet[(project_wallet<br/>Atomic RPCs<br/>deposited/locked/released)]:::db
             tasks[(tasks<br/>deliverable_type<br/>context_snippet<br/>inferred_brief<br/>payment_intent_id<br/>accepted_roles[]<br/>spec_constraints)]:::db
-            submissions[(submissions<br/>Asset URLs)]:::db
+            submissions[(submissions<br/>asset_url OR pr_url<br/>pr_url · pr_diff_url · pr_files<br/>notes · verification_result<br/>verified_at)]:::db
             decisions[(decisions<br/>Formal Verdicts)]:::db
             invitations[(invitations<br/>Invite Tokens)]:::db
             profiles[(profiles<br/>skills[]<br/>notification_trigger)]:::db

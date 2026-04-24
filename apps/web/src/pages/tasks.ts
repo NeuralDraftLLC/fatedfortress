@@ -7,16 +7,14 @@
  *   has accepted invitation (invitations.accepted_at is not null).
  * Claim requires: task_access = 'public' OR valid accepted invitation.
  * Invitation token passed via ?invite=<token> URL param on the claim flow.
- *
- * v2 note: task claiming MUST go through the `claim-task` edge function.
- * The client no longer updates tasks.status/claimed_by directly — that is
- * enforced atomically in Postgres via claim_task_atomic.
  */
 
 import { getSupabase } from "../auth/index.js";
 import { requireAuth } from "../auth/middleware.js";
 import type { Task } from "@fatedfortress/protocol";
 import { renderShell } from "../ui/shell.js";
+
+const SOFT_LOCK_HOURS = 24;
 
 export async function mountTasks(container: HTMLElement): Promise<() => void> {
   await requireAuth();
@@ -219,87 +217,90 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
           return;
         }
 
-        // Accept invitation (soft client-side convenience; server still enforces access)
+        // Accept invitation
         await supabase
           .from("invitations")
           .update({ accepted_at: new Date().toISOString() } as Record<string, unknown>)
           .eq("id", invitation.id);
       }
 
-      try {
-        const { data, error } = await supabase
-          .functions
-          .invoke("claim-task", { body: { taskId } });
+      const { data: claimResult, error: claimError } = await supabase.functions.invoke("claim-task", { body: { taskId } });
 
-        if (error) {
-          console.error("claim-task invoke error", error);
-          alert("Failed to claim task. Please try again.");
-          await fetchTasks();
-          return;
-        }
-
-        const payload = data as {
-          success?: boolean;
-          error?: string;
-          message?: string;
-          onboarding_url?: string;
-          claim_expires_at?: string;
-        } | null;
-
-        if (!payload?.success) {
-          if (payload?.error === "stripe_onboarding_required" && payload.onboarding_url) {
-            // Hard redirect to onboarding so contributor can finish setup
-            window.location.href = payload.onboarding_url;
-            return;
-          }
-
-          alert(payload?.message ?? "Failed to claim task. It may have been taken by someone else.");
-          await fetchTasks();
-          return;
-        }
-
-        const claimExpiresAt = payload.claim_expires_at;
-
-        // Audit log — lightweight client-side telemetry
-        await supabase.from("audit_log").insert({
-          actor_id: user!.id,
-          task_id: taskId,
-          action: "claimed",
-          payload: { claimExpiresAt },
-        } as Record<string, unknown>);
-
-        // Notify host
-        const { data: task } = await supabase
-          .from("tasks")
-          .select("project:projects(host_id)")
-          .eq("id", taskId)
-          .single();
-
-        if (task) {
-          const hostProject = task as Record<string, unknown>;
-          const hostId = (hostProject.project as Record<string, unknown>)?.host_id as string | undefined;
-          if (hostId) {
-            await supabase.from("notifications").insert({
-              user_id: hostId,
-              type: "task_claimed",
-              task_id: taskId,
-            } as Record<string, unknown>);
-          }
-        }
-
-        if (payload.message) {
-          // Soft feedback; in the future this should be a toast instead of alert
-          console.info(payload.message);
-        }
-
+      if (claimError) {
+        console.error("claim-task invoke error", claimError);
+        alert("Failed to claim task — network error. Please try again.");
         await fetchTasks();
-      } catch (err) {
-        console.error("claim-task unexpected error", err);
-        alert("Failed to claim task. Please try again.");
-        await fetchTasks();
+        return;
       }
-    }
-  }
+
+      const payload = claimResult as {
+        success?: boolean;
+        error?: string;
+        message?: string;
+        onboarding_url?: string;
+        claim_expires_at?: string;
+      } | null;
+
+      if (!payload?.success) {
+        switch (payload?.error) {
+          case "stripe_onboarding_required":
+            window.location.href = payload.onboarding_url ?? "/settings/stripe-connect";
+            return;
+          case "already_claimed":
+            alert(payload.message ?? "Another contributor just claimed this task. Try a different one.");
+            break;
+          case "wallet_error":
+            alert(payload.message ?? "Project wallet has insufficient funds for this task.");
+            break;
+          case "invite_only":
+            alert(payload.message ?? "This task requires an invitation.");
+            break;
+          case "not_open":
+            alert(payload.message ?? "This task is no longer open for claiming.");
+            break;
+          default:
+            alert(payload?.message ?? "Failed to claim task. It may have been taken by someone else.");
+            break;
+        }
+        await fetchTasks();
+        return;
+      }
+
+      const claimExpiresAt = payload.claim_expires_at;
+
+      // Audit log
+      await supabase.from("audit_log").insert({
+        actor_id: user!.id,
+        task_id: taskId,
+        action: "claimed",
+        payload: { claimExpiresAt },
+      } as Record<string, unknown>);
+
+      // Notify host
+      const { data: taskRow } = await supabase
+        .from("tasks")
+        .select("project:projects(host_id)")
+        .eq("id", taskId)
+        .single();
+
+      if (taskRow) {
+        const hostProject = taskRow as Record<string, unknown>;
+        const hostId = (hostProject.project as Record<string, unknown>)?.host_id as string | undefined;
+        if (hostId) {
+          await supabase.from("notifications").insert({
+            user_id: hostId,
+            type: "task_claimed",
+            task_id: taskId,
+          } as Record<string, unknown>);
+        }
+      }
+
+      if (payload.message) {
+        console.info(payload.message);
+      }
+
+      // Navigate to submit page on successful claim
+      window.location.href = `/submit/${taskId}`;
 
   container.querySelectorAll(".filter-btn").forEach(btn => {
     btn.addEventListener("click", () => {

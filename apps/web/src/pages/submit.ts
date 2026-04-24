@@ -77,6 +77,10 @@ export async function mountSubmit(container: HTMLElement, taskId: string): Promi
       <p id="hint-text" class="hint">Upload a file to continue</p>
       <p id="status-msg" class="hidden error-text"></p>
       <button id="submit-btn" type="button" class="btn btn-primary" disabled>Submit</button>
+      <div id="submit-success" class="hidden" style="margin-top:12px; color: var(--ff-gold); font-family: var(--ff-mono); font-size: 13px;">
+        Submit confirmed. Task is in review.
+        <span class="submit-success-msg" style="display:block; margin-top:4px; color: var(--ff-dim);"></span>
+      </div>
     </div>
   `;
 
@@ -159,38 +163,39 @@ export async function mountSubmit(container: HTMLElement, taskId: string): Promi
       $progress.classList.add("hidden");
       $verifyStatus.classList.remove("hidden");
 
-      // Create submission row FIRST — edge function needs a real UUID FK
-      const { data: submission, error: submitError } = await supabase
-        .from("submissions")
-        .insert({
-          task_id: taskId, contributor_id: user.id,
-          asset_url: uploadedAssetUrl, deliverable_type: selectedType,
-          revision_number: revisionNumber,
-        } as Record<string, unknown>)
-        .select()
-        .single();
-
-      if (submitError || !submission) throw submitError ?? new Error("Failed to create submission record");
-
-      // FIX: was missing taskId — edge function skipped all auto-reject DB writes
-      const { data: verifyResult, error: verifyError } = await supabase.functions.invoke("verify-submission", {
-        body: { assetUrl: uploadedAssetUrl, deliverableType: selectedType, taskId, submissionId: submission.id },
+      // Stage 3: Use atomic submit-task orchestrator (handles PR validation + atomic RPC + async verification)
+      const { data: submitResult, error: submitError } = await supabase.functions.invoke("submit-task", {
+        body: {
+          taskId,
+          assetUrl: uploadedAssetUrl,
+          // prUrl would be passed if this were a PR-based submission
+        },
       });
-      if (verifyError) throw verifyError;
+
+      if (submitError) throw submitError;
+
+      const sr = submitResult as Record<string, unknown>;
+
+      if (!sr?.success) {
+        throw new Error((sr?.message as string) ?? "Submission failed.");
+      }
 
       $verifyStatus.classList.add("hidden");
 
-      if (verifyResult?.auto_reject) {
-        window.location.hash = "#/tasks?status=rejected";
-        return;
+      // Verification runs async — status is "running" until verify-submission writes back
+      // Show success state so contributor knows submission landed
+      $submitBtn.disabled = true;
+      $hintText.classList.add("hidden");
+      $statusMsg.classList.add("hidden");
+      const successEl = container.querySelector("#submit-success");
+      if (successEl) {
+        successEl.classList.remove("hidden");
+        // Update message to show verification is running
+        const msgEl = successEl.querySelector(".submit-success-msg");
+        if (msgEl) msgEl.textContent = (sr?.message as string) ?? "Submission received. AI review in progress.";
       }
 
-      // IMPROVED: guard against race with edge function status change
-      await supabase.from("tasks").update({ status: "under_review" }).eq("id", taskId).in("status", ["open", "revision_requested"]);
-      window.location.hash = `#/project/${(task.project as Record<string, unknown>)?.id ?? taskId}`;
-
     } catch (err) {
-      // FIX: re-enable button and surface error instead of leaving UI locked
       console.error("submit error:", err);
       showError(err instanceof Error ? err.message : "Submission failed. Please try again.");
       resetDropzone();
