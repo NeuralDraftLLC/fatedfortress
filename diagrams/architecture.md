@@ -13,6 +13,7 @@ graph TD
     classDef state     fill:#1a1a2e,stroke:#a78bfa,stroke-width:1px,color:#a78bfa
     classDef zone      fill:#0d1b2a,stroke:#ef476f,stroke-width:2px,color:#ef476f
     classDef rpc       fill:#1b2a49,stroke:#06d6a0,stroke-width:1px,color:#06d6a0
+    classDef spec      fill:#1b2a49,stroke:#ef476f,stroke-width:1px,color:#ef476f
 
     %% ============================================================
     %% ZONE 1: SPA (apps/web)
@@ -66,7 +67,7 @@ graph TD
         subgraph Schema ["Schema — Sacred Objects"]
             projects[(projects<br/>Blueprint Metadata)]:::db
             wallet[(project_wallet<br/>Atomic RPCs<br/>deposited/locked/released)]:::db
-            tasks[(tasks<br/>deliverable_type<br/>context_snippet<br/>inferred_brief<br/>payment_intent_id<br/>accepted_roles[])]:::db
+            tasks[(tasks<br/>deliverable_type<br/>context_snippet<br/>inferred_brief<br/>payment_intent_id<br/>accepted_roles[]<br/>spec_constraints)]:::db
             submissions[(submissions<br/>Asset URLs)]:::db
             decisions[(decisions<br/>Formal Verdicts)]:::db
             invitations[(invitations<br/>Invite Tokens)]:::db
@@ -78,10 +79,12 @@ graph TD
             upsert_wallet_deposited["upsert_wallet_deposited<br/>(fundProjectWallet replaces racy upsert)"]:::rpc
             release_wallet_lock["release_wallet_lock<br/>(locked → released on payout)"]:::rpc
             unlock_wallet["unlock_wallet<br/>(locked → available on claim expiry)"]:::rpc
+            persist_scoped["persist_scoped_project<br/>(accepts spec_constraints per task)"]:::rpc
+            asset_scanner_write["asset_scanner_write<br/>(service-role bulk insert for scanner)"]:::rpc
         end
 
         subgraph EdgeFunctions ["Edge Functions"]
-            verify_sub["verify-submission<br/>(The Moat)"]:::edgefn
+            verify_sub["verify-submission<br/>(The Moat · Deep-Spec Gate)<br/>checkGLBSpecs · checkAudioSpecs · checkImageSpecs"]:::edgefn
             storage_upload["supabase-storage-upload<br/>(Signed URLs)"]:::edgefn
             stripe_payment["stripe-payment<br/>(Capture/Cancel/Refund)"]:::edgefn
             create_payment_intent["create-payment-intent<br/>(Claim-time auth, manual capture)"]:::edgefn
@@ -90,7 +93,7 @@ graph TD
             stripe_link["stripe-connect-link"]:::edgefn
             github_oauth["github-oauth"]:::edgefn
             scope_tasks["scope-tasks<br/>(AI Parse)"]:::edgefn
-            asset_scanner["asset-scanner<br/>(Pass 1–3 · The Secret Sauce)"]:::edgefn
+            asset_scanner["asset-scanner<br/>(Pass 1–3 · The Secret Sauce)<br/>buildSpecConstraints() → spec_constraints"]:::edgefn
             auto_release["auto-release<br/>(Cron · 24h warning / 48h release)"]:::edgefn
             expire_claims["expire-claims<br/>(Cron · 5min · reclaim expired claims)"]:::edgefn
         end
@@ -105,6 +108,14 @@ graph TD
         FortressStorage[("Supabase Storage")]:::ext
         here_now[("here.now Publishing<br/>Portfolio Last")]:::ext
     end
+
+    %% ============================================================
+    %% SPEC_CONSTRAINTS BRIDGE (Scanner → Verify handshake)
+    %% ============================================================
+    asset_scanner -->|"[3.3] buildSpecConstraints() → spec_constraints<br/>Written via asset_scanner_write RPC"| tasks
+    tasks -->|"task.spec_constraints + deliverable_type<br/>fetched at verify-submission handler start"| verify_sub
+
+    verify_sub -->|"checkGLBSpecs() · checkAudioSpecs() · checkImageSpecs()<br/>Hard-fail auto-reject on spec mismatch"| decisions
 
     %% ============================================================
     %% FLOWS
@@ -155,10 +166,6 @@ graph TD
     stripe_webhook -->|"Insert decision"| decisions
     Stripe -.->|"payment_intent.payment_failed"| stripe_webhook
     stripe_webhook -.->|"Revert to open + notify"| tasks
-
-    %% ── Asset Scanner (V2: dogfood on FatedFortress repo) ────────────
-    scope_tasks -.->|"Pass 3 input"| asset_scanner
-    asset_scanner -.->|"context_snippet / inferred_brief<br/>deliverable_type → tasks"| tasks
 
     %% ── publishToHereNow (Step 7 last) ──────────────────────────────
     project_p -.->|"publishToHereNow (stub)"| here_now
