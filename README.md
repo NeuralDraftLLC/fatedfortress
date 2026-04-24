@@ -1,27 +1,30 @@
 # FatedFortress
 
-**A task marketplace for AI generation workflows — contributors deliver against a brief; hosts pay only when they approve.**
-
-Supabase and Stripe Connect handle data and money. The repo also contains an optional **browser-isolated keystore + relay** stack (separate origin + Web Worker + Cloudflare relay) for CRDT/AI-room workflows; the current marketplace flow (`/create → /tasks → /submit → /reviews`) does not require it.
+**An AI-orchestrated task marketplace — contributors claim scoped work, deliver against a structured brief, and get paid on host approval. Stripe Connect handles money; Supabase handles data and intelligence.**
 
 ---
 
 ## What is this?
 
-FatedFortress connects **hosts** who post AI-scoped work with **contributors** who complete tasks. Scoping, submission, review, and payment stay on-platform and map to a clear state machine: **Task → Submission → Decision** (the payout source of truth).
+FatedFortress connects **hosts** who post AI-scoped work with **contributors** who complete tasks. The platform enforces a complete lifecycle: scoping, claiming, verification, review, and payment — with a shared spec contract (`spec_constraints`) between the AI that defines the brief and the gate that validates the deliverable.
 
 **Core loop:**
 
 ```
 Host creates project
-    └→ AI scopes tasks + payouts (SCOPE)
-    └→ Contributors browse and claim
+    └→ SCOPE: AI decomposes brief into tasks with payouts + spec_constraints
+    └→ Contributors browse public tasks (marketplace) and claim
     └→ Contributor submits deliverable
+         └→ verify-submission runs deep-spec checks (GLB polygons, audio sample rate, image dimensions)
+         └→ auto-reject fires on spec mismatch before host ever sees it
     └→ Host reviews: Approve / Reject / Request revision
     └→ Payment captured via Stripe Connect — only on approval
+    └→ Auto-release: 24h warning → 48h auto-approve if host doesn't act
 ```
 
-**No capture on claim. No capture on submit. Funds move when the host approves** (or after the auto-release window if configured).
+**Claim-time authorization:** A Stripe PaymentIntent with `capture_method=manual` is created the moment a contributor claims a task — before any work is done. The host's funding and the contributor's effort are both protected.
+
+**Spec constraints bridge:** Every task carries a `spec_constraints jsonb` field. The Asset Scanner generates it from type + archetype at gap-discovery time; the verification gate reads it at submission time. The contributor knows exactly what the brief requires; the platform enforces it automatically.
 
 ---
 
@@ -33,9 +36,9 @@ Three deployable apps, **separate `package.json` / lockfiles** (no monorepo tool
 |-----|------|------|
 | `apps/web` | User-facing SPA | TypeScript, Vite |
 | `apps/worker` | (Optional) Browser AI keystore + provider adapters | Vite IIFE, Web Workers |
-| `apps/relay` | (Optional) Y.js signaling + WebRTC (TURN metadata) | Cloudflare Workers, Durable Objects |
+| `apps/relay` | (Optional) Y.js signaling + WebRTC + TURN credentials | Cloudflare Workers, Durable Objects |
 
-**Keystore (optional):** API keys run in a sandboxed worker at an **isolated origin**. The main app’s thread does not read those secrets; the browser’s same-origin policy is the enforcement boundary. (Some keystore wiring is currently intentionally inert in `apps/web`.)
+**Keystore (optional):** API keys run in a sandboxed worker at an **isolated origin**. The main app's thread does not read those secrets; the browser's same-origin policy is the enforcement boundary.
 
 ---
 
@@ -44,11 +47,13 @@ Three deployable apps, **separate `package.json` / lockfiles** (no monorepo tool
 | Layer | Technology |
 |-------|------------|
 | Database + auth | Supabase (Postgres, RLS, Edge Functions) |
-| Payments | Stripe Connect (Express, **manual** capture, 10% platform fee) |
-| Real-time / CRDT | Y.js over WebRTC; relay on Cloudflare |
-| AI scoping | OpenAI (edge: `scope-tasks`) |
+| Payments | Stripe Connect (Express, **manual capture at claim time**, 10% platform fee) |
+| Real-time / CRDT | Y.js over WebRTC; relay on Cloudflare Durable Objects |
+| AI scoping | OpenAI GPT-4o (`scope-tasks` edge function) |
+| Asset Scanner | 9-sub-pass layered engine (deterministic → heuristic → gap analysis) |
+| Deep-spec verification | Binary header parsing (GLB, WAV, MP3, PNG, JPEG) via `verify-submission` |
 | Object storage | Supabase Storage (presigned uploads via `supabase-storage-upload`) |
-| Hosting | e.g. Cloudflare Pages (web) + Workers (relay) |
+| Hosting | Cloudflare Pages (web) + Workers (relay) |
 | Errors | Sentry (web + worker; PII scrubbed via `packages/sentry-utils`) |
 | Package manager | npm (per app) |
 
@@ -60,12 +65,12 @@ Three deployable apps, **separate `package.json` / lockfiles** (no monorepo tool
 |-------|-----|------|
 | `/login` | Public | Magic link + Google OAuth (Supabase) |
 | `/create` | Host | Brief → SCOPE → edit tasks → publish |
-| `/tasks` | Contributor | Open tasks, claim, 24h soft-lock |
-| `/submit/:taskId` | Contributor | Upload (Supabase Storage), verify, submit for review |
-| `/reviews` | Host | Review queue, decisions |
+| `/tasks` | Contributor | Open tasks, claim (creates PaymentIntent), 24h soft-lock |
+| `/submit/:taskId` | Contributor | Upload (Supabase Storage), verify (deep-spec gate), submit for review |
+| `/reviews` | Host | Review queue with Y.js live collaboration, decisions |
 | `/project/:id` | Host | Project detail, wallet, activity |
 | `/profile` | Signed-in | Profile, reliability, portfolio |
-| `/settings` | Signed-in | GitHub connect, **Stripe Connect (hosts)**, sign out |
+| `/settings` | Signed-in | GitHub connect, **Stripe Connect onboarding (hosts)**, notification triggers |
 | `/github/callback` | Signed-in | GitHub OAuth return URL |
 
 The SPA router in `apps/web/src/main.ts` does not register `/`; use `/login` or a feature route as the entry you bookmark for local dev.
@@ -78,13 +83,58 @@ Three core aggregates and an immutable decision trail:
 
 ```
 Project
-  └→ Task              (payout range in cents, status, claim, etc.)
-        └→ Submission  (deliverable, revision)
-              └→ Decision  (host verdict — authoritative for payout)
+  └→ Task (payout range in cents, status, claim, spec_constraints jsonb)
+        └→ Submission (deliverable, revision)
+              └→ Decision (host verdict — authoritative for payout)
 ```
 
-**`project_wallet`** (per project): `deposited`, `locked`, `released`.  
-**Available (conceptually)** ≈ deposited − locked − released. The host pre-funds; capture happens on approval, not on claim.
+**`project_wallet`** (per project): `deposited`, `locked`, `released`. All mutations go through **atomic Postgres RPCs** (`upsert_wallet_deposited`, `release_wallet_lock`, `unlock_wallet`) — no client-side arithmetic, no race conditions.
+
+**`spec_constraints jsonb`** (per task): Machine-readable brief for the verification gate. Generated by the Asset Scanner at gap-discovery time. Examples:
+
+| deliverable_type | spec_constraints shape |
+|-----------------|------------------------|
+| `3d_model` | `{ max_polygons: 100_000, requires_rig: true, lod_levels: 2 }` |
+| `audio` | `{ sample_rate: 44100, channels: 2, bit_depth: 16 }` |
+| `design_asset` | `{ max_width: 2048, max_height: 2048, min_width: 256 }` |
+
+---
+
+## Edge Functions
+
+| Function | Purpose |
+|----------|---------|
+| `create-payment-intent` | Creates Stripe PaymentIntent with `capture_method=manual` at **claim time** — before work starts. PI id stored on `tasks.payment_intent_id`. |
+| `stripe-webhook` | Handles `payment_intent.succeeded` (marks task paid), `payment_intent.payment_failed` (reverts task to open), `transfer.created`, `account.updated`. |
+| `asset-scanner` | 9-sub-pass layered analysis engine. Pass 1: deterministic (extension + magic-byte + archetype). Pass 2: heuristic (Mermaid parsing + GPT-4o label expansion + namespace resolution). Pass 3: gap analysis (hard gaps, soft gaps, bounty calc with archetype multipliers). Writes draft tasks via `asset_scanner_write` RPC. |
+| `verify-submission` | Deep-spec gate. Parses GLB binary headers (mesh count vs `max_polygons`, skin vs `requires_rig`), WAV RIFF chunks (sample rate, channels, bit depth), MP3 ID3/sync-word, PNG IHDR, JPEG SOF markers. Reads `task.spec_constraints` to validate. Hard-fail auto-reject on mismatch. |
+| `scope-tasks` | OpenAI GPT-4o: decomposes host brief into tasks with payouts, deliverable types, inferred briefs. |
+| `stripe-payment` | PaymentIntents: create / capture / cancel / refund / transfer. |
+| `auto-release` | Cron (every 30 min): 24h warning notification → 48h auto-approve via `approved_fast_track` decision + Stripe capture + `release_wallet_lock` RPC. |
+| `expire-claims` | Cron (every 5 min): reclaims expired soft-locks, calls `unlock_wallet` RPC to return locked funds. |
+| `supabase-storage-upload` | Generates presigned PUT URLs for Supabase Storage. |
+| `stripe-connect-onboard` / `stripe-connect-link` | Stripe Connect Express onboarding. |
+| `github-oauth` | Server-side GitHub token exchange. |
+
+---
+
+## Migrations (chronological)
+
+| File | What's added |
+|------|-------------|
+| `20250421_post_refactor_v1.sql` | `project_wallet`, `decisions`, `invitations`, `notifications`, `audit_log`, expanded CHECK constraints |
+| `20260422_persist_blueprint.sql` | `readme_draft`, `folder_structure` on projects; `persist_scoped_project` RPC |
+| `20260501_001` | `deliverable_type`, `context_snippet`, `inferred_brief` on tasks |
+| `20260501_002` | `TaskStatus` CHECK expands to `approved`, `rejected` |
+| `20260501_003` | Atomic wallet RPCs: `increment_wallet_deposited`, `release_wallet_lock`, `unlock_wallet` |
+| `20260501_003b` | `upsert_wallet_deposited` (replaces racy client-side read-then-update in `fundProjectWallet`) |
+| `20260501_004` | `payment_intent_id`, `accepted_roles[]`, `expected_path` on tasks; GIN + btree indexes |
+| `20260501_005` | `skills[]` on profiles; partial unique index `idx_tasks_one_claimed_per_contributor` |
+| `20260501_006` | `notification_trigger_url` + `notification_trigger_enabled` on profiles |
+| `20260501_007` | Marketplace RLS documentation; skill-based filtering via `accepted_roles` |
+| `20260501_008` | `spec_constraints jsonb` on tasks; GIN index; updated `persist_scoped_project` (accepts spec_constraints per task, `ON CONFLICT DO UPDATE`); `asset_scanner_write` SECURITY DEFINER RPC |
+
+**Migration order matters.** 001–002 must run before 003–005 (columns must exist before RPC bodies that reference them). 008 runs last (depends on all prior schema).
 
 ---
 
@@ -94,12 +144,12 @@ Project
 git clone https://github.com/NeuralDraftLLC/fatedfortress.git
 cd fatedfortress
 
-# Web app (minimum to run the UI against your Supabase project)
+# Web app
 cd apps/web
 npm install
 cp .env.example .env.local
 # Edit .env.local: VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY (required)
-# Optional: VITE_GITHUB_CLIENT_ID, VITE_SUPABASE_STORAGE_URL — see /env-vars.md
+# Optional: VITE_GITHUB_CLIENT_ID, VITE_SUPABASE_STORAGE_URL — see env-vars.md
 
 npm run dev
 # → http://localhost:5173
@@ -107,7 +157,13 @@ npm run dev
 
 **Full env reference:** [`env-vars.md`](env-vars.md) (Supabase secrets for Edge Functions, R2, Stripe, GitHub, cron).
 
-**Optional local services**
+**Required secrets for Edge Functions** (via `supabase secrets` or `.env`):
+- `STRIPE_SECRET_KEY`
+- `STRIPE_WEBHOOK_SECRET`
+- `OPENAI_API_KEY`
+- `GITHUB_TOKEN` (for Asset Scanner GitHub API calls)
+
+**Optional local services:**
 
 ```bash
 # Keystore + AI adapters (isolated origin in production; local port for dev)
@@ -121,13 +177,17 @@ Vite injects relay/worker/Sentry **defaults** in `vite.config.ts` via `VITE_RELA
 
 ### E2E smoke (Playwright)
 
-Full-path test: forge → claim → Supabase Storage upload → bind PaymentIntent → host approve → Stripe `succeeded`. Requires a real dev Supabase project (email+password auth, deployed Edge Functions, OpenAI/Supabase Storage/Stripe test keys). See **[`e2e/README.md`](e2e/README.md)** and copy **`e2e/.env.example`** to **`e2e/.env`**.
+Full-path test: forge → claim (creates PaymentIntent) → Supabase Storage upload → verify-submission (deep-spec) → host approve → Stripe `succeeded`. Requires a real dev Supabase project.
 
 ```bash
 npm install                    # repo root
 npx playwright install chromium
+cp e2e/.env.example e2e/.env
+# Fill in credentials in e2e/.env
 npm run test:e2e
 ```
+
+See **[`e2e/README.md`](e2e/README.md)**.
 
 ---
 
@@ -136,75 +196,97 @@ npm run test:e2e
 ```
 apps/
   web/                 # Main SPA
-    public/            # Static assets
     src/
-      auth/            # Supabase client, route guards
-      handlers/        # scope, payout, etc.
-      net/             # storage (Supabase), GitHub, signaling, notifications
-      pages/           # Route entrypoints
-      state/           # Yjs / session state
-      styles/          # Design system + app CSS
-      ui/              # Shell, shared UI
+      auth/           # Supabase client, route guards
+      handlers/        # payout (verdict logic), scope (task generation)
+      net/             # storage, GitHub, signaling, notifications, here.now
+      pages/           # Route entrypoints (tasks, submit, reviews, create, …)
+      state/           # Y.js CRDT, session, identity
+      ui/              # Shell, shared components
   worker/              # Keystore bundle (iframe target)
-  relay/                 # WebRTC / signaling worker
+  relay/                # WebRTC / signaling worker + TURN credential endpoint
 
 packages/
-  protocol/              # Shared types and protocol
-  sentry-utils/          # Sentry scrubber
+  protocol/             # Shared types and protocol
+  sentry-utils/         # Sentry scrubber
 
-e2e/                     # Playwright: full-stack happy path (see e2e/README.md)
+e2e/                    # Playwright: full-stack happy path
 
 supabase/
   functions/
-    _shared/             # Shared Edge helpers (e.g. auth)
-    auto-release/        # Cron: warnings + 48h auto-approve path
-    expire-claims/       # Cron: release expired task locks
-    scope-tasks/         # OpenAI: scope brief → tasks JSON
-    supabase-storage-upload/ # Presigned PUT to Supabase Storage
-    verify-submission/   # Deliverable checks (incl. GitHub PR when applicable)
-    github-oauth/        # Server-side GitHub token exchange
-    stripe-payment/      # PaymentIntents: create, capture, cancel, refund, transfer
-    stripe-connect-*/    # Connect account + account links
-  migrations/
-  schema.sql             # Reference schema + RLS (see migrations for history)
+    _shared/            # Shared Edge helpers (auth, serviceRoleClient)
+    create-payment-intent/     # Stripe PI at claim time (manual capture)
+    stripe-webhook/            # PI event handler
+    asset-scanner/            # 9-sub-pass layered analysis engine
+    verify-submission/         # Deep-spec gate (GLB, audio, image parsing)
+    scope-tasks/               # AI task decomposition (GPT-4o)
+    stripe-payment/            # PI capture/cancel/refund/transfer
+    auto-release/             # 24h warning / 48h auto-approve cron
+    expire-claims/             # Reclaim expired soft-locks cron
+    supabase-storage-upload/   # Presigned PUT URLs
+    stripe-connect-*/          # Connect onboarding
+    github-oauth/             # GitHub token exchange
+  migrations/          # 001–008 (apply in order)
+  schema.sql            # Reference schema + RLS
 ```
 
-**Edge Functions and auth:** User-facing invokes send the **Supabase session JWT** in `Authorization`. Shared code resolves that JWT (or a **service role** bearer for server-to-server calls like cron-driven flows). See `supabase/functions/_shared/auth.ts` and each function’s handler.
+**Auth pattern:** User-facing invokes send the **Supabase session JWT** in `Authorization`. Shared code in `_shared/auth.ts` resolves that JWT; service-role calls use the service key. Cron endpoints verify `CRON_SECRET`.
 
 ---
 
 ## Design notes
 
-### No capture on claim
+### Claim-time PaymentIntent (V2)
 
-Claiming reserves workflow, not a card charge. The host’s project wallet must be funded; **capture** runs on host approval (or the automated release path).
+When a contributor claims a task, `create-payment-intent` creates a Stripe PaymentIntent with `capture_method=manual` and stores the `payment_intent_id` on the task row. This means:
 
-### Platform fee (10%)
+- The host's funding is verified **before** the contributor does any work.
+- If the host has no valid payment method, the claim fails immediately — not at approval time.
+- Capture happens on host approval (or auto-release) using the already-authorized PI.
 
-Handled as Stripe **`application_fee_amount`** on capture where the Connect model applies, so the fee and net payout are explicit in Stripe.
+### Atomic wallet RPCs
 
-### `decisions` as audit trail
+All wallet mutations go through Postgres RPCs with row-level locking:
 
-Approve / reject / request revision all write a **`decisions`** row. Task-level payout caches can mirror that; the decision record plus Stripe IDs are the cross-checks.
+- `upsert_wallet_deposited(project_id, amount)` — idempotent fund; replaces a racy read-then-update pattern.
+- `release_wallet_lock(project_id, amount)` — moves `locked → released` on payout; uses `SELECT FOR UPDATE`.
+- `unlock_wallet(project_id, amount)` — returns `locked → available` on claim expiry.
+
+`payout.ts`, `auto-release`, and `expire-claims` all call these instead of direct `.update()` calls.
+
+### spec_constraints bridge
+
+The `verify-submission` edge function reads `task.spec_constraints` and `task.deliverable_type` at invocation time — not from the submission body. This ensures the gate validates against the **task's actual brief**, not a contributor-supplied type claim.
 
 ### Auto-release
 
-If a submission sits in review, a **24h** warning can fire, then a **48h** path may auto-approve (`approved_fast_track`), capture, and notify. See `auto-release` and cron/`CRON_SECRET` in `env-vars.md`.
+If a submission sits in `under_review` for 24h → host gets `auto_release_warning` notification. After 48h total → `approved_fast_track` decision fires, Stripe captures the pre-authorized PI, `release_wallet_lock` moves funds, and both parties are notified.
+
+### Platform fee (10%)
+
+Handled as Stripe **`application_fee_amount`** on capture where the Connect model applies. The fee and net payout are explicit in every Stripe transfer record.
 
 ---
 
-## Status (high level)
+## Status
 
-| Area | Notes |
+| Area | Status |
 |------|--------|
-| Supabase schema + RLS | In place; review `migrations/` for your project |
-| Stripe Connect + PaymentIntents | Wired via Edge Functions + web handlers |
-| Claim, submit, review, pay | Core loop implemented in `apps/web` + functions |
-| SCOPE (`scope-tasks`) | **Edge function**; requires `OPENAI_API_KEY` secret |
-| Supabase Storage uploads (`supabase-storage-upload`) | **Edge function**; Supabase Storage + `VITE_SUPABASE_STORAGE_URL` for clients |
-| Submission verification | `verify-submission` (configurable; some paths “fail open” by design) |
-| Y.js live review UI | Partial / scaffold; relay exists for real-time |
-| GitHub / here.now | Varies by route; see code and `env-vars.md` |
+| Supabase schema + RLS | Complete (migrations 001–008) |
+| Stripe Connect + PaymentIntents | Complete — claim-time PI, capture on approval |
+| Atomic wallet RPCs | Complete — no client-side wallet arithmetic |
+| Asset Scanner (9-sub-pass) | Complete — Pass 1.1–1.3, 2.1–2.3, 3.1–3.3; writes draft tasks via RPC |
+| spec_constraints bridge | Complete — scanner generates, verify-submission enforces |
+| Deep-spec verification | Complete — GLB polygon count, audio header, image dimension checks |
+| SCOPE (`scope-tasks`) | Complete — GPT-4o decomposition |
+| Supabase Storage uploads | Complete |
+| Submission verification | Complete — deep-spec gate + surface checks + auto-reject |
+| Stripe webhook | Complete — `payment_intent.succeeded/failed`, `transfer.created`, `account.updated` |
+| Auto-release + 24h/48h | Complete — cron with `release_wallet_lock` RPC |
+| Expire-claims + unlock | Complete — cron with `unlock_wallet` RPC |
+| Y.js live review | Scaffolded — `state/ydoc.ts` + `relay/index.ts` wired |
+| publishToHereNow | Stub — deferred until portfolio is populated |
+| GitHub OAuth | Complete |
 
 ---
 
@@ -212,8 +294,10 @@ If a submission sits in review, a **24h** warning can fire, then a **48h** path 
 
 1. **Architecture and UI** — `apps/web/src/main.ts` (route table) and the route entrypoints in `apps/web/src/pages/`.
 2. **Shared types** — `packages/protocol/src/index.ts`.
-3. **CSP / new endpoints** — `apps/web/index.html` connect-src and related directives when adding APIs or origins.
-4. **Supabase** — keep RLS in mind for any new tables; document new secrets in `env-vars.md`.
+3. **New Edge Functions** — add under `supabase/functions/`; use `_shared/auth.ts` for auth.
+4. **New migrations** — always add in date-prefixed files (`20260501_XXX.sql`); test locally with `supabase db push`.
+5. **CSP / new endpoints** — `apps/web/index.html` `connect-src` and related directives when adding APIs or origins.
+6. **spec_constraints** — when adding new `deliverable_type` variants, add their spec shape to `buildSpecConstraints()` in `asset-scanner/index.ts` and add the corresponding checker in `verify-submission/index.ts`.
 
 ---
 
