@@ -49,10 +49,6 @@ export async function generateScopedTasks(
     throw new Error(error?.message ?? "SCOPE failed");
   }
 
-  if (error) {
-    throw new Error(error.message ?? "SCOPE failed");
-  }
-
   // Normalize and cap at HARD_MAX_TASKS
   return {
     tasks: normalizeScopedTasks(data.tasks ?? [], intent.budgetRange.min, intent.budgetRange.max),
