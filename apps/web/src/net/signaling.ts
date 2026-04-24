@@ -434,7 +434,7 @@ export async function joinRoom(
   }, SNAPSHOT_INTERVAL_MS);
 
   ws.addEventListener("close", () => {
-    console.log("[signaling] Disconnected from relay");
+    console.warn("[signaling] Disconnected from relay");
     const rid = snapshotRoomId;
     if (rid) void writeOpfsSnapshot(rid, serializeDoc(doc));
     clearSnapshotLoop();
