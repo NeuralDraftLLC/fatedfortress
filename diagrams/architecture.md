@@ -26,7 +26,7 @@ graph TD
             submit_p["/submit/:taskId<br/>Upload → Deep-Spec Verify<br/>(pages/submit.ts)"]:::page
             reviews_p["/reviews<br/>Realtime Queue · Y.js Collab<br/>(pages/reviews.ts)"]:::page
             project_p["/project/:id<br/>Wallet · Audit Feed<br/>(pages/project.ts)"]:::page
-            settings_p["/settings<br/>Stripe Connect Onboarding · GitHub<br/>(pages/settings.ts)"]:::page
+            settings_p["/settings<br/>Stripe Connect · GitHub<br/>(pages/settings.ts)"]:::page
         end
 
         subgraph Components ["🧩 UI Components"]
@@ -36,14 +36,15 @@ graph TD
         end
 
         subgraph Handlers ["⚡ Client Handlers"]
-            payout_h["handlers/payout.ts<br/>releasePayout · reject · requestRevision"]:::handler
-            review_h["handlers/review.ts<br/>submitDecision · requestRevision"]:::handler
+            payout_h["handlers/payout.ts<br/>createConnectAccountLink · fundProjectWallet<br/>(Connect onboarding + wallet pre-fund only)"]:::handler
+            review_h["handlers/review.ts<br/>reviewSubmission → verdict<br/>(approved · rejected · revision_requested)"]:::handler
             scope_h["handlers/scope.ts<br/>generateScopedTasks (GPT-4o)"]:::handler
         end
 
         subgraph State ["📦 Client State"]
             identity_s["state/identity.ts<br/>Ed25519 Keys (Audit Signing)"]:::state
             ydoc_s["state/ydoc.ts<br/>Y.js (Review Sessions Only)"]:::state
+            handoff_s["state/handoff.ts<br/>Task Handoff State"]:::state
         end
     end
 
@@ -83,7 +84,7 @@ graph TD
             verify_fn["verify-submission<br/>Deep-Spec Gate<br/>GLB · WAV · MP3 · PNG · JPEG"]:::edgefn
             scope_fn["create-and-scope-project<br/>GPT-4o Task Decomposition<br/>+ Project Creation"]:::edgefn
             stripe_fn["stripe-payment<br/>capture / cancel / refund / transfer"]:::edgefn
-            review_fn["review-submission<br/>Record Decision + Trigger Payout"]:::edgefn
+            review_fn["review-submission<br/>review_submission_atomic RPC<br/>Stripe capture/cancel + wallet movements"]:::edgefn
             submit_fn["submit-task<br/>Asset Link + Trigger Deep-Spec Gate"]:::edgefn
             auto_release["auto-release (Cron 30min)<br/>24h warning → 48h auto-approve<br/>release_wallet_lock RPC"]:::edgefn
             expire_claims["expire-claims (Cron 5min)<br/>Reclaim Stale Soft-locks<br/>unlock_wallet RPC"]:::edgefn
@@ -116,10 +117,12 @@ graph TD
     login_p -->|"Magic Link / OAuth"| Supabase
 
     %% Settings / Onboarding
-    settings_p -->|"Connect Onboarding"| connect_onboard
+    settings_p -->|"Connect Onboarding"| payout_h
+    payout_h -->|"createConnectAccountLink"| connect_onboard
+    payout_h -->|"reauth / dashboard link"| connect_link
     connect_onboard --> Stripe
-    settings_p -->|"Connect Dashboard Link"| connect_link
     connect_link --> Stripe
+    payout_h -->|"fundProjectWallet → upsert_wallet_deposited RPC"| wallet
     settings_p -->|"GitHub OAuth"| github_fn
     github_fn --> GitHub
 
@@ -152,16 +155,16 @@ graph TD
     reviews_p <-->|"Supabase Realtime"| tasks
     reviews_p <-->|"Y.js CRDT"| RelayDO
     ydoc_s <--> RelayDO
+    handoff_s -.->|"Handoff context"| reviews_p
 
-    %% Payout Flow
-    payout_h -->|"1. Record Decision"| review_fn
-    review_h --> review_fn
-    review_fn -->|"Writes verdict"| decisions
-    payout_h ==>|"2. Capture PI"| stripe_fn
+    %% Review Decision — all verdicts flow through review_h → review_fn
+    reviews_p -->|"Host verdict"| review_h
+    review_h ==>|"reviewSubmission (approved · rejected · revision_requested)"| review_fn
+    review_fn -->|"review_submission_atomic RPC"| decisions & tasks & wallet
+    review_fn ==>|"Stripe capture / cancel"| stripe_fn
     stripe_fn --> Stripe
     stripe_fn -->|"Webhook confirms"| stripe_wh
     stripe_wh -->|"Mark Paid"| tasks
-    payout_h -->|"3. release_wallet_lock RPC"| wallet
 
     %% Autonomous Release
     auto_release -->|"24h: Warning"| notifications
@@ -186,10 +189,14 @@ graph TD
 | Date | Change |
 |---|---|
 | 2026-04-24 | `scope-tasks` → `create-and-scope-project` (actual function name) |
-| 2026-04-24 | `stripe-connect-onboard/link` split into `stripe-connect-onboard` + `stripe-connect-link` |
+| 2026-04-24 | `stripe-connect-onboard/link` split into two separate functions |
 | 2026-04-24 | Storage: `supabase-storage-upload` → `r2-upload-url` (Cloudflare R2) |
 | 2026-04-24 | Added `submit-task` edge function node in submit flow |
-| 2026-04-24 | Added `review-submission` edge function node; wired into payout + review_h flows |
+| 2026-04-24 | Added `review-submission` edge function node |
 | 2026-04-24 | Added `handlers/review.ts` node (was missing) |
+| 2026-04-24 | **`payout_h` corrected**: methods `releasePayout/reject/requestRevision` removed — those moved to `review.ts`. `payout.ts` now only handles `createConnectAccountLink` + `fundProjectWallet` |
+| 2026-04-24 | **`payout_h` flows corrected**: routes to `connect_onboard`, `connect_link`, `wallet` (not `stripe_fn` or `decisions`) |
+| 2026-04-24 | **`review_h` flows corrected**: sole entry point for all verdicts → `review_fn` → `decisions/tasks/wallet/stripe_fn` |
+| 2026-04-24 | **Added `state/handoff.ts`** node (was missing) |
 | 2026-04-24 | Schema: annotated migration numbers on each table node |
 | 2026-04-24 | Page nodes: annotated source file paths |
