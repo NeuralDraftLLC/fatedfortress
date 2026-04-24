@@ -208,8 +208,8 @@ Deno.serve(async (req: Request) => {
   }
 
   // ── Step 5: Return claimed task + PI client secret to frontend ─────────
-  // Frontend calls stripe.confirmCardPayment(clientSecret) to authorise hold.
-  // Card is NOT charged until host approves (capture happens in payout-h).
+// Frontend calls stripe.confirmPayment({ clientSecret, confirmParams: { return_url } })
+// to authorise the hold. Card is NOT charged until host approves.
 
   const { data: claimedTask } = await admin
     .from("tasks")

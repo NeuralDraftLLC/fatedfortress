@@ -274,9 +274,14 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
       let stripeErrorMessage: string | null = null;
       try {
         const stripe = await getStripe();
-        const { error: stripeErr } = await stripe.confirmCardPayment(clientSecret);
+        const { error: stripeErr } = await stripe.confirmPayment({
+          clientSecret: clientSecret,
+          confirmParams: {
+            return_url: `${window.location.origin}/submit/${taskId}`,
+          },
+        });
         if (stripeErr) {
-          console.error("Stripe confirmCardPayment error", stripeErr);
+          console.error("Stripe confirmPayment error", stripeErr);
           stripeErrorMessage = stripeErr.message ?? "Payment authorization failed. Your claim was not completed.";
         }
       } catch (e) {

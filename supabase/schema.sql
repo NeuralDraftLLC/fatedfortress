@@ -133,6 +133,17 @@ create policy "Hosts can manage wallet"
 
 -- ============================================================================
 -- TASKS (AI-generated from project brief via SCOPE_PROJECT)
+--
+-- NOTE: This schema reflects the base post-refactor state. Additional columns
+-- were added by later migrations and are NOT reflected here to avoid drift.
+-- Canonical column list after all migrations:
+--   tasks: deliverable_type, context_snippet, inferred_brief, expected_path,
+--          spec_constraints (jsonb), reviewed_at, payment_intent_id,
+--          approved_payout (denorm, source of truth = decisions.approved_payout)
+-- See: migrations/20260424_009_project_brief_columns.sql,
+--      migrations/20260501_008_spec_constraints.sql,
+--      migrations/20260424_010_claim_task_atomic.sql,
+--      migrations/20260424_012_review_submission.sql
 -- ============================================================================
 create table if not exists public.tasks (
   id uuid primary key default gen_random_uuid(),
@@ -145,6 +156,17 @@ create table if not exists public.tasks (
   approved_payout decimal,                       -- denorm cache; source of truth is decisions.approved_payout
   ambiguity_score decimal,
   estimated_minutes integer,
+
+  -- Scoped task fields (added by migration 009/008)
+  deliverable_type text
+    check (deliverable_type in (
+      'file', 'pr', 'code_patch', 'design_asset', 'text',
+      'audio', 'video', '3d_model', 'figma_link'
+    )),
+  context_snippet text,
+  inferred_brief text,
+  expected_path text,
+  spec_constraints jsonb not null default '{}',   -- shared spec language between Asset Scanner and Verification Gate
 
   task_access text not null default 'invite'
     check (task_access in ('invite', 'public')) default 'invite',
@@ -164,7 +186,10 @@ create table if not exists public.tasks (
   claimed_at timestamptz,
   soft_lock_expires_at timestamptz,             -- 24h ownership window
   submitted_at timestamptz,
-  reviewed_at timestamptz,
+  reviewed_at timestamptz,                     -- set by review_submission_atomic RPC
+
+  -- Stripe (added by migration 010)
+  payment_intent_id text,
 
   created_at timestamptz default now() not null,
   updated_at timestamptz default now() not null
@@ -288,6 +313,9 @@ create policy "Hosts can update submissions"
 -- ============================================================================
 -- DECISIONS (authoritative record for every host review action)
 -- Stripe source of truth: decisions.approved_payout
+--
+-- NOTE: verdict, payout_override, stripe_payment_intent_id, stripe_capture_status
+-- added by migration 20260424_012_review_submission.sql
 -- ============================================================================
 create table if not exists public.decisions (
   id uuid primary key default gen_random_uuid(),
@@ -301,6 +329,15 @@ create table if not exists public.decisions (
   review_notes text,
   structured_feedback jsonb,
   approved_payout decimal,
+
+  -- Verdict + payout (added by migration 012)
+  verdict text check (verdict in ('approved', 'rejected', 'revision_requested')),
+  payout_override decimal,                     -- host may reduce payout below approved_payout
+
+  -- Stripe artefacts (added by migration 012)
+  stripe_payment_intent_id text,
+  stripe_capture_status    text,
+
   revision_deadline timestamptz,
   created_at timestamptz not null default now()
 );
@@ -437,6 +474,8 @@ create index if not exists idx_tasks_project_id   on public.tasks(project_id);
 create index if not exists idx_tasks_status        on public.tasks(status);
 create index if not exists idx_tasks_claimed_by   on public.tasks(claimed_by);
 create index if not exists idx_tasks_submitted_at on public.tasks(submitted_at) where submitted_at is not null;
+-- spec_constraints GIN index (migration 008)
+create index if not exists idx_tasks_spec_constraints_gin on public.tasks using gin(spec_constraints);
 create index if not exists idx_submissions_task_id on public.submissions(task_id);
 create index if not exists idx_submissions_contributor_id on public.submissions(contributor_id);
 create index if not exists idx_notifications_user_id on public.notifications(user_id);
