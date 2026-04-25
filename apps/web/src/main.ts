@@ -5,6 +5,7 @@
  * System of record: Supabase
  *
  * Routes:
+ *   /                — Public landing page (no auth required)
  *   /login           — Supabase Auth
  *   /create          — Host: project brief + SCOPE
  *   /tasks           — Contributor: browse + claim
@@ -22,6 +23,7 @@ import { getRedirectPath } from "./auth/middleware.js";
 import { subscribeToNotifications, unsubscribeFromNotifications } from "./net/notifications.js";
 import "./styles/design-system.css";
 import "./styles/ff.css";
+import "./styles/landing.css";
 
 Sentry.init({
   dsn: typeof __SENTRY_DSN_WEB__ !== "undefined" ? __SENTRY_DSN_WEB__ : "",
@@ -49,7 +51,7 @@ function buildShell(role: string | null): string {
     <div class="ff-shell">
       <header class="ff-topbar">
         <div class="ff-brand">
-          <span class="ff-brand__name">FatedFortress</span>
+          <a href="/" class="ff-brand__name" style="text-decoration:none;color:inherit">FatedFortress</a>
           <span class="ff-brand__badge">MVP</span>
         </div>
         <nav class="ff-topbar__user" style="display:flex;gap:16px;align-items:center">
@@ -86,7 +88,6 @@ function setActiveNav(path: string) {
     const isActive = path === route || (route !== "/" && path.startsWith(route));
     if (el.tagName === "A") {
       (el as HTMLAnchorElement).setAttribute("aria-current", isActive ? "page" : "");
-      // topbar inline links
       if (el.classList.contains("ff-nav-link")) {
         (el as HTMLElement).style.borderBottomColor = isActive ? "var(--ff-ink)" : "transparent";
         (el as HTMLElement).style.color = isActive ? "var(--ff-ink)" : "var(--ff-muted)";
@@ -138,6 +139,13 @@ async function route(path: string) {
   if (!container) return;
   container.innerHTML = "";
 
+  // Public landing page — no shell, no auth
+  if (path === "/") {
+    const mod = await import("./pages/landing.js");
+    currentCleanup = await mod.mountLanding(container);
+    return;
+  }
+
   // Static routes
   const routePath = "/" + path.split("/")[1];
   const routeInit = routes[routePath];
@@ -171,15 +179,23 @@ async function route(path: string) {
 
 // ── Auth guard + init ─────────────────────────────────────────────────────────
 
+// Routes that never require authentication
+const PUBLIC_ROUTES = new Set(["/", "/login"]);
+
 async function init() {
   const supabase = getSupabase();
   const { data: { session } } = await supabase.auth.getSession();
   const isLoggedIn = !!session?.user;
-  const redirectTo = getRedirectPath(isLoggedIn, window.location.pathname);
+  const currentPath = window.location.pathname;
+  const isPublic = PUBLIC_ROUTES.has(currentPath);
 
-  if (redirectTo) {
-    window.location.href = redirectTo;
-    return;
+  // Auth redirect — skip for public routes
+  if (!isPublic) {
+    const redirectTo = getRedirectPath(isLoggedIn, currentPath);
+    if (redirectTo) {
+      window.location.href = redirectTo;
+      return;
+    }
   }
 
   // Fetch role for nav filtering
@@ -193,22 +209,26 @@ async function init() {
     role = profile?.role ?? null;
   }
 
-  // Render shell (skip on /login — no nav needed)
-  const isAuthPage = window.location.pathname === "/login";
-  if (!isAuthPage) {
-    document.body.innerHTML = buildShell(role);
-  } else {
-    // Auth page: plain container
+  // Landing page: render a minimal wrapper (no shell nav)
+  if (currentPath === "/") {
+    let main = document.createElement("main");
+    main.id = "ff-main";
+    document.body.innerHTML = "";
+    document.body.appendChild(main);
+  } else if (currentPath === "/login") {
     let app = document.createElement("div");
     app.id = "ff-main";
     document.body.appendChild(app);
+  } else {
+    // Authenticated shell with nav
+    document.body.innerHTML = buildShell(role);
   }
 
   if (isLoggedIn && session.user) {
     notifChannel = subscribeToNotifications(session.user.id);
   }
 
-  await route(window.location.pathname);
+  await route(currentPath);
 
   window.addEventListener("popstate", () => route(window.location.pathname));
 
@@ -220,7 +240,13 @@ async function init() {
     if (href.startsWith("/")) {
       e.preventDefault();
       window.history.pushState({}, "", href);
-      route(href);
+      // Re-init shell if crossing auth boundary
+      const nextIsPublic = PUBLIC_ROUTES.has(href.split("?")[0]);
+      if (nextIsPublic !== isPublic) {
+        init();
+      } else {
+        route(href.split("?")[0]);
+      }
     }
   });
 }
