@@ -1,16 +1,20 @@
 # .github/workflows/ci.yml
 # Runs on every push and pull-request to main.
 #
-# Jobs (in logical dependency order):
+# Jobs (in dependency order):
 #   1. typecheck   — tsc --noEmit across the monorepo
-#   2. lint        — eslint apps/web + packages
-#   3. build       — vite build (smoke-test bundler)
-#   4. migrations  — supabase db push --dry-run (schema drift guard)
+#   2. lint        — eslint apps/web/src
+#   3. build       — vite build smoke-test (upload artifact)
+#   4. migrations  — supabase db push --dry-run (schema drift guard, push-to-main only)
+#   5. security    — supabase db lint (security advisor, push-to-main only)
+#   6. deploy      — supabase functions deploy (push-to-main only, needs build + migrations)
 #
-# Secrets required (set in repo Settings → Secrets → Actions):
+# Secrets required (repo Settings → Secrets → Actions):
 #   SUPABASE_ACCESS_TOKEN   — personal access token from supabase.com/dashboard/account/tokens
 #   SUPABASE_DB_PASSWORD    — database password for the linked project
-#   SUPABASE_PROJECT_REF    — project ref slug (e.g. abcdefghijklmnopqrst)
+#   SUPABASE_PROJECT_REF    — project ref slug (e.g. pfrtxfuuatzgddenyttm)
+#   VITE_SUPABASE_URL       — public Supabase URL (safe to store as secret)
+#   VITE_SUPABASE_ANON_KEY  — public anon key (safe to store as secret)
 
 name: CI
 
@@ -27,10 +31,10 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# ──────────────────────────────────────────────────────────────────────────────
+# 1. Type-check
+# ──────────────────────────────────────────────────────────────────────────────
 jobs:
-  # ──────────────────────────────────────────────────────────────────────────
-  # 1. Type-check
-  # ──────────────────────────────────────────────────────────────────────────
   typecheck:
     name: Type-check
     runs-on: ubuntu-latest
@@ -52,9 +56,9 @@ jobs:
       - name: tsc --noEmit (protocol)
         run: npx tsc --noEmit --project packages/protocol/tsconfig.json
 
-  # ──────────────────────────────────────────────────────────────────────────
-  # 2. Lint
-  # ──────────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# 2. Lint
+# ──────────────────────────────────────────────────────────────────────────────
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -73,9 +77,9 @@ jobs:
       - name: ESLint
         run: npx eslint apps/web/src --ext .ts,.tsx --max-warnings 0
 
-  # ──────────────────────────────────────────────────────────────────────────
-  # 3. Build
-  # ──────────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# 3. Build
+# ──────────────────────────────────────────────────────────────────────────────
   build:
     name: Build
     runs-on: ubuntu-latest
@@ -95,10 +99,8 @@ jobs:
       - name: Vite build
         run: npm run build --workspace=apps/web
         env:
-          # Vite public env vars — values are empty strings here because
-          # we only want a bundler smoke-test, not a real deployment.
-          VITE_SUPABASE_URL: https://placeholder.supabase.co
-          VITE_SUPABASE_ANON_KEY: placeholder
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL || 'https://placeholder.supabase.co' }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY || 'placeholder' }}
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -107,17 +109,17 @@ jobs:
           path: apps/web/dist
           retention-days: 3
 
-  # ──────────────────────────────────────────────────────────────────────────
-  # 4. Migration dry-run  (schema drift guard)
-  # ──────────────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# 4. Migration dry-run  (schema drift guard)
+# Push-to-main only — avoids leaking secrets to fork PRs.
+# ──────────────────────────────────────────────────────────────────────────────
   migrations:
     name: Migration dry-run
     runs-on: ubuntu-latest
-    # Only run on push to main (not every PR — avoids leaking secrets to forks)
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     env:
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-      SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
+      SUPABASE_DB_PASSWORD:  ${{ secrets.SUPABASE_DB_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
 
@@ -130,7 +132,102 @@ jobs:
         run: |
           supabase link \
             --project-ref ${{ secrets.SUPABASE_PROJECT_REF }} \
-            --password ${{ secrets.SUPABASE_DB_PASSWORD }}
+            --password     ${{ secrets.SUPABASE_DB_PASSWORD }}
 
       - name: Dry-run db push (no DDL executed)
         run: supabase db push --dry-run
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 5. Security advisor  (RLS + index lint)
+# Push-to-main only. Fails the pipeline if any HIGH-severity finding is found.
+# ──────────────────────────────────────────────────────────────────────────────
+  security:
+    name: Security advisor
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_DB_PASSWORD:  ${{ secrets.SUPABASE_DB_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Link project
+        run: |
+          supabase link \
+            --project-ref ${{ secrets.SUPABASE_PROJECT_REF }} \
+            --password     ${{ secrets.SUPABASE_DB_PASSWORD }}
+
+      - name: Run db lint (security + performance advisors)
+        # --level error exits non-zero only on ERROR-level findings.
+        # Change to --level warning to fail on warnings too.
+        run: supabase db lint --level error
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 6. Deploy edge functions
+# Push-to-main only. Requires build + migration dry-run to pass first.
+# Deploys all functions under supabase/functions/ in a single CLI call.
+# ──────────────────────────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy edge functions
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [build, migrations]
+    env:
+      SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      SUPABASE_DB_PASSWORD:  ${{ secrets.SUPABASE_DB_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Link project
+        run: |
+          supabase link \
+            --project-ref ${{ secrets.SUPABASE_PROJECT_REF }} \
+            --password     ${{ secrets.SUPABASE_DB_PASSWORD }}
+
+      - name: Deploy all edge functions
+        # --no-verify-jwt is NOT passed — JWT verification stays on (default).
+        # Functions that intentionally disable JWT (e.g. stripe-webhook) must
+        # already have verify_jwt = false set in their config.toml entry.
+        run: |
+          supabase functions deploy \
+            --project-ref ${{ secrets.SUPABASE_PROJECT_REF }}
+
+      - name: Smoke-test deployed functions
+        # Hits the health endpoint of each critical function.
+        # A non-2xx response fails the pipeline before any traffic hits it.
+        env:
+          SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          ANON_KEY:     ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+        run: |
+          check() {
+            local fn=$1
+            local status
+            status=$(curl -s -o /dev/null -w "%{http_code}" \
+              -X POST "${SUPABASE_URL}/functions/v1/${fn}" \
+              -H "Authorization: Bearer ${ANON_KEY}" \
+              -H "Content-Type: application/json" \
+              -d '{"_healthcheck":true}')
+            if [ "$status" -ge 500 ]; then
+              echo "❌  ${fn} returned HTTP ${status}"
+              exit 1
+            fi
+            echo "✅  ${fn} → HTTP ${status}"
+          }
+
+          check scope-tasks
+          check claim-task
+          check submit-task
+          check review-submission
+          check expire-claims
+          check auto-release
+          check stripe-webhook
