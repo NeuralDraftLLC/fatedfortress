@@ -14,6 +14,7 @@ graph TD
     classDef zone     fill:#0d1b2a,stroke:#ef476f,stroke-width:2px,color:#ef476f
     classDef ext      fill:#000000,stroke:#737373,stroke-width:1px,color:#737373
     classDef state    fill:#1a1a2e,stroke:#a78bfa,stroke-width:1px,color:#a78bfa
+    classDef legacy   fill:#111111,stroke:#525252,stroke-width:1px,color:#525252,stroke-dasharray:4 4
 
     %% ============================================================
     %% ZONE 1: BROWSER MAIN THREAD
@@ -24,7 +25,7 @@ graph TD
             create_p["/create<br/>Brief to SCOPE to Edit to Publish<br/>pages/create.ts"]:::page
             tasks_p["/tasks<br/>Marketplace - Claim - Skill Gate<br/>pages/tasks.ts"]:::page
             submit_p["/submit/:taskId<br/>Upload to Deep-Spec Verify<br/>pages/submit.ts"]:::page
-            reviews_p["/reviews<br/>Realtime Queue - Y.js Collab<br/>pages/reviews.ts"]:::page
+            reviews_p["/reviews<br/>Realtime Queue - Three-Column Crucible<br/>pages/reviews.ts"]:::page
             project_p["/project/:id<br/>Wallet - Audit Feed<br/>pages/project.ts"]:::page
             settings_p["/settings<br/>Stripe Connect - GitHub<br/>pages/settings.ts"]:::page
         end
@@ -32,7 +33,7 @@ graph TD
         subgraph Components["UI Components"]
             PV_Wallet["WalletGauge<br/>Deposited / Locked / Released"]:::comp
             RV_Diff["SideBySide<br/>AI Brief vs Specialist Asset"]:::comp
-            RV_Decide["DecisionModal<br/>Structured Feedback"]:::comp
+            RV_Decide["DecisionPanel<br/>Structured Feedback"]:::comp
         end
 
         subgraph Handlers["Client Handlers"]
@@ -78,8 +79,8 @@ graph TD
         end
 
         subgraph EdgeFunctions["Edge Functions"]
-            claim_task["claim-task<br/>Active claim path from tasks.ts"]:::edgefn
-            create_pi["create-payment-intent<br/>Stripe PI manual capture<br/>separate / non-primary path"]:::edgefn
+            claim_task["claim-task<br/>Active claim path — invoked from tasks.ts<br/>Locks wallet + updates task state"]:::edgefn
+            create_pi["create-payment-intent<br/>Stripe PI manual capture<br/>LEGACY — not in active claim path"]:::legacy
             stripe_wh["stripe-webhook<br/>PI succeeded/failed<br/>transfer.created - account.updated"]:::edgefn
             asset_scan["asset-scanner<br/>9-sub-pass layered engine<br/>deterministic to heuristic to gap"]:::edgefn
             verify_fn["verify-submission<br/>Deep-Spec Gate<br/>GLB / WAV / MP3 / PNG / JPEG"]:::edgefn
@@ -96,7 +97,7 @@ graph TD
         end
 
         subgraph Storage["Storage - Supabase Storage"]
-            SB_STORAGE[("submissions/<br/>Deliverable Assets")]:::db
+            SB_STORAGE[("submissions/<br/>Deliverable Assets — Supabase Storage")]:::db
         end
     end
 
@@ -140,12 +141,12 @@ graph TD
     asset_scan --> OpenAI
     asset_scan -->|"asset_scanner_write RPC"| tasks
 
-    %% Claim - Active path
-    tasks_p -->|"Claim Task skill gate"| claim_task
+    %% Claim — Active path (tasks.ts → claim-task edge function)
+    tasks_p -->|"Invoke claim-task edge fn"| claim_task
     claim_task -->|"Update claim state"| tasks
     claim_task -->|"Lock funds / claim RPC"| wallet
 
-    %% Optional PaymentIntent path
+    %% create-payment-intent — standalone legacy node (not in active claim path)
     create_pi -->|"PI manual capture"| Stripe
     create_pi -->|"Store payment_intent_id"| tasks
 
@@ -157,7 +158,7 @@ graph TD
     verify_fn -->|"Reads spec_constraints"| tasks
     verify_fn -.->|"auto_reject on mismatch"| decisions
 
-    %% Review - live collab
+    %% Review — live collab
     reviews_p -->|"Supabase Realtime"| tasks
     tasks -->|"Realtime push"| reviews_p
     reviews_p -->|"Y.js CRDT"| RelayDO

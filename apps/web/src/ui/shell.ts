@@ -1,17 +1,20 @@
 type NavItem = { href: string; label: string };
 
 const NAV: NavItem[] = [
-  { href: "/create",   label: "FORGE" },
-  { href: "/tasks",    label: "ARMORY" },
-  { href: "/reviews",  label: "INTEL" },
+  { href: "/create",   label: "CREATE" },
+  { href: "/tasks",    label: "TASKS" },
+  { href: "/reviews",  label: "REVIEWS" },
   { href: "/project",  label: "PROJECT" },
   { href: "/profile",  label: "PROFILE" },
   { href: "/settings", label: "SETTINGS" },
 ];
 
 function isActive(href: string, path: string): boolean {
-  if (href === "/project") return path.startsWith("/project");
-  return path === href;
+  // Support both direct path argument and hash-based SPA routing
+  const hashRoute = window.location.hash.replace(/^#/, "") || "/";
+  const effectivePath = path !== window.location.pathname ? path : hashRoute;
+  if (href === "/project") return effectivePath.startsWith("/project");
+  return effectivePath === href || path === href;
 }
 
 export function renderShell(opts: {
@@ -31,15 +34,15 @@ export function renderShell(opts: {
       <header class="ff-topbar">
         <div class="ff-brand">
           <div class="ff-brand__name">FATED_FORTRESS</div>
-          <div class="ff-brand__badge">PRODUCTION_OS</div>
+          <div class="ff-brand__badge">OP_PLATFORM</div>
         </div>
-        <div class="ff-brand__badge">SECTOR_01-A · UPTIME_99.9%</div>
+        <div class="ff-brand__badge">&#9679;&nbsp;CONNECTED&nbsp;&nbsp;V.2.04_STABLE</div>
       </header>
 
       <div class="ff-shell__body">
         <aside class="ff-sidenav">
           <div class="ff-sidenav__header">
-            <div class="ff-sidenav__title">FORTRESS_OS</div>
+            <div class="ff-sidenav__title">FATED_FORTRESS</div>
             <div class="ff-sidenav__ver">V.2.04_STABLE</div>
           </div>
           <nav class="ff-nav">
@@ -53,7 +56,14 @@ export function renderShell(opts: {
           ${opts.contentHtml}
         </main>
       </div>
+
+      <footer class="ff-footer">
+        <span>FATED_FORTRESS &copy; ${new Date().getFullYear()}</span>
+        <div class="ff-footer__meta">
+          <span class="ff-footer__status">&#9679;&nbsp;CONNECTED</span>
+          <span>V.2.04_STABLE</span>
+        </div>
+      </footer>
     </div>
   `;
 }
-

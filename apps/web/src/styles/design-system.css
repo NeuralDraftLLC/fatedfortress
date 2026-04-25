@@ -19,6 +19,8 @@
   --ff-ink: #e5e2e1;
   /* --ff-muted: secondary text on dark surfaces */
   --ff-muted: rgba(190, 200, 206, 0.7);
+  /* --ff-muted-bg: muted surface background — used by .ff-badge--neutral */
+  --ff-muted-bg: rgba(137, 146, 152, 0.1);
   /* --ff-faint: subtle dark surface (cards, hover states) */
   --ff-faint: #1c1b1b;
 
