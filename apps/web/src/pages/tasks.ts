@@ -16,6 +16,13 @@
  *
  * Guest mode: renders public tasks read-only. Claim button redirects to
  *   /login?return=/tasks — no auth-required calls are made.
+ *
+ * Changes (roadmap 1.3 + 1.4 + claim gate 2.1):
+ *   - computePayouts() helper: shows "Net to you: $X (after 10% fee)" on every card
+ *   - showEscrowModal(): one-time educational modal on first claim attempt
+ *   - Claim gate: blocks claim if profile.approved_task_count === 0 AND
+ *     profile.github_connected !== true (Phase 2 wiring — backend RPC enforces,
+ *     frontend shows the right error message per error code)
  */
 
 import { requireAuth } from "../auth/middleware.js";
@@ -25,6 +32,67 @@ import { getSupabase } from "../auth/index.js";
 import { renderShell } from "../ui/shell.js";
 import { Card, Badge, Btn, Spinner, EmptyState, escHtml } from "../ui/components.js";
 import type { Task, TaskStatus } from "@fatedfortress/protocol";
+
+// ─── Payout math (roadmap 1.3) ──────────────────────────────────────────────
+
+const PLATFORM_FEE_BPS = 1000; // 10%
+
+function computePayouts(rawMax: number): { raw: number; fee: number; net: number } {
+  const fee = Math.round(rawMax * PLATFORM_FEE_BPS) / 10_000;
+  const net = parseFloat((rawMax - fee).toFixed(2));
+  return { raw: rawMax, fee: parseFloat(fee.toFixed(2)), net };
+}
+
+// ─── Escrow modal (roadmap 1.4) ──────────────────────────────────────────────
+// In-memory flag — no localStorage (sandboxed iframes block it).
+// Persisted on profile via claim-task edge fn on first successful claim.
+let _escrowModalSeen = false;
+
+function showEscrowModal(): Promise<void> {
+  return new Promise((resolve) => {
+    if (_escrowModalSeen) { resolve(); return; }
+
+    const overlay = document.createElement("div");
+    overlay.style.cssText = `
+      position:fixed;inset:0;z-index:9999;
+      background:rgba(0,0,0,0.72);
+      display:flex;align-items:center;justify-content:center;
+      padding:24px;
+    `;
+
+    overlay.innerHTML = `
+      <div style="
+        background:var(--ff-paper);color:var(--ff-ink);
+        max-width:440px;width:100%;padding:28px;
+        border:1px solid var(--ff-ink);font-family:var(--ff-font-mono);
+      ">
+        <div style="font-weight:900;font-size:14px;letter-spacing:.12em;margin-bottom:16px;text-transform:uppercase;">
+          How payments work on FatedFortress
+        </div>
+        <ul style="list-style:none;padding:0;margin:0 0 20px;display:flex;flex-direction:column;gap:10px;font-size:12px;line-height:1.6;">
+          <li>⚡ When you claim a task, the host's card gets a <strong>hotel-style hold</strong> — it is <em>not</em> charged yet.</li>
+          <li>🔬 When your file passes automatic spec verification, Stripe <strong>captures the funds</strong> and you get paid.</li>
+          <li>🔒 If the claim expires or work fails checks, the hold is released. You are never charged.</li>
+          <li>💸 Your <strong>net payout</strong> = task amount − 10% platform fee. This is shown on every task card.</li>
+        </ul>
+        <button id="escrow-modal-confirm" class="ff-btn" style="width:100%;font-size:13px;">
+          GOT_IT — LET_ME_CLAIM
+        </button>
+        <div style="font-size:10px;color:var(--ff-muted);margin-top:8px;text-align:center;">
+          You'll only see this once.
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(overlay);
+
+    overlay.querySelector("#escrow-modal-confirm")?.addEventListener("click", () => {
+      _escrowModalSeen = true;
+      document.body.removeChild(overlay);
+      resolve();
+    });
+  });
+}
 
 // ─── Task card renderer (shared) ──────────────────────────────────────────
 
@@ -44,6 +112,24 @@ function renderTaskCard(
   const ambiguityScore = task.ambiguity_score ?? null;
   const status = (task.status as string).toUpperCase();
 
+  // Payout display (roadmap 1.3)
+  const { net } = computePayouts(task.payout_max);
+  const payoutBadge = `$${task.payout_min}–$${task.payout_max}`;
+  const netPayoutLine = `
+    <div style="
+      font-family:var(--ff-font-mono);font-size:11px;
+      color:var(--ff-ink);margin-top:4px;
+      display:flex;align-items:center;gap:6px;
+    ">
+      <span style="font-weight:700;">NET_TO_YOU: $${net}</span>
+      <span style="
+        color:var(--ff-muted);font-size:10px;cursor:help;border-bottom:1px dashed var(--ff-muted);
+      " title="FatedFortress takes a 10% platform fee when a task is approved. This is what you actually receive.">
+        after 10% fee ⓘ
+      </span>
+    </div>
+  `;
+
   const statusBadge = status === "OPEN"
     ? Badge({ label: "OPEN", variant: "gold" })
     : status === "CLAIMED"
@@ -54,12 +140,10 @@ function renderTaskCard(
     ? (ambiguityScore > 0.7 ? "HIGH_AMBIGUITY" : ambiguityScore > 0.4 ? "MEDIUM_AMBIGUITY" : "LOW_AMBIGUITY")
     : "";
 
-  const payoutBadge = `$${task.payout_min}–$${task.payout_max}`;
   const etaLabel = task.estimated_minutes ? `~${task.estimated_minutes}min` : "?";
 
   let actionBtn = "";
   if (!userId) {
-    // Guest: always show a login-to-claim CTA for open tasks
     if (isOpen) {
       actionBtn = `<a href="/login?return=/tasks" class="ff-btn ff-btn--primary ff-btn--sm" style="text-decoration:none;display:inline-block">SIGN_IN_TO_CLAIM</a>`;
     } else {
@@ -97,12 +181,13 @@ function renderTaskCard(
       <div class="ff-subtitle" style="margin-bottom:12px; font-size:13px;">
         ${escHtml(((task.description as string) ?? "").slice(0, 220))}${(task.description as string)?.length > 220 ? "..." : ""}
       </div>
-      <div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px; font-family:var(--ff-font-mono); font-size:11px;">
+      <div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:8px; font-family:var(--ff-font-mono); font-size:11px;">
         ${Badge({ label: `PAYOUT ${payoutBadge}`, variant: "neutral" })}
         ${Badge({ label: `ETA ${etaLabel}`, variant: "neutral" })}
         ${ambiguityLabel ? Badge({ label: ambiguityLabel, variant: ambiguityScore > 0.4 ? "warning" : "success" }) : ""}
       </div>
-      <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap">
+      ${netPayoutLine}
+      <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:12px">
         ${userId
           ? `<div data-task-id="${task.id}" data-action="claim">${actionBtn}</div>`
           : actionBtn
@@ -137,7 +222,6 @@ export async function mountTasksGuest(container: HTMLElement): Promise<() => voi
 
   try {
     const openTasks = await getOpenTasks();
-    // Show only public tasks to guests
     const publicTasks = openTasks.filter(t => (t as Record<string, unknown>).task_access === "public" || t.status === "open");
 
     if (publicTasks.length === 0) {
@@ -190,6 +274,14 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
             SIG_ID: ${userId.slice(0, 8).toUpperCase()}<br/>
             TRUST_RATING: derived from profiles.review_reliability<br/>
             ACCESS: public OR accepted invitation
+          </div>
+          <div class="ff-panel" style="margin-top:12px">
+            <div class="ff-kpi__label">PAYOUT_INFO</div>
+            <div class="ff-subtitle" style="margin-top:10px; font-family:var(--ff-font-mono); font-size:11px; line-height:1.6;">
+              Platform fee: <strong>10%</strong><br/>
+              Shown on every card as "NET_TO_YOU"<br/>
+              Funds held via Stripe hotel-hold until approval.
+            </div>
           </div>
           <div class="ff-panel" style="margin-top:12px">
             <div class="ff-kpi__label">ACTIVITY_FEED</div>
@@ -279,6 +371,10 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
   async function handleAction(taskId: string, action: string): Promise<void> {
     if (action !== "claim") return;
 
+    // ── Escrow modal gate (roadmap 1.4) ──────────────────────────────────
+    // Show once if user has never seen it. Modal resolves before claim proceeds.
+    await showEscrowModal();
+
     const urlParams = new URLSearchParams(window.location.search);
     const invitationToken = urlParams.get("invite");
 
@@ -337,6 +433,28 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
           case "invite_only":
             alert(payload.message ?? "This task requires an invitation.");
             break;
+          // ── Claim gate errors (roadmap 2.1–2.3) ──────────────────────
+          case "reputation_gate":
+            alert(
+              payload.message ??
+              "You need at least 1 approved task before claiming tasks above this threshold. " +
+              "Start with a smaller task to build your reputation."
+            );
+            break;
+          case "concurrent_limit":
+            alert(
+              payload.message ??
+              "You've reached your concurrent claim limit. " +
+              "Complete or release an existing claim before taking on more work."
+            );
+            break;
+          case "github_required":
+            alert(
+              "You need to link your GitHub account before claiming your first task. " +
+              "Head to Settings → GitHub to connect."
+            );
+            window.location.href = "/settings?section=github";
+            return;
           default:
             alert(payload?.message ?? "Failed to claim task.");
             break;
