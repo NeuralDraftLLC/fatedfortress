@@ -27,6 +27,8 @@ import { scrubEvent } from "@fatedfortress/sentry-utils";
 import { getSupabase } from "./auth/index.js";
 import { getRedirectPath } from "./auth/middleware.js";
 import { subscribeToNotifications, unsubscribeFromNotifications } from "./net/notifications.js";
+import { setProfileDisplayName } from "./state/identity.js";
+import { mountShellNotifications } from "./ui/shell.js";
 import "./styles/design-system.css";
 import "./styles/ff.css";
 import "./styles/landing.css";
@@ -68,6 +70,21 @@ function buildShell(role: string | null): string {
                       font-weight:700;padding:4px 0;border-bottom:2px solid transparent"
              >${l.label}</a>`
           ).join("")}
+          <!-- Notification bell: wired by mountShellNotifications() after render -->
+          <button id="ff-notif-bell"
+                  aria-label="Notifications"
+                  style="background:none;border:none;cursor:pointer;position:relative;
+                         font-family:var(--ff-font-mono);font-size:15px;color:var(--ff-muted);
+                         padding:0 2px;line-height:1;display:flex;align-items:center">
+            &#128276;
+            <span id="ff-notif-badge"
+                  style="display:none;position:absolute;top:-5px;right:-7px;
+                         background:var(--ff-error,#e53935);color:#fff;
+                         font-size:9px;font-weight:900;font-family:var(--ff-font-mono);
+                         border-radius:99px;padding:1px 4px;min-width:14px;
+                         text-align:center;line-height:14px"
+            >0</span>
+          </button>
         </nav>
       </header>
       <div class="ff-shell__body">
@@ -106,21 +123,20 @@ function getMain(): HTMLElement {
   return document.getElementById("ff-main") as HTMLElement;
 }
 
-// ── ?next= helpers ──────────────────────────────────────────────────────────
+// ── ?next= helpers ─────────────────────────────────────────────────────────
 
 /** Pop the ?next= param if we just landed from a requireAuth() redirect. */
 function consumeNextParam(): string | null {
   const params = new URLSearchParams(window.location.search);
   const next   = params.get("next");
   if (!next) return null;
-  // Strip ?next= from the address bar without a history entry
   params.delete("next");
   const clean = window.location.pathname + (params.toString() ? "?" + params.toString() : "");
   window.history.replaceState({}, "", clean);
   return decodeURIComponent(next);
 }
 
-// ── Route registry ────────────────────────────────────────────────────────────
+// ── Route registry ──────────────────────────────────────────────────────────
 
 type PageLoader       = (container: HTMLElement) => Promise<() => void>;
 type RouteInitializer = () => Promise<() => PageLoader>;
@@ -142,6 +158,18 @@ type PageCleanup = (() => void) | void | Promise<() => void>;
 
 let currentCleanup: PageCleanup = null;
 let notifChannel: ReturnType<typeof subscribeToNotifications> | null = null;
+
+// Teardown for the shell-level notification bell badge.
+// Stored separately from page-level currentCleanup so it survives SPA nav
+// but is cleaned up when the shell itself is torn down (re-init / sign-out).
+let shellNotifTeardown: (() => void) | null = null;
+
+function teardownShellNotif(): void {
+  if (shellNotifTeardown) {
+    shellNotifTeardown();
+    shellNotifTeardown = null;
+  }
+}
 
 async function route(path: string, isLoggedIn: boolean) {
   // Teardown previous page
@@ -223,13 +251,16 @@ async function route(path: string, isLoggedIn: boolean) {
     </div>`;
 }
 
-// ── Auth guard + init ───────────────────────────────────────────────────────────
+// ── Auth guard + init ───────────────────────────────────────────────────────
 
 // Routes that never require authentication
-// /tasks is public for browsing; the Claim action inside tasks.ts handles its own auth.
 const PUBLIC_ROUTES = new Set(["/", "/login", "/tasks", "/auth/callback", "/terms", "/privacy"]);
 
 async function init() {
+  // Tear down any existing shell-level notification badge listeners before
+  // re-rendering the shell (sign-out, session refresh, etc.)
+  teardownShellNotif();
+
   const supabase = getSupabase();
   const { data: { session } } = await supabase.auth.getSession();
   const isLoggedIn  = !!session?.user;
@@ -238,13 +269,12 @@ async function init() {
     currentPath.startsWith("/tasks") ||
     currentPath.startsWith("/auth/");
 
-  // ── ?next= redirect: if we just returned from a requireAuth() bounce,
-  // and the user is now logged in, honour the saved destination.
+  // ── ?next= redirect ──────────────────────────────────────────────────────
   if (isLoggedIn && !isPublic) {
     const next = consumeNextParam();
     if (next && next !== currentPath) {
       window.history.replaceState({}, "", next);
-      return init(); // re-init with the resolved path
+      return init();
     }
   }
 
@@ -257,18 +287,29 @@ async function init() {
     }
   }
 
-  // Fetch role for nav filtering
+  // ── Fetch profile: role + display_name ────────────────────────────────────
   let role: string | null = null;
+
   if (isLoggedIn && session.user) {
     const { data: profile } = await supabase
       .from("profiles")
-      .select("role")
+      .select("role, display_name")
       .eq("id", session.user.id)
       .single();
+
     role = profile?.role ?? null;
+
+    // Wire display name into identity state so all CRDT / peer-presence
+    // surfaces show the correct human label instead of 'Anonymous'.
+    // Pass null (not empty string) when missing so getMyDisplayName()
+    // falls back to its 'Anonymous' default rather than showing a blank.
+    setProfileDisplayName(profile?.display_name ?? null);
+  } else {
+    // Signed out — reset to anonymous
+    setProfileDisplayName(null);
   }
 
-  // Landing page: render a minimal wrapper (no shell nav)
+  // ── Render shell ───────────────────────────────────────────────────────────
   if (currentPath === "/") {
     const main = document.createElement("main");
     main.id = "ff-main";
@@ -276,7 +317,6 @@ async function init() {
     document.body.appendChild(main);
 
   } else if (currentPath === "/login" || currentPath.startsWith("/auth/")) {
-    // Auth flow pages — minimal, no nav
     const app = document.createElement("div");
     app.id    = "ff-main";
     document.body.innerHTML = "";
@@ -301,12 +341,17 @@ async function init() {
       <main class="ff-main ff-main--guest" id="ff-main"></main>
     `;
   } else {
-    // Authenticated shell with role-filtered nav
+    // Authenticated shell with role-filtered nav + notification bell
     document.body.innerHTML = buildShell(role);
+
+    // Wire notification badge NOW — bell elements exist in DOM
+    // Store teardown so we can clean up on re-init (sign-out, session refresh)
+    shellNotifTeardown = mountShellNotifications(session!.user.id);
   }
 
-  if (isLoggedIn && session.user) {
-    notifChannel = subscribeToNotifications(session.user.id);
+  // ── Realtime notifications channel ─────────────────────────────────────
+  if (isLoggedIn && session!.user) {
+    notifChannel = subscribeToNotifications(session!.user.id);
   }
 
   await route(currentPath, isLoggedIn);
@@ -325,8 +370,6 @@ async function init() {
         nextPath.startsWith("/tasks") ||
         nextPath.startsWith("/auth/");
       window.history.pushState({}, "", href);
-      // Cross-boundary nav (guest → authed or vice versa) — full re-init
-      // so the shell renders correctly for the new auth state.
       if (nextIsPublic !== isPublic) {
         init();
       } else {
@@ -335,6 +378,15 @@ async function init() {
     }
   });
 }
+
+// ── Auth state change ──────────────────────────────────────────────────────
+// Re-run init on sign-in / sign-out so display name, nav role filter,
+// and notification badge all update without requiring a hard reload.
+getSupabase().auth.onAuthStateChange((event) => {
+  if (event === "SIGNED_IN" || event === "SIGNED_OUT") {
+    init();
+  }
+});
 
 if (import.meta.env.PROD && "serviceWorker" in navigator) {
   navigator.serviceWorker.register("/sw.js").catch(console.error);
