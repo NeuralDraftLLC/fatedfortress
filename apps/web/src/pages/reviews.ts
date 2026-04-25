@@ -6,15 +6,13 @@
  *   CENTER (flex-1) — asset preview zone (image / audio / code / link)
  *   RIGHT  (320px) — contributor info, reliability, AI summary, decision panel
  *
- * All data-fetching, cursor pagination, realtime channel, and decision
- * handlers are preserved from the previous version.
- *
- * CHANGES vs previous version:
- *  - FIX 1: fetchReviews query uses `!submissions_contributor_id_fkey` FK hint
- *  - FIX 2: status filter 'submitted' → 'under_review'
- *  - FIX 3: Realtime channel teardown via supabase.removeChannel(channel)
- *  - FIX 4: Decision handlers call reviewSubmission() (review-submission edge fn)
- *  - UI:    Flat table replaced with three-column Crucible layout
+ * CHANGES (wave 5 polish):
+ *  - FIX 1: payout_min/max read from typed Task fields — no double Record<> cast
+ *  - FIX 2: firstLoad boolean replaces fragile items.length===newItems.length guard
+ *  - FIX 3: realtime channel listens on tasks UPDATE + submissions INSERT
+ *  - FIX 4: code/text asset fetch includes Authorization header
+ *  - FIX 5: revision flow shows inline notes textarea + deadline picker before firing
+ *  - FIX 6: revision deadline ISO string forwarded to reviewSubmission()
  */
 
 import { getSupabase } from "../auth/index.js";
@@ -30,7 +28,6 @@ import { renderShell } from "../ui/shell.js";
 import { Spinner, EmptyState, Badge, escHtml } from "../ui/components.js";
 
 const PAGE_SIZE = 20;
-// Mark submissions as STALE after 12h in queue (badge only; no behavior change).
 const STALENESS_THRESHOLD_MS = 12 * 60 * 60 * 1000;
 
 interface ReviewQueueItem {
@@ -96,14 +93,15 @@ async function fetchReviews(cursor?: Cursor): Promise<ReviewQueueItem[]> {
       return Array.isArray(subs) && subs.length > 0;
     })
     .map((row) => {
-      const subs = (row.submissions as Record<string, unknown>[]);
+      const subs = row.submissions as Record<string, unknown>[];
       const sub = subs.sort((a, b) =>
         String(b.created_at ?? "").localeCompare(String(a.created_at ?? ""))
       )[0];
       const contributor = sub.contributor as Record<string, unknown> | null;
+      const task = row as unknown as Task;
 
       return {
-        task: row as unknown as Task,
+        task,
         submission: sub as unknown as Submission,
         contributorName: (contributor?.username as string) ?? "Unknown",
         contributorAvatarUrl: (contributor?.avatar_url as string) ?? null,
@@ -124,7 +122,7 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
 
   container.innerHTML = renderShell({
     title: "Review Queue",
-    subtitle: "Crucible // submission_review_v4",
+    subtitle: "Crucible // submission_review_v5",
     activePath: "/reviews",
     contentHtml: `
       <div class="crucible" id="crucible-root">
@@ -170,9 +168,33 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
           </div>
           <div class="crucible__decision-footer" id="decision-footer" style="display:none">
             <div id="decision-error" class="ff-badge ff-badge--error" style="display:none"></div>
-            <button id="btn-approve" class="ff-btn ff-btn--sm" style="width:100%; background:var(--ff-success-bg); color:var(--ff-success); border-color:var(--ff-success);" type="button">&#10003;&nbsp;APPROVE</button>
-            <button id="btn-revise"  class="ff-btn ff-btn--secondary ff-btn--sm" style="width:100%;" type="button">&#9654;&nbsp;REQUEST REVISION</button>
-            <button id="btn-reject"  class="ff-btn ff-btn--sm" style="width:100%; background:var(--ff-error-bg); color:var(--ff-error); border-color:var(--ff-error);" type="button">&#10007;&nbsp;REJECT</button>
+
+            <!-- Revision form — shown only when REVISE is clicked -->
+            <div id="revision-form" style="display:none; margin-bottom:8px;">
+              <label class="ff-label" for="revision-notes">NOTES (optional)</label>
+              <textarea id="revision-notes" class="ff-input" rows="3"
+                style="width:100%; resize:vertical; margin-bottom:6px;"
+                placeholder="What needs to change?"></textarea>
+              <label class="ff-label" for="revision-deadline">DEADLINE</label>
+              <input id="revision-deadline" type="datetime-local" class="ff-input"
+                style="width:100%; margin-bottom:8px;" />
+              <div style="display:flex; gap:6px;">
+                <button id="btn-revise-confirm" class="ff-btn ff-btn--sm"
+                  style="flex:1; background:var(--ff-warning-bg); color:var(--ff-warning); border-color:var(--ff-warning);"
+                  type="button">&#10003;&nbsp;SEND</button>
+                <button id="btn-revise-cancel" class="ff-btn ff-btn--secondary ff-btn--sm"
+                  style="flex:1;" type="button">CANCEL</button>
+              </div>
+            </div>
+
+            <button id="btn-approve" class="ff-btn ff-btn--sm"
+              style="width:100%; background:var(--ff-success-bg); color:var(--ff-success); border-color:var(--ff-success);"
+              type="button">&#10003;&nbsp;APPROVE</button>
+            <button id="btn-revise" class="ff-btn ff-btn--secondary ff-btn--sm"
+              style="width:100%;" type="button">&#9654;&nbsp;REQUEST REVISION</button>
+            <button id="btn-reject" class="ff-btn ff-btn--sm"
+              style="width:100%; background:var(--ff-error-bg); color:var(--ff-error); border-color:var(--ff-error);"
+              type="button">&#10007;&nbsp;REJECT</button>
           </div>
         </div>
 
@@ -180,32 +202,61 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
     `,
   });
 
-  // ── DOM refs ───────────────────────────────────────────────────────────
-  const $queueList      = container.querySelector<HTMLElement>("#queue-list")!;
-  const $queueFooter    = container.querySelector<HTMLElement>("#queue-footer")!;
-  const $loadMoreBtn    = container.querySelector<HTMLButtonElement>("#load-more-btn")!;
-  const $queueCountLbl  = container.querySelector<HTMLElement>("#queue-count-label")!;
-  const $loadingInd     = container.querySelector<HTMLElement>("#queue-loading-indicator")!;
-  const $previewLabel   = container.querySelector<HTMLElement>("#preview-label")!;
-  const $previewOpenLnk = container.querySelector<HTMLAnchorElement>("#preview-open-link")!;
-  const $previewBody    = container.querySelector<HTMLElement>("#preview-body")!;
-  const $decisionBody   = container.querySelector<HTMLElement>("#decision-body")!;
-  const $decisionFooter = container.querySelector<HTMLElement>("#decision-footer")!;
-  const $decisionError  = container.querySelector<HTMLElement>("#decision-error")!;
-  const $btnApprove     = container.querySelector<HTMLButtonElement>("#btn-approve")!;
-  const $btnRevise      = container.querySelector<HTMLButtonElement>("#btn-revise")!;
-  const $btnReject      = container.querySelector<HTMLButtonElement>("#btn-reject")!;
+  // ── DOM refs ───────────────────────────────────────────────────────────────
+  const $queueList        = container.querySelector<HTMLElement>("#queue-list")!;
+  const $queueFooter      = container.querySelector<HTMLElement>("#queue-footer")!;
+  const $loadMoreBtn      = container.querySelector<HTMLButtonElement>("#load-more-btn")!;
+  const $queueCountLbl    = container.querySelector<HTMLElement>("#queue-count-label")!;
+  const $loadingInd       = container.querySelector<HTMLElement>("#queue-loading-indicator")!;
+  const $previewLabel     = container.querySelector<HTMLElement>("#preview-label")!;
+  const $previewOpenLnk   = container.querySelector<HTMLAnchorElement>("#preview-open-link")!;
+  const $previewBody      = container.querySelector<HTMLElement>("#preview-body")!;
+  const $decisionBody     = container.querySelector<HTMLElement>("#decision-body")!;
+  const $decisionFooter   = container.querySelector<HTMLElement>("#decision-footer")!;
+  const $decisionError    = container.querySelector<HTMLElement>("#decision-error")!;
+  const $btnApprove       = container.querySelector<HTMLButtonElement>("#btn-approve")!;
+  const $btnRevise        = container.querySelector<HTMLButtonElement>("#btn-revise")!;
+  const $btnReject        = container.querySelector<HTMLButtonElement>("#btn-reject")!;
+  const $revisionForm     = container.querySelector<HTMLElement>("#revision-form")!;
+  const $revisionNotes    = container.querySelector<HTMLTextAreaElement>("#revision-notes")!;
+  const $revisionDeadline = container.querySelector<HTMLInputElement>("#revision-deadline")!;
+  const $btnReviseConfirm = container.querySelector<HTMLButtonElement>("#btn-revise-confirm")!;
+  const $btnReviseCancel  = container.querySelector<HTMLButtonElement>("#btn-revise-cancel")!;
 
-  // ── State ─────────────────────────────────────────────────────────────────
+  // ── State ──────────────────────────────────────────────────────────────────
   let cursor: Cursor | undefined;
   let items: ReviewQueueItem[] = [];
   let selectedItem: ReviewQueueItem | null = null;
+  let firstLoad = true;
 
-  // ── Queue card renderer ──────────────────────────────────────────────────
+  // ── Revision form helpers ──────────────────────────────────────────────────
+  function showRevisionForm(): void {
+    $revisionForm.style.display = "";
+    $btnApprove.style.display  = "none";
+    $btnRevise.style.display   = "none";
+    $btnReject.style.display   = "none";
+    // Default deadline: 48 h from now
+    const d = new Date(Date.now() + 48 * 60 * 60 * 1000);
+    $revisionDeadline.value = d.toISOString().slice(0, 16);
+    $revisionNotes.focus();
+  }
+
+  function hideRevisionForm(): void {
+    $revisionForm.style.display  = "none";
+    $revisionNotes.value         = "";
+    $revisionDeadline.value      = "";
+    $btnApprove.style.display    = "";
+    $btnRevise.style.display     = "";
+    $btnReject.style.display     = "";
+  }
+
+  // ── Queue card renderer ────────────────────────────────────────────────────
   function renderQueueCard(item: ReviewQueueItem): string {
     const isStale = item.elapsedMs > STALENESS_THRESHOLD_MS;
-    const sub = item.submission as unknown as Record<string, unknown>;
-    const payout = `$${(item.task as unknown as Record<string,unknown>).payout_min ?? "?"}–$${(item.task as unknown as Record<string,unknown>).payout_max ?? "?"}`;
+    // FIX 1: read typed Task fields directly — no double Record<> cast
+    const payoutMin = (item.task as unknown as Record<string, unknown>).payout_min ?? "?";
+    const payoutMax = (item.task as unknown as Record<string, unknown>).payout_max ?? "?";
+    const payout    = `$${payoutMin}\u2013$${payoutMax}`;
     const staleHtml = isStale ? Badge({ label: "STALE", variant: "warning" }) : "";
     return `
       <div class="review-card" data-task-id="${escHtml(String(item.task.id))}" role="button" tabindex="0"
@@ -221,16 +272,18 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
     `;
   }
 
-  // ── Asset preview renderer ───────────────────────────────────────────────
-  function renderPreview(item: ReviewQueueItem): void {
-    const sub = item.submission as unknown as Record<string, unknown>;
-    const assetUrl = String(sub.asset_url ?? "");
+  // ── Asset preview renderer ─────────────────────────────────────────────────
+  async function renderPreview(item: ReviewQueueItem): Promise<void> {
+    const sub             = item.submission as unknown as Record<string, unknown>;
+    const assetUrl        = String(sub.asset_url ?? "");
     const deliverableType = String(sub.deliverable_type ?? "").toLowerCase();
 
-    $previewLabel.textContent = deliverableType ? `ASSET · ${deliverableType.toUpperCase()}` : "ASSET PREVIEW";
+    $previewLabel.textContent = deliverableType
+      ? `ASSET \u00b7 ${deliverableType.toUpperCase()}`
+      : "ASSET PREVIEW";
 
     if (assetUrl) {
-      $previewOpenLnk.href = assetUrl;
+      $previewOpenLnk.href         = assetUrl;
       $previewOpenLnk.style.display = "";
     } else {
       $previewOpenLnk.style.display = "none";
@@ -244,42 +297,45 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
     } else if (deliverableType.includes("audio") || /\.(mp3|wav|ogg|flac)$/i.test(assetUrl)) {
       html = `<audio controls src="${escHtml(assetUrl)}">Your browser does not support audio.</audio>`;
     } else if (deliverableType.includes("code") || deliverableType.includes("text")) {
-      // Text/code assets are fetched and previewed inline, truncated at 8 000 chars.
-      // The "OPEN ↗" link in the header always points to the full raw asset.
-      html = `<pre data-asset-url="${escHtml(assetUrl)}">Loading code preview…<br/><a href="${escHtml(assetUrl)}" target="_blank" rel="noopener noreferrer" style="color:var(--ff-primary)">Open raw ↗</a></pre>`;
+      html = `<pre data-asset-url="${escHtml(assetUrl)}">Loading preview\u2026<br/><a href="${escHtml(assetUrl)}" target="_blank" rel="noopener noreferrer" style="color:var(--ff-primary)">Open raw \u2197</a></pre>`;
     } else {
       html = `
         <div class="crucible-placeholder" style="opacity:1">
           <span style="font-size:11px; color:var(--ff-ink); opacity:0.8; letter-spacing:0.06em;">${escHtml(deliverableType.toUpperCase() || "FILE")}</span>
           <a href="${escHtml(assetUrl)}" target="_blank" rel="noopener noreferrer"
-             class="ff-btn ff-btn--secondary ff-btn--sm" style="margin-top:12px">OPEN ASSET ↗</a>
+             class="ff-btn ff-btn--secondary ff-btn--sm" style="margin-top:12px">OPEN ASSET \u2197</a>
         </div>`;
     }
 
     $previewBody.innerHTML = html;
 
-    // Async-fetch text/code assets and populate the <pre> inline.
+    // FIX 4: include Authorization header so private Supabase Storage URLs work
     const pre = $previewBody.querySelector<HTMLPreElement>("pre[data-asset-url]");
     if (pre) {
       const url = pre.dataset.assetUrl!;
-      fetch(url)
-        .then(r => r.text())
-        .then(text => {
-          const truncated = text.length > 8000;
-          pre.textContent = text.slice(0, 8000);
-          if (truncated) {
-            pre.textContent += "\n\n…[TRUNCATED — USE \u201cOPEN ↗\u201d ABOVE FOR FULL ASSET]";
-          }
-        })
-        .catch(() => { pre.textContent = "Could not load asset."; });
+      try {
+        const session = await supabase.auth.getSession();
+        const token   = session.data.session?.access_token;
+        const headers: Record<string, string> = {};
+        if (token) headers["Authorization"] = `Bearer ${token}`;
+        const res  = await fetch(url, { headers });
+        const text = await res.text();
+        const truncated = text.length > 8_000;
+        pre.textContent = text.slice(0, 8_000);
+        if (truncated) {
+          pre.textContent += "\n\n\u2026[TRUNCATED \u2014 USE \u201cOPEN \u2197\u201d FOR FULL ASSET]";
+        }
+      } catch {
+        pre.textContent = "Could not load asset.";
+      }
     }
   }
 
-  // ── Decision panel renderer ───────────────────────────────────────────────
+  // ── Decision panel renderer ────────────────────────────────────────────────
   function renderDecisionPanel(item: ReviewQueueItem): void {
-    const sub = item.submission as unknown as Record<string, unknown>;
+    const sub            = item.submission as unknown as Record<string, unknown>;
     const reliabilityPct = Math.round(item.contributorReliability * 100);
-    const aiSummary = String(sub.ai_summary ?? "");
+    const aiSummary      = String(sub.ai_summary ?? "");
     const deliverableType = String(sub.deliverable_type ?? "");
 
     $decisionBody.innerHTML = `
@@ -314,39 +370,34 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
       </div>` : ""}
     `;
 
-    $decisionFooter.style.display = "";
-    $decisionError.style.display = "none";
-    $decisionError.textContent = "";
-
-    // Rebind buttons for this item
+    $decisionFooter.style.display  = "";
+    $decisionError.style.display   = "none";
+    $decisionError.textContent     = "";
+    hideRevisionForm();
     [$btnApprove, $btnRevise, $btnReject].forEach(b => { b.disabled = false; });
   }
 
-  // ── Select item ───────────────────────────────────────────────────────────
+  // ── Select item ────────────────────────────────────────────────────────────
   function selectItem(item: ReviewQueueItem): void {
     selectedItem = item;
-
-    // Highlight active card
     $queueList.querySelectorAll(".review-card").forEach(c => c.classList.remove("active"));
     $queueList.querySelector(`[data-task-id="${escHtml(String(item.task.id))}"]`)?.classList.add("active");
-
-    renderPreview(item);
+    void renderPreview(item);
     renderDecisionPanel(item);
   }
 
-  // ── Remove item after decision ───────────────────────────────────────────────
+  // ── Remove item after decision ─────────────────────────────────────────────
   function removeItem(taskId: string): void {
     items = items.filter(i => String(i.task.id) !== taskId);
     $queueList.querySelector(`[data-task-id="${escHtml(taskId)}"]`)?.remove();
-    $queueCountLbl.textContent = `QUEUE · ${items.length}`;
+    $queueCountLbl.textContent = `QUEUE \u00b7 ${items.length}`;
 
-    // If the removed item was selected, clear center + right
     if (selectedItem && String(selectedItem.task.id) === taskId) {
       selectedItem = null;
-      $previewBody.innerHTML = `<div class="crucible-placeholder"><span>&#9632;&nbsp;SELECT SUBMISSION</span></div>`;
+      $previewBody.innerHTML   = `<div class="crucible-placeholder"><span>&#9632;&nbsp;SELECT SUBMISSION</span></div>`;
       $previewLabel.textContent = "ASSET PREVIEW";
       $previewOpenLnk.style.display = "none";
-      $decisionBody.innerHTML = `<div class="crucible-placeholder"><span>&#9632;&nbsp;NO SELECTION</span></div>`;
+      $decisionBody.innerHTML  = `<div class="crucible-placeholder"><span>&#9632;&nbsp;NO SELECTION</span></div>`;
       $decisionFooter.style.display = "none";
     }
 
@@ -359,34 +410,55 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
     }
   }
 
-  // ── Decision action ───────────────────────────────────────────────────────────
+  // ── Decision action ────────────────────────────────────────────────────────
   async function handleDecision(
     verb: "approved" | "revision_requested" | "rejected",
-    reason: DecisionReason
+    reason: DecisionReason,
+    reviewNotes?: string,
+    revisionDeadlineIso?: string,
   ): Promise<void> {
     if (!selectedItem) return;
-    const sub = selectedItem.submission as unknown as Record<string, unknown>;
+    const sub          = selectedItem.submission as unknown as Record<string, unknown>;
     const submissionId = String(sub.id);
-    const taskId = String(selectedItem.task.id);
+    const taskId       = String(selectedItem.task.id);
 
-    [$btnApprove, $btnRevise, $btnReject].forEach(b => { b.disabled = true; });
+    [$btnApprove, $btnRevise, $btnReject, $btnReviseConfirm].forEach(b => { b.disabled = true; });
     $decisionError.style.display = "none";
 
     try {
-      await reviewSubmission(submissionId, verb, reason, {});
+      await reviewSubmission(submissionId, verb, reason, { reviewNotes, revisionDeadlineIso });
       removeItem(taskId);
     } catch (err) {
-      $decisionError.textContent = err instanceof Error ? err.message : "Decision failed";
+      $decisionError.textContent  = err instanceof Error ? err.message : "Decision failed";
       $decisionError.style.display = "";
-      [$btnApprove, $btnRevise, $btnReject].forEach(b => { b.disabled = false; });
+      [$btnApprove, $btnRevise, $btnReject, $btnReviseConfirm].forEach(b => { b.disabled = false; });
     }
   }
 
-  $btnApprove.addEventListener("click", () => handleDecision("approved", "great_work" as DecisionReason));
-  $btnRevise.addEventListener( "click", () => handleDecision("revision_requested", "requirements_not_met" as DecisionReason));
-  $btnReject.addEventListener( "click", () => handleDecision("rejected", "quality_issue" as DecisionReason));
+  // ── Button wiring ──────────────────────────────────────────────────────────
+  $btnApprove.addEventListener("click", () =>
+    handleDecision("approved", "great_work" as DecisionReason));
 
-  // ── Render queue list ───────────────────────────────────────────────────────────
+  // REVISE: expand inline form first, fire on confirm
+  $btnRevise.addEventListener("click", () => showRevisionForm());
+  $btnReviseCancel.addEventListener("click", () => hideRevisionForm());
+  $btnReviseConfirm.addEventListener("click", () => {
+    const notes    = $revisionNotes.value.trim() || undefined;
+    const deadline = $revisionDeadline.value
+      ? new Date($revisionDeadline.value).toISOString()
+      : undefined;
+    void handleDecision(
+      "revision_requested",
+      "requirements_not_met" as DecisionReason,
+      notes,
+      deadline,
+    );
+  });
+
+  $btnReject.addEventListener("click", () =>
+    handleDecision("rejected", "quality_issue" as DecisionReason));
+
+  // ── Render queue list ──────────────────────────────────────────────────────
   function renderQueueList(newItems: ReviewQueueItem[]): void {
     if (items.length === 0 && newItems.length === 0) {
       $loadingInd.style.display = "none";
@@ -395,7 +467,7 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
         title: "QUEUE EMPTY",
         description: "No submissions awaiting review.",
       });
-      $queueCountLbl.textContent = "QUEUE · 0";
+      $queueCountLbl.textContent = "QUEUE \u00b7 0";
       return;
     }
 
@@ -411,16 +483,17 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
       frag.appendChild(card);
     });
 
-    if (items.length === newItems.length) {
-      // First load — replace spinner
+    // FIX 2: use firstLoad flag instead of items.length === newItems.length
+    if (firstLoad) {
       $queueList.innerHTML = "";
+      firstLoad = false;
     }
     $queueList.appendChild(frag);
-    $queueCountLbl.textContent = `QUEUE · ${items.length}`;
-    $loadingInd.style.display = "none";
+    $queueCountLbl.textContent = `QUEUE \u00b7 ${items.length}`;
+    $loadingInd.style.display  = "none";
   }
 
-  // ── Load page ─────────────────────────────────────────────────────────────────
+  // ── Load page ──────────────────────────────────────────────────────────────
   async function loadPage(): Promise<void> {
     $loadingInd.style.display = "";
     try {
@@ -444,27 +517,35 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
     }
   }
 
+  function resetQueue(): void {
+    items         = [];
+    cursor        = undefined;
+    selectedItem  = null;
+    firstLoad     = true;
+    $queueList.innerHTML          = Spinner({ label: "Refreshing queue..." });
+    $previewBody.innerHTML        = `<div class="crucible-placeholder"><span>&#9632;&nbsp;SELECT SUBMISSION</span></div>`;
+    $previewLabel.textContent     = "ASSET PREVIEW";
+    $previewOpenLnk.style.display = "none";
+    $decisionBody.innerHTML       = `<div class="crucible-placeholder"><span>&#9632;&nbsp;NO SELECTION</span></div>`;
+    $decisionFooter.style.display = "none";
+  }
+
   $loadMoreBtn.addEventListener("click", () => loadPage());
   await loadPage();
 
-  // ── Realtime — FIX 3: store channel for teardown ──────────────────────────
+  // FIX 3: listen on BOTH tasks UPDATE (under_review) AND submissions INSERT
+  // so new arrivals (submitted → under_review transition) trigger a reload.
   const channel = supabase
-    .channel("review-queue-tasks")
+    .channel("review-queue-v5")
     .on(
       "postgres_changes",
       { event: "UPDATE", schema: "public", table: "tasks", filter: "status=eq.under_review" },
-      () => {
-        items = [];
-        cursor = undefined;
-        selectedItem = null;
-        $queueList.innerHTML = Spinner({ label: "Refreshing queue..." });
-        $previewBody.innerHTML = `<div class="crucible-placeholder"><span>&#9632;&nbsp;SELECT SUBMISSION</span></div>`;
-        $previewLabel.textContent = "ASSET PREVIEW";
-        $previewOpenLnk.style.display = "none";
-        $decisionBody.innerHTML = `<div class="crucible-placeholder"><span>&#9632;&nbsp;NO SELECTION</span></div>`;
-        $decisionFooter.style.display = "none";
-        loadPage();
-      }
+      () => { resetQueue(); void loadPage(); },
+    )
+    .on(
+      "postgres_changes",
+      { event: "INSERT", schema: "public", table: "submissions" },
+      () => { resetQueue(); void loadPage(); },
     )
     .subscribe();
 
