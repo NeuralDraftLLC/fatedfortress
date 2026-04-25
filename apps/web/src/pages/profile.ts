@@ -4,7 +4,9 @@
  * Sections:
  *   - Identity: display name, github username (editable)
  *   - Reliability signals: score, approval rate, avg revisions, response time, totals
+ *   - Completed Work: approved decisions joined with submission asset URL + payout
  *   - Portfolio: up to 3 pieces; file picker -> supabase-storage-upload -> thumbnail chip
+ *   - HereNow CTA: only visible when reliability >= 0.70 AND total_approved >= 1
  */
 
 import { getSupabase } from "../auth/index.js";
@@ -17,6 +19,8 @@ import {
 } from "../net/storage.js";
 
 const MAX_PORTFOLIO = 3;
+const HERENOW_MIN_RELIABILITY = 0.70;
+const HERENOW_MIN_APPROVED    = 1;
 
 export async function mountProfile(container: HTMLElement): Promise<() => void> {
   await requireAuth();
@@ -36,6 +40,28 @@ export async function mountProfile(container: HTMLElement): Promise<() => void> 
     Array.isArray((profile as Record<string, unknown>)?.portfolio_urls)
       ? ((profile as Record<string, unknown>).portfolio_urls as string[])
       : [];
+
+  // ── Completed Work: approved decisions joined with task title + payout ───
+  const { data: completedWork } = await supabase
+    .from("decisions")
+    .select(`
+      id,
+      approved_at,
+      payout_amount,
+      tasks ( id, title ),
+      submissions ( asset_url )
+    `)
+    .eq("contributor_id", user.id)
+    .eq("verdict", "approved")
+    .order("approved_at", { ascending: false })
+    .limit(20);
+
+  // ── publishToHereNow gate ────────────────────────────────────────────────
+  const reliability   = (profile as Record<string, unknown>)?.reliability_score as number | null;
+  const totalApproved = (profile as Record<string, unknown>)?.total_approved as number | null ?? 0;
+  const hereNowEligible =
+    (reliability ?? 0) >= HERENOW_MIN_RELIABILITY &&
+    totalApproved >= HERENOW_MIN_APPROVED;
 
   container.innerHTML = `
     <div class="profile-page" style="max-width:680px;margin:0 auto;padding:32px 16px">
@@ -98,6 +124,35 @@ export async function mountProfile(container: HTMLElement): Promise<() => void> 
         </div>
       </section>
 
+      <!-- Completed Work -->
+      <section style="margin-bottom:32px;border-bottom:1px solid var(--ff-outline-variant);padding-bottom:28px">
+        <h2 class="ff-section-label" style="margin-bottom:16px">COMPLETED WORK</h2>
+        ${completedWork && completedWork.length > 0
+          ? `<div style="display:flex;flex-direction:column;gap:8px">
+               ${completedWork.map(d => completedWorkRow(d as CompletedWorkItem)).join("")}
+             </div>`
+          : `<p style="font-family:var(--ff-font-mono);font-size:11px;color:var(--ff-muted)">No approved work yet.</p>`
+        }
+      </section>
+
+      <!-- HereNow CTA (gated) -->
+      ${hereNowEligible
+        ? `<section style="margin-bottom:32px;border-bottom:1px solid var(--ff-outline-variant);padding-bottom:28px">
+             <h2 class="ff-section-label" style="margin-bottom:8px">PUBLISH TO HERENOW</h2>
+             <p style="font-family:var(--ff-font-mono);font-size:11px;color:var(--ff-muted);margin-bottom:14px">
+               Your reliability qualifies you to publish work to the HereNow marketplace.
+             </p>
+             <a href="/herenow/publish" class="ff-btn ff-btn--primary ff-btn--sm">Publish to HereNow &rarr;</a>
+           </section>`
+        : `<section style="margin-bottom:32px;border-bottom:1px solid var(--ff-outline-variant);padding-bottom:28px">
+             <h2 class="ff-section-label" style="margin-bottom:8px">PUBLISH TO HERENOW</h2>
+             <p style="font-family:var(--ff-font-mono);font-size:11px;color:var(--ff-muted)">
+               Requires reliability &ge; 70% and at least 1 approved task.
+               Current: ${fmt(reliability, "pct")} reliability, ${totalApproved} approved.
+             </p>
+           </section>`
+      }
+
       <!-- Portfolio -->
       <section>
         <h2 class="ff-section-label" style="margin-bottom:4px">PORTFOLIO</h2>
@@ -126,7 +181,7 @@ export async function mountProfile(container: HTMLElement): Promise<() => void> 
   const portfolioUrls = [...portfolioItems];
 
   // Save profile
-  const saveBtn = container.querySelector("#save-profile-btn") as HTMLButtonElement;
+  const saveBtn    = container.querySelector("#save-profile-btn") as HTMLButtonElement;
   const saveStatus = container.querySelector("#save-status") as HTMLElement;
   if (saveBtn) {
     const handler = async () => {
@@ -152,9 +207,9 @@ export async function mountProfile(container: HTMLElement): Promise<() => void> 
   }
 
   // Portfolio upload
-  const addBtn       = container.querySelector("#add-portfolio-btn") as HTMLButtonElement;
-  const fileInput    = container.querySelector("#portfolio-input") as HTMLInputElement;
-  const portfolioGrid = container.querySelector("#portfolio-grid") as HTMLElement;
+  const addBtn          = container.querySelector("#add-portfolio-btn") as HTMLButtonElement;
+  const fileInput       = container.querySelector("#portfolio-input") as HTMLInputElement;
+  const portfolioGrid   = container.querySelector("#portfolio-grid") as HTMLElement;
   const portfolioBanner = container.querySelector("#portfolio-banner") as HTMLElement;
 
   if (addBtn && fileInput) {
@@ -167,7 +222,6 @@ export async function mountProfile(container: HTMLElement): Promise<() => void> 
       if (!file) return;
       fileInput.value = "";
 
-      // Validate
       const valid = validateFile(file, 10, ["image/jpeg", "image/png", "image/webp", "image/gif", "application/pdf"]);
       if (!valid.ok) {
         portfolioBanner.innerHTML = inlineBanner("error", valid.error);
@@ -190,13 +244,11 @@ export async function mountProfile(container: HTMLElement): Promise<() => void> 
 
         portfolioUrls.push(presigned.assetUrl);
 
-        // Persist to profile
         await supabase
           .from("profiles")
           .update({ portfolio_urls: portfolioUrls } as Record<string, unknown>)
           .eq("id", user.id);
 
-        // Re-render grid
         portfolioGrid.innerHTML = portfolioUrls.map(url => portfolioChip(url)).join("");
         if (portfolioUrls.length >= MAX_PORTFOLIO) addBtn.disabled = true;
         portfolioBanner.innerHTML = inlineBanner("success", "Portfolio piece added.");
@@ -212,6 +264,16 @@ export async function mountProfile(container: HTMLElement): Promise<() => void> 
   }
 
   return () => teardowns.forEach(fn => fn());
+}
+
+// ── Types ────────────────────────────────────────────────────────────────────
+
+interface CompletedWorkItem {
+  id: string;
+  approved_at: string | null;
+  payout_amount: number | null;
+  tasks: { id: string; title: string } | null;
+  submissions: { asset_url: string | null } | null;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -237,8 +299,41 @@ function reliabilityCell(label: string, value: string): string {
     </div>`;
 }
 
+function completedWorkRow(item: CompletedWorkItem): string {
+  const title      = escHtml(item.tasks?.title ?? "Untitled task");
+  const taskId     = item.tasks?.id ?? "";
+  const assetUrl   = item.submissions?.asset_url ?? null;
+  const payout     = item.payout_amount != null ? `$${(item.payout_amount / 100).toFixed(2)}` : null;
+  const approvedAt = item.approved_at
+    ? new Date(item.approved_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
+    : null;
+
+  return `
+    <div style="display:flex;align-items:center;justify-content:space-between;
+                gap:10px;padding:10px 12px;
+                border:1px solid var(--ff-outline-variant);
+                font-family:var(--ff-font-mono)">
+      <div style="flex:1;min-width:0">
+        <a href="/tasks/${escHtml(taskId)}"
+           style="font-size:12px;font-weight:700;color:var(--ff-ink);text-decoration:none;
+                  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block">
+          ${title}
+        </a>
+        ${approvedAt ? `<span style="font-size:10px;color:var(--ff-muted)">${approvedAt}</span>` : ""}
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+        ${payout ? `<span class="ff-badge ff-badge--success" style="font-size:10px">${payout}</span>` : ""}
+        ${assetUrl
+          ? `<a href="${escHtml(assetUrl)}" target="_blank" rel="noopener noreferrer"
+                style="font-size:10px;color:var(--ff-primary);text-decoration:none">VIEW</a>`
+          : ""
+        }
+      </div>
+    </div>`;
+}
+
 function portfolioChip(url: string): string {
-  const isImg = /\.(jpe?g|png|webp|gif)$/i.test(url);
+  const isImg  = /\.(jpe?g|png|webp|gif)$/i.test(url);
   const filename = url.split("/").pop() ?? url;
   return `
     <a href="${escHtml(url)}" target="_blank" rel="noopener noreferrer"
