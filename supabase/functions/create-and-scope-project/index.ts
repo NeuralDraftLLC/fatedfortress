@@ -3,7 +3,7 @@
  *
  * Single-call Stage 1 orchestrator:
  *   1. Insert project as status='draft'
- *   2. Invoke scope-tasks (GPT-4o)
+ *   2. Invoke runScope (GPT-4o) from _shared/scope.ts
  *   3. Call persist_scoped_project RPC (inserts tasks)
  *   4. DB trigger promotes project to 'open' on first task insert
  *   5. Return { project, tasks } — or 'draft' if 0 tasks generated
@@ -21,7 +21,7 @@
  */
 
 import { resolveAuth, serviceRoleClient } from "../_shared/auth.ts";
-import { runScope, ScopeIntent } from "../scope-tasks/index.ts";
+import { runScope, ScopeIntent } from "../_shared/scope.ts";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
