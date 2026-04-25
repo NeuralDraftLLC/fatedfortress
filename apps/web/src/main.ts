@@ -110,9 +110,9 @@ const routes: Record<string, RouteInitializer> = {
   "/create":          () => import("./pages/create.js").then(m => () => m.mountCreate),
   "/tasks":           () => import("./pages/tasks.js").then(m => () => m.mountTasks),
   "/reviews":         () => import("./pages/reviews.js").then(m => () => m.mountReviews),
-  "/profile":         () => import("./pages/profile.ts").then(m => () => m.mountProfile),
-  "/settings":        () => import("./pages/settings.ts").then(m => () => m.mountSettings),
-  "/github/callback": () => import("./pages/settings.ts").then(m => () => m.mountGitHubCallback),
+  "/profile":         () => import("./pages/profile.js").then(m => () => m.mountProfile),
+  "/settings":        () => import("./pages/settings.js").then(m => () => m.mountSettings),
+  "/github/callback": () => import("./pages/settings.js").then(m => () => m.mountGitHubCallback),
 };
 
 type PageCleanup = (() => void) | void | Promise<() => void>;
