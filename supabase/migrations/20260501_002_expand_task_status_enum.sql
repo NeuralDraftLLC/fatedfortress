@@ -1,13 +1,2 @@
--- 002 — Expand TaskStatus CHECK constraint to include approved/rejected
--- These are terminal task outcomes handled via the decisions table.
--- Keeping them on the tasks status CHECK ensures DB-level enforcement.
-
-alter table public.tasks drop constraint if exists tasks_status_check;
-
-alter table public.tasks
-  add constraint tasks_status_check
-  check (status in (
-    'draft', 'open', 'claimed', 'submitted', 'under_review',
-    'revision_requested', 'paid', 'expired',
-    'approved', 'rejected'
-  ));
+-- DELETED: replaced by 20260424_015_expand_task_status_enum.sql
+-- This file is intentionally empty and will be removed in the next cleanup pass.
