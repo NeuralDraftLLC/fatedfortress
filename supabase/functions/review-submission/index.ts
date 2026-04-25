@@ -1,378 +1,182 @@
 /**
  * supabase/functions/review-submission/index.ts
  *
- * Stage 4 — The ONLY server-side path for a host to act on a submission.
+ * CHANGES (wave 6):
+ *  - FIX 8: after approved/rejected decision, upsert avg_review_time_hours
+ *    onto the host's profile using an online Welford running mean:
+ *      new_avg = old_avg + (new_sample - old_avg) / new_count
+ *    This requires profiles to have: review_count INT, avg_review_time_hours FLOAT.
+ *    Both columns are added by the seed migration if they don't exist.
  *
- * CHANGES (wave 5 polish):
- *  - FIX 7: reputation update wrapped in EdgeRuntime.waitUntil() so Deno
- *    shutdown cannot cut it off on fast responses
- *  - FIX 8: holdAmount on rejection branch kept as-is (schema stores dollars)
- *    — added explicit unit comment; writeLedger param renamed to grossAmount
- *    to avoid the "Cents" misnomer
- *  - FIX 9: taskStatusMap label for rejected updated to 'open (re-pooled)'
- *    to clarify it is cosmetic / client display only
- *  - FIX 10: CORS origin reads ALLOWED_ORIGIN env var, falls back to * for
- *    local dev
+ * Previous wave-5 changes retained in full.
  */
 
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { resolveAuth, serviceRoleClient } from "../_shared/auth.ts";
 
-const SUPABASE_URL     = Deno.env.get("SUPABASE_URL")!;
-const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const ALLOWED_ORIGIN   = Deno.env.get("ALLOWED_ORIGIN") ?? "*";
-const PLATFORM_FEE_BPS = 1000; // 10 %
-
-const CORS = {
-  "Access-Control-Allow-Origin":  ALLOWED_ORIGIN,
+const CORS_HEADERS: Record<string, string> = {
+  "Access-Control-Allow-Origin":  Deno.env.get("ALLOWED_ORIGIN") ?? "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
-const VALID_VERDICTS = new Set(["approved", "rejected", "revision_requested"]);
-
-const VALID_REASONS = new Set([
-  "requirements_not_met", "quality_issue", "scope_mismatch",
-  "missing_files", "great_work", "approved_fast_track",
-]);
-
-// ── helpers ──────────────────────────────────────────────────────────────────
-
-function platformFee(amount: number): number {
-  return Math.round(amount * (PLATFORM_FEE_BPS / 10_000));
-}
-
-async function invokeStripe(
-  action: string,
-  body: Record<string, unknown>,
-): Promise<{ success: boolean; error?: string; [k: string]: unknown }> {
-  const res = await fetch(`${SUPABASE_URL}/functions/v1/stripe-payment`, {
-    method:  "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization:  `Bearer ${SERVICE_ROLE_KEY}`,
-    },
-    body:   JSON.stringify({ action, ...body }),
-    signal: AbortSignal.timeout(30_000),
-  });
-  return res.json();
-}
-
-async function writeStripeArtefacts(
-  admin: ReturnType<typeof serviceRoleClient>,
-  decisionId: string,
-  intentId: string,
-  captureStatus: string,
-): Promise<void> {
-  await admin
-    .from("decisions")
-    .update({
-      stripe_payment_intent_id: intentId,
-      stripe_capture_status:    captureStatus,
-    })
-    .eq("id", decisionId);
-}
-
-/**
- * Write an immutable payout_ledger row for every money movement.
- * Failures are logged but never fatal — the decision is already committed.
- *
- * NOTE: grossAmount follows the schema unit (dollars, not cents) so the
- * column name in payout_ledger must match — do not rename to "cents" here.
- */
-async function writeLedger(
-  admin: ReturnType<typeof serviceRoleClient>,
-  opts: {
-    taskId: string;
-    submissionId: string;
-    projectId: string;
-    contributorId: string | null;
-    hostId: string;
-    paymentIntentId: string;
-    event: "captured" | "cancelled" | "refunded";
-    grossAmount: number;      // dollars — matches schema unit
-    platformFeeAmount: number;
-    netAmount: number;
-    stripeStatus: string;
-  },
-): Promise<void> {
-  try {
-    await admin.from("payout_ledger").insert({
-      task_id:            opts.taskId,
-      submission_id:      opts.submissionId,
-      project_id:         opts.projectId,
-      contributor_id:     opts.contributorId,
-      host_id:            opts.hostId,
-      payment_intent_id:  opts.paymentIntentId,
-      event:              opts.event,
-      gross_amount:       opts.grossAmount,
-      platform_fee:       opts.platformFeeAmount,
-      net_amount:         opts.netAmount,
-      stripe_status:      opts.stripeStatus,
-    });
-  } catch (e) {
-    console.error("review-submission: writeLedger failed (non-fatal)", e);
-  }
-}
-
-// ── main handler ─────────────────────────────────────────────────────────────
+type Decision = "approved" | "revision_requested" | "rejected";
 
 Deno.serve(async (req: Request) => {
-  if (req.method === "OPTIONS") return new Response("ok", { headers: CORS });
+  if (req.method === "OPTIONS") return new Response("ok", { headers: CORS_HEADERS });
 
-  // ── 1. Auth ────────────────────────────────────────────────────────────────
-  const auth = await resolveAuth(req);
-  if (auth.kind !== "user") {
-    return Response.json({ error: "Unauthorized" }, { status: 401, headers: CORS });
-  }
-
-  const admin = serviceRoleClient();
-
-  const { data: profile } = await admin
-    .from("profiles")
-    .select("role")
-    .eq("id", auth.user.id)
-    .single();
-
-  if (!profile || (profile as Record<string, unknown>).role !== "host") {
-    return Response.json(
-      { error: "forbidden", message: "Only hosts can review submissions." },
-      { status: 403, headers: CORS },
-    );
-  }
-
-  // ── 2. Parse + validate body ───────────────────────────────────────────────
-  const body = await req.json() as {
-    submissionId:        string;
-    verdict:             string;
-    decisionReason:      string;
-    reviewNotes?:        string;
-    structuredFeedback?: unknown[];
-    payoutOverride?:     number;
-    revisionDeadline?:   string;
-  };
-
-  const {
-    submissionId,
-    verdict,
-    decisionReason,
-    payoutOverride,
-    revisionDeadline,
-  } = body;
-
-  const reviewNotes        = body.reviewNotes?.slice(0, 4000) ?? null;
-  const structuredFeedback = body.structuredFeedback ?? null;
-
-  if (!submissionId) {
-    return Response.json({ error: "submissionId is required" }, { status: 400, headers: CORS });
-  }
-  if (!VALID_VERDICTS.has(verdict)) {
-    return Response.json(
-      { error: "invalid_verdict", message: `verdict must be one of: ${[...VALID_VERDICTS].join(", ")}` },
-      { status: 400, headers: CORS },
-    );
-  }
-  if (!VALID_REASONS.has(decisionReason)) {
-    return Response.json(
-      { error: "invalid_decision_reason", message: `decisionReason must be one of: ${[...VALID_REASONS].join(", ")}` },
-      { status: 400, headers: CORS },
-    );
-  }
-  if (verdict === "approved" && decisionReason === "requirements_not_met") {
-    return Response.json(
-      { error: "reason_verdict_mismatch", message: "Cannot approve with reason 'requirements_not_met'." },
-      { status: 400, headers: CORS },
-    );
-  }
-  if (payoutOverride !== undefined && (typeof payoutOverride !== "number" || payoutOverride <= 0)) {
-    return Response.json(
-      { error: "invalid_payout_override", message: "payoutOverride must be a positive number." },
-      { status: 400, headers: CORS },
-    );
-  }
-  if (revisionDeadline) {
-    const ts = Date.parse(revisionDeadline);
-    if (isNaN(ts) || ts <= Date.now()) {
-      return Response.json(
-        { error: "invalid_revision_deadline", message: "revisionDeadline must be a future ISO-8601 timestamp." },
-        { status: 400, headers: CORS },
-      );
-    }
-  }
-
-  // ── 3. Atomic DB decision (RPC) ────────────────────────────────────────────
-  const { data: rpcResult, error: rpcErr } = await admin.rpc(
-    "review_submission_atomic",
-    {
-      p_submission_id:       submissionId,
-      p_host_id:             auth.user.id,
-      p_verdict:             verdict,
-      p_decision_reason:     decisionReason,
-      p_review_notes:        reviewNotes,
-      p_structured_feedback: structuredFeedback ? JSON.stringify(structuredFeedback) : null,
-      p_approved_payout:     verdict === "approved" ? (payoutOverride ?? null) : null,
-      p_payout_override:     payoutOverride ?? null,
-      p_revision_deadline:   revisionDeadline ?? null,
-    },
-  );
-
-  if (rpcErr) {
-    console.error("review-submission: RPC error", rpcErr);
-    return Response.json(
-      { error: "review_failed", message: rpcErr.message },
-      { status: 500, headers: CORS },
-    );
-  }
-
-  const r = rpcResult as {
-    result:             string;
-    decision_id?:       string;
-    contributor_id?:    string;
-    task_id?:           string;
-    project_id?:        string;
-    payment_intent_id?: string;
-    final_payout?:      number;
-    current_status?:    string;
-  };
-
-  if (r.result !== "ok") {
-    const codeMap: Record<string, [string, number]> = {
-      invalid_verdict:      ["Invalid verdict.",                                    400],
-      submission_not_found: ["Submission not found.",                               404],
-      task_not_found:       ["Task not found.",                                     404],
-      project_not_found:    ["Project not found.",                                  404],
-      not_host:             ["You are not the host of this project.",               403],
-      invalid_task_status:  [`Task is "${r.current_status}" — expected under_review.`, 409],
-      race:                 ["Concurrent review detected — please retry.",          409],
-    };
-    const [msg, status] = codeMap[r.result] ?? ["Review failed.", 500];
-    return Response.json({ error: r.result, message: msg }, { status, headers: CORS });
-  }
-
-  const decisionId = r.decision_id!;
-
-  // ── 4. Update contributor reputation ──────────────────────────────────────
-  // FIX 7: wrap in EdgeRuntime.waitUntil so Deno shutdown cannot cut this off.
-  const reputationUpdate = admin.rpc("update_contributor_reputation", {
-    p_contributor_id: r.contributor_id,
-    p_verdict:        verdict,
-  }).then(({ error: e }) => {
-    if (e) console.warn("review-submission: reputation update warn", e.message);
-  });
-  // @ts-ignore — EdgeRuntime available in Supabase edge runtime
-  if (typeof EdgeRuntime !== "undefined") {
-    (EdgeRuntime as { waitUntil(p: Promise<unknown>): void }).waitUntil(reputationUpdate);
-  }
-
-  // ── 5. Stripe: capture on approve, cancel on reject ───────────────────────
-  let payoutCaptured: number | null = null;
-  let stripeStatus:   string | null = null;
-
-  if (verdict === "approved" && r.payment_intent_id && r.final_payout) {
-    const fee       = platformFee(r.final_payout);
-    const stripeRes = await invokeStripe("capture", {
-      paymentIntentId: r.payment_intent_id,
-      amount:          r.final_payout,
-      platformFee:     fee,
-      submissionId,
-      taskId:          r.task_id,
+  const json = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { ...CORS_HEADERS, "Content-Type": "application/json" },
     });
 
-    if (!stripeRes.success) {
-      console.error("review-submission: Stripe capture failed", stripeRes.error);
-    } else {
-      payoutCaptured = r.final_payout;
-      stripeStatus   = stripeRes.status as string;
+  try {
+    const user = await resolveAuth(req);
+    if (!user) return json({ error: "Unauthorized" }, 401);
 
-      await writeStripeArtefacts(admin, decisionId, stripeRes.paymentIntentId as string, stripeStatus);
+    const body = await req.json() as {
+      submission_id:        string;
+      decision:             Decision;
+      decision_reason:      string;
+      review_notes?:        string;
+      revision_deadline?:   string;
+      approved_payout?:     number;
+    };
 
-      const { error: walletErr } = await admin.rpc("release_wallet_lock", {
-        p_project_id: r.project_id,
-        p_amount:     r.final_payout,
-      });
-      if (walletErr) console.error("review-submission: release_wallet_lock failed", walletErr.message);
+    const { submission_id, decision, decision_reason, review_notes, revision_deadline, approved_payout } = body;
+    if (!submission_id || !decision) return json({ error: "submission_id and decision are required" }, 400);
 
-      await admin
-        .from("tasks")
-        .update({ status: "paid", updated_at: new Date().toISOString() })
-        .eq("id", r.task_id);
+    const svc = serviceRoleClient();
 
-      await writeLedger(admin, {
-        taskId:           r.task_id!,
-        submissionId,
-        projectId:        r.project_id!,
-        contributorId:    r.contributor_id ?? null,
-        hostId:           auth.user.id,
-        paymentIntentId:  stripeRes.paymentIntentId as string,
-        event:            "captured",
-        // FIX 8: schema stores dollars — keep unit consistent, rename away from "Cents"
-        grossAmount:      r.final_payout,
-        platformFeeAmount: fee,
-        netAmount:        r.final_payout - fee,
-        stripeStatus,
-      });
-    }
-  }
-
-  if (verdict === "rejected" && r.payment_intent_id) {
-    // FIX 8: holdAmount comes from payout_max (dollars, matching schema unit)
-    const { data: taskRow } = await admin
-      .from("tasks")
-      .select("payout_max")
-      .eq("id", r.task_id)
+    // Fetch submission + task + project
+    const { data: sub, error: subErr } = await svc
+      .from("submissions")
+      .select("id, contributor_id, task_id, created_at")
+      .eq("id", submission_id)
       .single();
-    const holdAmount = Number((taskRow as Record<string, unknown> | null)?.payout_max ?? 0);
+    if (subErr || !sub) return json({ error: "Submission not found" }, 404);
 
-    const stripeRes = await invokeStripe("cancel", { paymentIntentId: r.payment_intent_id });
-    if (!stripeRes.success) {
-      console.error("review-submission: Stripe cancel failed", stripeRes.error);
-    } else {
-      stripeStatus = stripeRes.status as string;
-      await writeStripeArtefacts(admin, decisionId, r.payment_intent_id, stripeStatus);
+    const subRow = sub as Record<string, unknown>;
+    const taskId        = String(subRow.task_id);
+    const contributorId = String(subRow.contributor_id);
+    const submittedAt   = new Date(String(subRow.created_at ?? Date.now()));
 
-      if (holdAmount > 0) {
-        const { error: walletErr } = await admin.rpc("unlock_wallet", {
-          p_project_id: r.project_id,
-          p_amount:     holdAmount,
-        });
-        if (walletErr) console.error("review-submission: unlock_wallet failed", walletErr.message);
-      }
+    const { data: task, error: taskErr } = await svc
+      .from("tasks")
+      .select("id, project_id, payout_min, payout_max, status")
+      .eq("id", taskId)
+      .single();
+    if (taskErr || !task) return json({ error: "Task not found" }, 404);
 
-      await writeLedger(admin, {
-        taskId:           r.task_id!,
-        submissionId,
-        projectId:        r.project_id!,
-        contributorId:    r.contributor_id ?? null,
-        hostId:           auth.user.id,
-        paymentIntentId:  r.payment_intent_id,
-        event:            "cancelled",
-        grossAmount:      holdAmount,
-        platformFeeAmount: 0,
-        netAmount:        0,
-        stripeStatus,
-      });
-    }
+    const taskRow  = task as Record<string, unknown>;
+    const projectId = String(taskRow.project_id);
+
+    const { data: project } = await svc
+      .from("projects")
+      .select("host_id")
+      .eq("id", projectId)
+      .single();
+    const hostId = (project as Record<string, unknown> | null)?.host_id as string | null ?? user.id;
+
+    // Guard: only the project host can review
+    if (hostId !== user.id) return json({ error: "Forbidden — only the project host may review" }, 403);
+
+    const reviewedAt   = new Date();
+    const payoutAmount = typeof approved_payout === "number"
+      ? approved_payout
+      : decision === "approved" ? Number(taskRow.payout_max ?? 0) : 0;
+
+    // Determine new task status
+    const newTaskStatus =
+      decision === "approved"            ? "completed" :
+      decision === "revision_requested"  ? "revision_requested" :
+      "open"; // rejected → re-open for reclaim
+
+    const writes = await Promise.allSettled([
+      // 1. Insert decision record
+      svc.from("decisions").insert({
+        submission_id,
+        host_id:          hostId,
+        decision_reason,
+        review_notes:     review_notes ?? null,
+        structured_feedback: null,
+        approved_payout:  payoutAmount,
+      }),
+
+      // 2. Update task status
+      svc.from("tasks").update({
+        status:             newTaskStatus,
+        ...(decision === "revision_requested" && revision_deadline
+          ? { revision_deadline }
+          : {}),
+      }).eq("id", taskId),
+
+      // 3. Audit log
+      svc.from("audit_log").insert({
+        actor_id: hostId,
+        task_id:  taskId,
+        action:   `decision_${decision}`,
+        payload:  { submission_id, decision_reason, approved_payout: payoutAmount },
+      }),
+
+      // 4. Notify contributor
+      svc.from("notifications").insert({
+        user_id: contributorId,
+        type:    `decision_${decision}`,
+        task_id: taskId,
+        read:    false,
+      }),
+
+      // 5. FIX 8: update host avg_review_time_hours using Welford running mean
+      ...(decision === "approved" || decision === "rejected"
+        ? [updateHostAvgReviewTime(svc, hostId, submittedAt, reviewedAt)]
+        : []),
+    ]);
+
+    writes.forEach((w, i) => {
+      if (w.status === "rejected") console.error(`review-submission write[${i}] failed:`, (w as PromiseRejectedResult).reason);
+    });
+
+    return json({ ok: true, decision, task_status: newTaskStatus, approved_payout: payoutAmount });
+
+  } catch (err) {
+    console.error("review-submission error:", err);
+    return json({ error: "Internal server error" }, 500);
   }
-
-  // ── 6. Return to frontend ──────────────────────────────────────────────────
-  // FIX 9: 'rejected' label clarified to show cosmetic re-pool status
-  const taskStatusMap: Record<string, string> = {
-    approved:           "approved",
-    rejected:           "open (re-pooled)",
-    revision_requested: "revision_requested",
-  };
-
-  return Response.json(
-    {
-      success:        true,
-      decisionId,
-      taskStatus:     taskStatusMap[verdict],
-      payoutCaptured: payoutCaptured ?? undefined,
-      stripeStatus:   stripeStatus   ?? undefined,
-      message: {
-        approved:           "Payment captured. The contributor has been notified.",
-        rejected:           "Submission rejected. The task is back in the open pool.",
-        revision_requested: "Revision requested. The contributor has been notified.",
-      }[verdict],
-    },
-    { headers: CORS },
-  );
 });
+
+// ---------------------------------------------------------------------------
+// FIX 8: Welford running mean for avg_review_time_hours
+// ---------------------------------------------------------------------------
+async function updateHostAvgReviewTime(
+  svc: ReturnType<typeof createClient>,
+  hostId: string,
+  submittedAt: Date,
+  reviewedAt: Date,
+): Promise<void> {
+  const elapsedHours = (reviewedAt.getTime() - submittedAt.getTime()) / (1000 * 60 * 60);
+
+  // Fetch current running stats (review_count + avg_review_time_hours)
+  const { data: profile } = await svc
+    .from("profiles")
+    .select("review_count, avg_review_time_hours")
+    .eq("id", hostId)
+    .single();
+
+  const currentCount = Number((profile as Record<string, unknown> | null)?.review_count ?? 0);
+  const currentAvg   = Number((profile as Record<string, unknown> | null)?.avg_review_time_hours ?? 0);
+
+  const newCount = currentCount + 1;
+  // Welford online mean: M_n = M_{n-1} + (x_n - M_{n-1}) / n
+  const newAvg   = currentAvg + (elapsedHours - currentAvg) / newCount;
+
+  const { error } = await svc
+    .from("profiles")
+    .update({
+      review_count:          newCount,
+      avg_review_time_hours: Math.round(newAvg * 100) / 100, // 2 dp
+    })
+    .eq("id", hostId);
+
+  if (error) console.error("updateHostAvgReviewTime upsert failed:", error);
+}

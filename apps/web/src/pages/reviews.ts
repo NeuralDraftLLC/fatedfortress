@@ -6,12 +6,16 @@
  *   CENTER (flex-1) — asset preview zone (image / audio / code / link)
  *   RIGHT  (320px) — contributor info, reliability, AI summary, decision panel
  *
- * CHANGES (wave 5 polish):
- *  - FIX 1: payout_min/max read from typed Task fields — no double Record<> cast
- *  - FIX 2: firstLoad boolean replaces fragile items.length===newItems.length guard
- *  - FIX 3: realtime channel listens on tasks UPDATE + submissions INSERT
+ * CHANGES (wave 6):
+ *  - FIX 7: auto_release_at countdown banner in decision panel — ticks every
+ *    second, turns red when < 4 hours remain, shows "AUTO-RELEASED" when expired.
+ *
+ * Previous changes retained:
+ *  - FIX 1: payout_min/max read from typed Task fields
+ *  - FIX 2: firstLoad boolean replaces fragile guard
+ *  - FIX 3: realtime channel on tasks UPDATE + submissions INSERT
  *  - FIX 4: code/text asset fetch includes Authorization header
- *  - FIX 5: revision flow shows inline notes textarea + deadline picker before firing
+ *  - FIX 5: revision flow shows inline notes textarea + deadline picker
  *  - FIX 6: revision deadline ISO string forwarded to reviewSubmission()
  */
 
@@ -29,6 +33,7 @@ import { Spinner, EmptyState, Badge, escHtml } from "../ui/components.js";
 
 const PAGE_SIZE = 20;
 const STALENESS_THRESHOLD_MS = 12 * 60 * 60 * 1000;
+const WARN_THRESHOLD_MS      =  4 * 60 * 60 * 1000; // turn red < 4h
 
 interface ReviewQueueItem {
   task: Task;
@@ -38,6 +43,7 @@ interface ReviewQueueItem {
   contributorReliability: number;
   reviewSession: ReviewSession | null;
   elapsedMs: number;
+  autoReleaseAt: Date | null; // FIX 7
 }
 
 interface Cursor {
@@ -62,6 +68,7 @@ async function fetchReviews(cursor?: Cursor): Promise<ReviewQueueItem[]> {
         asset_url,
         deliverable_type,
         created_at,
+        auto_release_at,
         ai_summary,
         contributor:profiles!submissions_contributor_id_fkey(
           username,
@@ -100,6 +107,10 @@ async function fetchReviews(cursor?: Cursor): Promise<ReviewQueueItem[]> {
       const contributor = sub.contributor as Record<string, unknown> | null;
       const task = row as unknown as Task;
 
+      // FIX 7: parse auto_release_at from the submission row
+      const autoReleaseRaw = sub.auto_release_at as string | null | undefined;
+      const autoReleaseAt  = autoReleaseRaw ? new Date(autoReleaseRaw) : null;
+
       return {
         task,
         submission: sub as unknown as Submission,
@@ -108,6 +119,7 @@ async function fetchReviews(cursor?: Cursor): Promise<ReviewQueueItem[]> {
         contributorReliability: (contributor?.review_reliability as number) ?? 0,
         reviewSession: null,
         elapsedMs: now - new Date(String(sub.created_at ?? now)).getTime(),
+        autoReleaseAt,
       } satisfies ReviewQueueItem;
     });
 }
@@ -122,7 +134,7 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
 
   container.innerHTML = renderShell({
     title: "Review Queue",
-    subtitle: "Crucible // submission_review_v5",
+    subtitle: "Crucible // submission_review_v6",
     activePath: "/reviews",
     contentHtml: `
       <div class="crucible" id="crucible-root">
@@ -169,7 +181,7 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
           <div class="crucible__decision-footer" id="decision-footer" style="display:none">
             <div id="decision-error" class="ff-badge ff-badge--error" style="display:none"></div>
 
-            <!-- Revision form — shown only when REVISE is clicked -->
+            <!-- Revision form -->
             <div id="revision-form" style="display:none; margin-bottom:8px;">
               <label class="ff-label" for="revision-notes">NOTES (optional)</label>
               <textarea id="revision-notes" class="ff-input" rows="3"
@@ -228,6 +240,46 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
   let items: ReviewQueueItem[] = [];
   let selectedItem: ReviewQueueItem | null = null;
   let firstLoad = true;
+  let countdownInterval: ReturnType<typeof setInterval> | null = null; // FIX 7
+
+  // ── FIX 7: Auto-release countdown ─────────────────────────────────────────
+  function startCountdown(autoReleaseAt: Date): void {
+    if (countdownInterval) clearInterval(countdownInterval);
+    const $banner = document.getElementById("auto-release-banner");
+    if (!$banner) return;
+
+    function tick(): void {
+      const msLeft = autoReleaseAt.getTime() - Date.now();
+      if (msLeft <= 0) {
+        $banner!.textContent = "⚠ AUTO-RELEASED — funds sent to contributor";
+        $banner!.style.color = "var(--ff-error)";
+        $banner!.style.borderColor = "var(--ff-error)";
+        if (countdownInterval) clearInterval(countdownInterval);
+        return;
+      }
+      const totalSecs  = Math.floor(msLeft / 1000);
+      const h  = Math.floor(totalSecs / 3600);
+      const m  = Math.floor((totalSecs % 3600) / 60);
+      const s  = totalSecs % 60;
+      const hh = String(h).padStart(2, "0");
+      const mm = String(m).padStart(2, "0");
+      const ss = String(s).padStart(2, "0");
+      $banner!.textContent = `⏱ AUTO-RELEASE IN ${hh}:${mm}:${ss}`;
+      const isUrgent = msLeft < WARN_THRESHOLD_MS;
+      $banner!.style.color       = isUrgent ? "var(--ff-error)"   : "var(--ff-warning)";
+      $banner!.style.borderColor = isUrgent ? "var(--ff-error)"   : "var(--ff-warning)";
+      $banner!.style.background  = isUrgent ? "var(--ff-error-bg)" : "var(--ff-warning-bg)";
+    }
+
+    tick();
+    countdownInterval = setInterval(tick, 1000);
+  }
+
+  function stopCountdown(): void {
+    if (countdownInterval) { clearInterval(countdownInterval); countdownInterval = null; }
+    const $banner = document.getElementById("auto-release-banner");
+    if ($banner) $banner.remove();
+  }
 
   // ── Revision form helpers ──────────────────────────────────────────────────
   function showRevisionForm(): void {
@@ -235,7 +287,6 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
     $btnApprove.style.display  = "none";
     $btnRevise.style.display   = "none";
     $btnReject.style.display   = "none";
-    // Default deadline: 48 h from now
     const d = new Date(Date.now() + 48 * 60 * 60 * 1000);
     $revisionDeadline.value = d.toISOString().slice(0, 16);
     $revisionNotes.focus();
@@ -252,12 +303,15 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
 
   // ── Queue card renderer ────────────────────────────────────────────────────
   function renderQueueCard(item: ReviewQueueItem): string {
-    const isStale = item.elapsedMs > STALENESS_THRESHOLD_MS;
-    // FIX 1: read typed Task fields directly — no double Record<> cast
+    const isStale   = item.elapsedMs > STALENESS_THRESHOLD_MS;
     const payoutMin = (item.task as unknown as Record<string, unknown>).payout_min ?? "?";
     const payoutMax = (item.task as unknown as Record<string, unknown>).payout_max ?? "?";
     const payout    = `$${payoutMin}\u2013$${payoutMax}`;
     const staleHtml = isStale ? Badge({ label: "STALE", variant: "warning" }) : "";
+    // Show urgency badge on queue card if < 4h
+    const urgentHtml = item.autoReleaseAt && (item.autoReleaseAt.getTime() - Date.now()) < WARN_THRESHOLD_MS
+      ? Badge({ label: "URGENT", variant: "error" })
+      : "";
     return `
       <div class="review-card" data-task-id="${escHtml(String(item.task.id))}" role="button" tabindex="0"
            aria-label="Review submission for ${escHtml(item.task.title ?? String(item.task.id))}">
@@ -267,6 +321,7 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
           <span class="review-card__elapsed">${formatElapsed(item.elapsedMs)}</span>
           <span class="review-card__payout-range">${escHtml(payout)}</span>
           ${staleHtml}
+          ${urgentHtml}
         </div>
       </div>
     `;
@@ -309,7 +364,6 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
 
     $previewBody.innerHTML = html;
 
-    // FIX 4: include Authorization header so private Supabase Storage URLs work
     const pre = $previewBody.querySelector<HTMLPreElement>("pre[data-asset-url]");
     if (pre) {
       const url = pre.dataset.assetUrl!;
@@ -322,9 +376,7 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
         const text = await res.text();
         const truncated = text.length > 8_000;
         pre.textContent = text.slice(0, 8_000);
-        if (truncated) {
-          pre.textContent += "\n\n\u2026[TRUNCATED \u2014 USE \u201cOPEN \u2197\u201d FOR FULL ASSET]";
-        }
+        if (truncated) pre.textContent += "\n\n\u2026[TRUNCATED]";
       } catch {
         pre.textContent = "Could not load asset.";
       }
@@ -338,7 +390,25 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
     const aiSummary      = String(sub.ai_summary ?? "");
     const deliverableType = String(sub.deliverable_type ?? "");
 
+    // FIX 7: build auto-release countdown banner HTML
+    const bannerHtml = item.autoReleaseAt
+      ? `<div id="auto-release-banner" style="
+            font-family: var(--ff-font-mono);
+            font-size: 11px;
+            letter-spacing: 0.08em;
+            padding: 6px 10px;
+            border: 1px solid var(--ff-warning);
+            border-radius: 4px;
+            background: var(--ff-warning-bg);
+            color: var(--ff-warning);
+            margin-bottom: 10px;
+            text-align: center;
+         ">⏱ CALCULATING...</div>`
+      : "";
+
     $decisionBody.innerHTML = `
+      ${bannerHtml}
+
       <div class="crucible-stat">
         <span class="crucible-stat__label">Contributor</span>
         <span class="crucible-stat__value">${escHtml(item.contributorName)}</span>
@@ -375,6 +445,13 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
     $decisionError.textContent     = "";
     hideRevisionForm();
     [$btnApprove, $btnRevise, $btnReject].forEach(b => { b.disabled = false; });
+
+    // FIX 7: start countdown if auto_release_at is present
+    if (item.autoReleaseAt) {
+      startCountdown(item.autoReleaseAt);
+    } else {
+      stopCountdown();
+    }
   }
 
   // ── Select item ────────────────────────────────────────────────────────────
@@ -394,6 +471,7 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
 
     if (selectedItem && String(selectedItem.task.id) === taskId) {
       selectedItem = null;
+      stopCountdown(); // FIX 7
       $previewBody.innerHTML   = `<div class="crucible-placeholder"><span>&#9632;&nbsp;SELECT SUBMISSION</span></div>`;
       $previewLabel.textContent = "ASSET PREVIEW";
       $previewOpenLnk.style.display = "none";
@@ -439,7 +517,6 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
   $btnApprove.addEventListener("click", () =>
     handleDecision("approved", "great_work" as DecisionReason));
 
-  // REVISE: expand inline form first, fire on confirm
   $btnRevise.addEventListener("click", () => showRevisionForm());
   $btnReviseCancel.addEventListener("click", () => hideRevisionForm());
   $btnReviseConfirm.addEventListener("click", () => {
@@ -483,7 +560,6 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
       frag.appendChild(card);
     });
 
-    // FIX 2: use firstLoad flag instead of items.length === newItems.length
     if (firstLoad) {
       $queueList.innerHTML = "";
       firstLoad = false;
@@ -522,6 +598,7 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
     cursor        = undefined;
     selectedItem  = null;
     firstLoad     = true;
+    stopCountdown(); // FIX 7
     $queueList.innerHTML          = Spinner({ label: "Refreshing queue..." });
     $previewBody.innerHTML        = `<div class="crucible-placeholder"><span>&#9632;&nbsp;SELECT SUBMISSION</span></div>`;
     $previewLabel.textContent     = "ASSET PREVIEW";
@@ -533,10 +610,8 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
   $loadMoreBtn.addEventListener("click", () => loadPage());
   await loadPage();
 
-  // FIX 3: listen on BOTH tasks UPDATE (under_review) AND submissions INSERT
-  // so new arrivals (submitted → under_review transition) trigger a reload.
   const channel = supabase
-    .channel("review-queue-v5")
+    .channel("review-queue-v6")
     .on(
       "postgres_changes",
       { event: "UPDATE", schema: "public", table: "tasks", filter: "status=eq.under_review" },
@@ -550,6 +625,7 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
     .subscribe();
 
   return () => {
+    stopCountdown(); // FIX 7
     supabase.removeChannel(channel);
   };
 }

@@ -1,29 +1,10 @@
 /**
  * apps/web/src/pages/landing.ts — Public landing page.
  *
- * IMAGE ASSETS NEEDED (generate after code is stable):
- *
- *   1. HERO_ART
- *      Prompt: "dark cinematic UI screenshot showing a task marketplace
- *      dashboard with monospace typography, gold accent badges, minimal
- *      dark surfaces — no faces, no logos"
- *      Size: 1200×800px, WebP
- *      Placement: .ff-landing__hero-art img slot
- *      Replace: <img src="/assets/hero-art.webp" ...>
- *
- *   2. HOW_IT_WORKS_ILLUSTRATION
- *      Prompt: "abstract geometric pipeline diagram — three nodes connected
- *      by arrows, dark background, off-white lines, minimal and technical"
- *      Size: 800×400px, WebP
- *      Placement: .ff-landing__how-illustration
- *      Replace: <img src="/assets/how-it-works.webp" ...>
- *
- *   3. SOCIAL_PROOF_AVATAR_GRID (optional)
- *      Prompt: "grid of 5 abstract user avatar silhouettes, dark surfaces,
- *      monochrome, no faces"
- *      Size: 240×48px, WebP
- *      Placement: .ff-landing__avatars img slot
- *      Replace: <img src="/assets/avatar-grid.webp" ...>
+ * CHANGES:
+ *  - Stat strip now calls get-public-stats edge fn on mount.
+ *    Animated counters: open tasks, total paid out, contributor count.
+ *    Static stats retained for the two invariant marketing claims (10%, 48h).
  */
 
 export async function mountLanding(container: HTMLElement): Promise<() => void> {
@@ -58,7 +39,7 @@ export async function mountLanding(container: HTMLElement): Promise<() => void> 
             auto-verified before money moves.
           </p>
 
-          <!-- Role-split CTAs — host primary, contributor secondary -->
+          <!-- Role-split CTAs -->
           <div class="ff-landing__cta-row">
             <div class="ff-landing__cta-block">
               <a href="/login?mode=signup&role=host" class="ff-btn ff-btn--primary">Post a Project</a>
@@ -80,21 +61,13 @@ export async function mountLanding(container: HTMLElement): Promise<() => void> 
               <span class="ff-landing__avatar-dot"></span>
             </div>
             <span class="ff-landing__social-text">
-              Designed for builders who are done waiting 60 days to get paid or arguing about what "done" means.
+              Designed for builders who are done waiting 60 days to get paid or arguing about what \"done\" means.
             </span>
           </div>
         </div>
 
         <!-- Hero visual -->
         <div class="ff-landing__hero-art" aria-hidden="true">
-          <!--
-            IMAGE_ASSET: hero-art.webp
-            Replace the pipeline widget below with:
-            <img src="/assets/hero-art.webp" alt="" width="560" height="400"
-                 loading="eager" decoding="async"
-                 style="width:100%;height:auto;border-radius:8px;
-                        border:1px solid rgba(240,237,232,.08)" />
-          -->
           <div class="ff-pipeline">
             <div class="ff-pipeline__node ff-pipeline__node--active">
               <span class="ff-pipeline__icon">📋</span>
@@ -132,13 +105,13 @@ export async function mountLanding(container: HTMLElement): Promise<() => void> 
         </div>
         <div class="ff-landing__stat-divider" aria-hidden="true"></div>
         <div class="ff-landing__stat">
-          <span class="ff-landing__stat-num">AI</span>
-          <span class="ff-landing__stat-label">Scope engine powered by GPT-4o</span>
+          <span id="stat-open-tasks" class="ff-landing__stat-num" aria-live="polite">—</span>
+          <span class="ff-landing__stat-label">Open tasks right now</span>
         </div>
         <div class="ff-landing__stat-divider" aria-hidden="true"></div>
         <div class="ff-landing__stat">
-          <span class="ff-landing__stat-num">0</span>
-          <span class="ff-landing__stat-label">Ambiguous deliverables — spec enforced</span>
+          <span id="stat-paid-out" class="ff-landing__stat-num" aria-live="polite">—</span>
+          <span class="ff-landing__stat-label">Paid out to contributors</span>
         </div>
       </div>
 
@@ -158,7 +131,7 @@ export async function mountLanding(container: HTMLElement): Promise<() => void> 
               <p class="ff-step__desc">
                 You describe the work in plain language. The AI turns it into a rigid
                 spec: JSON fields, file formats, polygon counts, sample rates — the exact
-                rules for "done". Then you fund the project with a hotel-style hold.
+                rules for \"done\". Then you fund the project with a hotel-style hold.
               </p>
             </li>
             <li class="ff-landing__step">
@@ -184,7 +157,7 @@ export async function mountLanding(container: HTMLElement): Promise<() => void> 
               <h3 class="ff-step__title">Host approves → funds release</h3>
               <p class="ff-step__desc">
                 Host has 48 hours to review. If they don't act, funds auto-release to the
-                contributor. Every decision is immutably logged. No arguing about "done".
+                contributor. Every decision is immutably logged. No arguing about \"done\".
               </p>
             </li>
           </ol>
@@ -243,7 +216,7 @@ export async function mountLanding(container: HTMLElement): Promise<() => void> 
     </div>
   `;
 
-  // Add CTA subtext styles inline (scoped to landing, no global side effects)
+  // Scoped styles
   const style = document.createElement("style");
   style.textContent = `
     .ff-landing__cta-block {
@@ -259,8 +232,68 @@ export async function mountLanding(container: HTMLElement): Promise<() => void> 
       max-width: 220px;
       line-height: 1.5;
     }
+    .ff-landing__stat-num--loading {
+      opacity: 0.4;
+    }
   `;
   container.appendChild(style);
+
+  // ── Live stat strip ──────────────────────────────────────────────────────
+  // Animates a number from 0 → target over ~600ms
+  function animateCount(
+    el: HTMLElement,
+    target: number,
+    format: (n: number) => string,
+  ): void {
+    const duration = 600;
+    const start    = performance.now();
+    el.classList.remove("ff-landing__stat-num--loading");
+    function tick(now: number) {
+      const t = Math.min((now - start) / duration, 1);
+      // ease-out cubic
+      const eased = 1 - Math.pow(1 - t, 3);
+      el.textContent = format(Math.round(eased * target));
+      if (t < 1) requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+  }
+
+  function formatPaidOut(cents: number): string {
+    const dollars = cents / 100;
+    if (dollars >= 1_000_000) return `$${(dollars / 1_000_000).toFixed(1)}M`;
+    if (dollars >= 1_000)     return `$${Math.round(dollars / 1_000)}K`;
+    return `$${Math.round(dollars)}`;
+  }
+
+  const $openTasks = container.querySelector<HTMLElement>("#stat-open-tasks");
+  const $paidOut   = container.querySelector<HTMLElement>("#stat-paid-out");
+
+  if ($openTasks) $openTasks.classList.add("ff-landing__stat-num--loading");
+  if ($paidOut)   $paidOut.classList.add("ff-landing__stat-num--loading");
+
+  // Fetch from get-public-stats edge fn (no auth required)
+  const supabaseUrl = (window as unknown as Record<string,string>).__FF_SUPABASE_URL__
+    ?? import.meta?.env?.VITE_SUPABASE_URL
+    ?? "";
+
+  if (supabaseUrl) {
+    fetch(`${supabaseUrl}/functions/v1/get-public-stats`, {
+      headers: { "Content-Type": "application/json" },
+    })
+      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+      .then((data: { open_task_count: number; total_paid_out_cents: number; contributor_count: number }) => {
+        if ($openTasks) animateCount($openTasks, data.open_task_count, n => String(n));
+        if ($paidOut)   animateCount($paidOut,   data.total_paid_out_cents, formatPaidOut);
+      })
+      .catch(() => {
+        // Graceful fallback — show static values instead of —
+        if ($openTasks) { $openTasks.classList.remove("ff-landing__stat-num--loading"); $openTasks.textContent = "0"; }
+        if ($paidOut)   { $paidOut.classList.remove("ff-landing__stat-num--loading");   $paidOut.textContent   = "$0"; }
+      });
+  } else {
+    if ($openTasks) { $openTasks.classList.remove("ff-landing__stat-num--loading"); $openTasks.textContent = "0"; }
+    if ($paidOut)   { $paidOut.classList.remove("ff-landing__stat-num--loading");   $paidOut.textContent   = "$0"; }
+  }
 
   return () => {};
 }
