@@ -6,8 +6,12 @@
  * Flow:
  * 1. Host fills brief (title, description, projectType, references, budget range)
  * 2. Host clicks SCOPE → generateScopedTasks(intent) → ScopedTask[] + readmeDraft + folderStructure
- * 3. Host reviews, edits payout within AI range, publishes
- * 4. Project status = 'active', project_wallet row created (deposited = 0)
+ * 3. Host reviews tasks + payouts
+ * 4. [NEW — roadmap 1.2] FUND_PROJECT step:
+ *    - Shows total max payout, platform fee, max hold on card
+ *    - If Stripe Connect not set up → nudge to connect in-context
+ *    - Confirms host understands escrow before publish
+ * 5. Host confirms → activateProject + createProjectWallet → /project/:id
  */
 
 import { getSupabase } from "../auth/index.js";
@@ -17,6 +21,26 @@ import type { ScopedTask } from "@fatedfortress/protocol";
 import { renderShell } from "../ui/shell.js";
 import { insertAuditEntry, persistScopedProject, updateTaskPayout, activateProject, createProjectWallet, getInsertedTasks } from "../net/data.js";
 import { escHtml } from "../ui/components.js";
+
+// ─── Payout math (shared with tasks.ts, roadmap 1.2 / 1.3) ─────────────────
+
+const PLATFORM_FEE_BPS = 1000; // 10%
+
+function computeTotalFundingRequired(tasks: ScopedTask[]): {
+  totalMaxPayout: number;
+  platformFee: number;
+  maxHold: number;
+} {
+  const totalMaxPayout = parseFloat(
+    tasks.reduce((sum, t) => sum + t.payoutMax, 0).toFixed(2)
+  );
+  const platformFee = parseFloat(
+    (totalMaxPayout * PLATFORM_FEE_BPS / 10_000).toFixed(2)
+  );
+  // The hold is the full totalMaxPayout — fee is deducted from that at capture
+  const maxHold = totalMaxPayout;
+  return { totalMaxPayout, platformFee, maxHold };
+}
 
 export async function mountCreate(container: HTMLElement): Promise<() => void> {
   await requireAuth();
@@ -115,7 +139,7 @@ export async function mountCreate(container: HTMLElement): Promise<() => void> {
         </section>
       </div>
 
-      <!-- Full-screen generation phase overlay (high-contrast, keeps density) -->
+      <!-- Full-screen generation phase overlay -->
       <div id="forge-overlay" class="hidden" style="
         position:fixed; inset:0; z-index:60;
         background: var(--ff-ink); color: var(--ff-paper);
@@ -133,20 +157,89 @@ export async function mountCreate(container: HTMLElement): Promise<() => void> {
         <div style="flex:1; border:1px solid var(--ff-paper); padding:12px; white-space:pre-wrap; font-size:11px;" id="forge-overlay-log">[BOOT] scope_worker ready</div>
       </div>
 
+      <!-- Scoped task preview (step 3) -->
       <div class="ff-panel hidden" id="scoped-preview" style="margin-top:16px">
         <div id="scoped-readme"></div>
         <div id="scoped-structure" style="margin-top:10px"></div>
         <h2 class="ff-h1" style="font-size:16px;margin-top:16px">Generated Tasks</h2>
-        <p class="ff-subtitle">Review and set final payouts, then publish.</p>
+        <p class="ff-subtitle">Review and set final payouts, then continue to funding.</p>
         <div id="scoped-tasks" style="margin-top:10px"></div>
         <div style="display:flex; gap:10px; margin-top:14px">
           <button class="ff-btn" style="background: var(--ff-paper); color: var(--ff-ink); flex:1" id="re-scope-btn">REGENERATE</button>
+          <button class="ff-btn" style="flex:1" id="fund-step-btn">
+            REVIEW_FUNDING →
+          </button>
+        </div>
+      </div>
+
+      <!-- ── Fund Project step (roadmap 1.2) — shown after task review ── -->
+      <div class="ff-panel hidden" id="fund-project-panel" style="margin-top:16px; border:2px solid var(--ff-ink);">
+        <div class="ff-kpi__label" style="margin-bottom:16px;">FUND_PROJECT</div>
+
+        <p class="ff-subtitle" style="font-family:var(--ff-font-mono);font-size:12px;line-height:1.7;margin-bottom:20px;">
+          We've calculated the maximum possible payout for this scope.<br/>
+          We'll pre-authorize this amount when a contributor claims a task — using a
+          <strong>hotel-style hold</strong> on your card. You are <em>not</em> charged until
+          work is approved.
+        </p>
+
+        <!-- Funding breakdown -->
+        <div id="fund-breakdown" style="
+          font-family:var(--ff-font-mono);font-size:13px;
+          display:flex;flex-direction:column;gap:8px;
+          border:1px solid var(--ff-muted);padding:16px;margin-bottom:20px;
+        ">
+          <div style="display:flex;justify-content:space-between;">
+            <span style="color:var(--ff-muted);">TASK_TOTAL_MAX_PAYOUT</span>
+            <span id="fund-total" style="font-weight:900;">$—</span>
+          </div>
+          <div style="display:flex;justify-content:space-between;">
+            <span style="color:var(--ff-muted);">PLATFORM_FEE (10%)</span>
+            <span id="fund-fee" style="color:var(--ff-muted);">$—</span>
+          </div>
+          <div style="border-top:1px solid var(--ff-muted);padding-top:8px;display:flex;justify-content:space-between;">
+            <span>MAX_HOLD_ON_CARD</span>
+            <span id="fund-hold" style="font-weight:900;">$—</span>
+          </div>
+        </div>
+
+        <!-- Tooltip-style hold explainer -->
+        <div style="
+          font-family:var(--ff-font-mono);font-size:11px;color:var(--ff-muted);
+          border-left:2px solid var(--ff-muted);padding-left:10px;margin-bottom:20px;
+          line-height:1.6;
+        ">
+          ⓘ A hold is not a charge. Funds are reserved so contributors never work for
+          phantom money. If a task expires or is rejected after failed checks, the hold
+          is released automatically.
+        </div>
+
+        <!-- Stripe Connect nudge (shown if not connected) -->
+        <div id="stripe-connect-nudge" class="hidden" style="
+          background:var(--ff-paper);border:1px solid var(--ff-ink);
+          padding:14px;margin-bottom:16px;font-family:var(--ff-font-mono);font-size:12px;
+        ">
+          <div style="font-weight:900;margin-bottom:6px;">⚡ CONNECT_PAYOUT_ACCOUNT_REQUIRED</div>
+          <div style="color:var(--ff-muted);margin-bottom:12px;">
+            You need a Stripe Connect account to receive payouts when hosts fund tasks.
+            This takes ~2 minutes.
+          </div>
+          <a href="/settings?section=stripe-connect&return=/create" class="ff-btn" style="text-decoration:none;display:inline-block;">
+            CONNECT_STRIPE_ACCOUNT
+          </a>
+        </div>
+
+        <!-- Actions -->
+        <div style="display:flex;gap:10px;">
+          <button class="ff-btn" style="background:var(--ff-paper);color:var(--ff-ink);flex:1" id="fund-back-btn">
+            ← BACK_TO_TASKS
+          </button>
           <button class="ff-btn" style="flex:1" id="publish-btn">
-            <span class="publish-text">PUBLISH_TASKS</span>
+            <span class="publish-text">FUND_AND_PUBLISH</span>
             <span class="publish-loading hidden">PUBLISHING...</span>
           </button>
         </div>
-        <div id="publish-error" class="hidden" style="margin-top:10px; font-family:var(--ff-font-mono); font-size:11px; color:var(--ff-error);"></div>
+        <div id="publish-error" class="hidden" style="margin-top:10px;font-family:var(--ff-font-mono);font-size:11px;color:var(--ff-error);"></div>
       </div>
     `,
   });
@@ -159,29 +252,48 @@ export async function mountCreate(container: HTMLElement): Promise<() => void> {
   let references: string[] = [];
   let persistedTaskRows: Array<{ id: string; payout_min: number; payout_max: number; title: string }> = [];
 
-  // ── Events ───────────────────────────────────────────────────────────
+  // ── Element refs ─────────────────────────────────────────────────
   const $form = container.querySelector("#create-form") as HTMLFormElement;
   const $scopeBtn = container.querySelector("#scope-btn") as HTMLButtonElement;
   const $btnText = container.querySelector(".btn-text") as HTMLElement;
   const $btnLoading = container.querySelector(".btn-loading") as HTMLElement;
   const $preview = container.querySelector("#scoped-preview") as HTMLElement;
+  const $fundPanel = container.querySelector("#fund-project-panel") as HTMLElement;
   const $taskList = container.querySelector("#scoped-tasks") as HTMLElement;
   const $readme = container.querySelector("#scoped-readme") as HTMLElement;
   const $structure = container.querySelector("#scoped-structure") as HTMLElement;
 
+  // ── Scope button ─────────────────────────────────────────────────
   $scopeBtn.addEventListener("click", async () => {
     if (!$scopeBtn.disabled) await handleScope();
   });
 
+  // ── Task review → Fund step transition ───────────────────────────
+  container.querySelector("#fund-step-btn")?.addEventListener("click", () => {
+    // Save any edited payouts first
+    syncPayoutEdits();
+    showFundStep();
+  });
+
+  // ── Fund step back ───────────────────────────────────────────────
+  container.querySelector("#fund-back-btn")?.addEventListener("click", () => {
+    $fundPanel.classList.add("hidden");
+    $preview.classList.remove("hidden");
+  });
+
+  // ── Publish (from fund step) ─────────────────────────────────────
   container.querySelector("#publish-btn")?.addEventListener("click", handlePublish);
+
+  // ── Regenerate ───────────────────────────────────────────────────
   container.querySelector("#re-scope-btn")?.addEventListener("click", handleScope);
 
+  // ── Description counter ──────────────────────────────────────────
   const $descTextarea = container.querySelector("#project-description") as HTMLTextAreaElement;
   $descTextarea.addEventListener("input", () => {
     (container.querySelector("#desc-count") as HTMLElement).textContent = String($descTextarea.value.length);
   });
 
-  // ── Reference file picker ────────────────────────────────────────────
+  // ── Reference file picker ─────────────────────────────────────────
   const $refInput = container.querySelector("#ref-input") as HTMLInputElement;
   const $fileList = container.querySelector("#file-list") as HTMLElement;
 
@@ -189,17 +301,14 @@ export async function mountCreate(container: HTMLElement): Promise<() => void> {
 
   $refInput.addEventListener("change", () => {
     const files = Array.from($refInput.files ?? []);
-    // Accumulate names into the references list (storage upload is out of scope here).
     for (const f of files) {
       if (!references.includes(f.name)) references.push(f.name);
     }
-    $fileList.textContent = references.length
-      ? references.join(", ")
-      : "";
+    $fileList.textContent = references.length ? references.join(", ") : "";
     $refInput.value = "";
   });
 
-  // ── Handle SCOPE ────────────────────────────────────────────────────
+  // ── Handle SCOPE ─────────────────────────────────────────────────
   async function handleScope(): Promise<void> {
     const title = ($form.querySelector("#project-title") as HTMLInputElement).value.trim();
     const description = ($descTextarea as HTMLTextAreaElement).value.trim();
@@ -215,6 +324,10 @@ export async function mountCreate(container: HTMLElement): Promise<() => void> {
 
     setLoading(true);
     startForgeOverlay();
+
+    // Reset state on re-scope
+    $fundPanel.classList.add("hidden");
+    $preview.classList.add("hidden");
 
     try {
       projectId = crypto.randomUUID();
@@ -275,7 +388,81 @@ export async function mountCreate(container: HTMLElement): Promise<() => void> {
     }
   }
 
-  // ── Handle Publish ───────────────────────────────────────────────────
+  // ── Show Fund Project step ────────────────────────────────────────
+  function showFundStep(): void {
+    // Recompute totals from current payout inputs
+    const $inputs = $taskList.querySelectorAll<HTMLInputElement>(".task-payout-input");
+    const currentPayouts: number[] = [];
+    $inputs.forEach(inp => {
+      const v = parseFloat(inp.value);
+      currentPayouts.push(isNaN(v) ? 0 : v);
+    });
+
+    // Use actual edited maxes for the hold calculation
+    const editedMax = generatedTasks.map((t, i) => {
+      const edited = currentPayouts[i] ?? t.payoutMax;
+      return { ...t, payoutMax: edited };
+    });
+
+    const { totalMaxPayout, platformFee, maxHold } = computeTotalFundingRequired(editedMax);
+
+    const $total = container.querySelector("#fund-total") as HTMLElement;
+    const $fee = container.querySelector("#fund-fee") as HTMLElement;
+    const $hold = container.querySelector("#fund-hold") as HTMLElement;
+
+    $total.textContent = `$${totalMaxPayout.toFixed(2)}`;
+    $fee.textContent = `$${platformFee.toFixed(2)}`;
+    $hold.textContent = `$${maxHold.toFixed(2)}`;
+
+    // Check Stripe Connect status — show nudge if not connected
+    checkStripeConnectStatus();
+
+    $preview.classList.add("hidden");
+    $fundPanel.classList.remove("hidden");
+  }
+
+  async function checkStripeConnectStatus(): Promise<void> {
+    const $nudge = container.querySelector("#stripe-connect-nudge") as HTMLElement;
+    try {
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("stripe_charges_enabled")
+        .eq("id", user.id)
+        .single();
+
+      const connected = (profile as { stripe_charges_enabled?: boolean } | null)?.stripe_charges_enabled === true;
+      $nudge.classList.toggle("hidden", connected);
+
+      // Disable publish button if not connected
+      const $publishBtn = container.querySelector("#publish-btn") as HTMLButtonElement;
+      if (!connected) {
+        $publishBtn.disabled = true;
+        $publishBtn.title = "Connect your Stripe account first";
+      } else {
+        $publishBtn.disabled = false;
+        $publishBtn.title = "";
+      }
+    } catch {
+      // Non-fatal — don't block the step
+      $nudge.classList.add("hidden");
+    }
+  }
+
+  // ── Sync payout edits from inputs into generatedTasks ────────────
+  function syncPayoutEdits(): void {
+    const $inputs = $taskList.querySelectorAll<HTMLInputElement>(".task-payout-input");
+    $inputs.forEach((inp, i) => {
+      const val = parseFloat(inp.value);
+      if (!isNaN(val) && generatedTasks[i]) {
+        generatedTasks[i].payoutMax = Math.min(
+          Math.max(val, generatedTasks[i].payoutMin),
+          generatedTasks[i].payoutMax
+        );
+      }
+    });
+  }
+
+  // ── Handle Publish (from Fund step) ──────────────────────────────
   async function handlePublish(): Promise<void> {
     if (!projectId) return;
 
@@ -290,6 +477,7 @@ export async function mountCreate(container: HTMLElement): Promise<() => void> {
     $publishError.classList.add("hidden");
 
     try {
+      // Persist any last payout edits
       const $payoutInputs = $taskList.querySelectorAll(".task-payout-input") as NodeListOf<HTMLInputElement>;
 
       for (let i = 0; i < $payoutInputs.length; i++) {
@@ -315,7 +503,7 @@ export async function mountCreate(container: HTMLElement): Promise<() => void> {
     }
   }
 
-  // ── Render task preview ───────────────────────────────────────────────
+  // ── Render task preview ───────────────────────────────────────────
   function renderTaskPreview(): void {
     if (generatedReadme) {
       $readme.innerHTML = `
@@ -366,7 +554,7 @@ export async function mountCreate(container: HTMLElement): Promise<() => void> {
     $btnLoading.classList.toggle("hidden", !loading);
   }
 
-  // ── Forge overlay (high-contrast generation phase) ─────────────────────
+  // ── Forge overlay ────────────────────────────────────────────────
   let forgeTimer: ReturnType<typeof setInterval> | null = null;
   let forgeProgress = 0;
 
