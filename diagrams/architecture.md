@@ -80,9 +80,9 @@ graph TD
 
         subgraph EdgeFunctions["Edge Functions"]
             claim_task["claim-task<br/>Active claim path — invoked from tasks.ts<br/>Locks wallet + updates task state"]:::edgefn
-            %% create-payment-intent is LEGACY — not invoked in active claim path.
-            %% tasks.ts calls claim-task directly. Retained here for audit reference only.
-            create_pi["create-payment-intent<br/>Stripe PI manual capture<br/>LEGACY — not in active claim path"]:::legacy
+            %% create-payment-intent: LEGACY — no active callers in codebase.
+            %% tasks.ts invokes claim-task directly. Retained for audit reference only.
+            create_pi["create-payment-intent<br/>Stripe PI manual capture<br/>LEGACY — no active callers"]:::legacy
             stripe_wh["stripe-webhook<br/>PI succeeded/failed<br/>transfer.created - account.updated"]:::edgefn
             asset_scan["asset-scanner<br/>9-sub-pass layered engine<br/>deterministic to heuristic to gap"]:::edgefn
             verify_fn["verify-submission<br/>Deep-Spec Gate<br/>GLB / WAV / MP3 / PNG / JPEG"]:::edgefn
@@ -94,10 +94,11 @@ graph TD
             expire_claims["expire-claims Cron 5min<br/>Reclaim Stale Soft-locks<br/>unlock_wallet RPC"]:::edgefn
             %% storage_fn: previously r2-upload-url (Cloudflare R2, deleted).
             %% Active function is supabase-storage-upload → Supabase Storage.
-            storage_fn["supabase-storage-upload<br/>Upload URL / Supabase Storage path"]:::edgefn
+            storage_fn["supabase-storage-upload<br/>Upload URL - Supabase Storage path"]:::edgefn
             connect_onboard["stripe-connect-onboard<br/>Stripe Express Onboarding"]:::edgefn
             connect_link["stripe-connect-link<br/>Dashboard Link / Reauth"]:::edgefn
             github_fn["github-oauth<br/>Server-side Token Exchange"]:::edgefn
+            get_stripe_status["get-stripe-status<br/>Read Stripe account status<br/>charges_enabled / payouts_enabled"]:::edgefn
         end
 
         subgraph Storage["Storage - Supabase Storage"]
@@ -131,6 +132,8 @@ graph TD
     payout_h -->|"fundProjectWallet RPC"| wallet
     settings_p -->|"GitHub OAuth"| github_fn
     github_fn --> GitHub
+    settings_p -->|"fetchStripeStatus on mount"| get_stripe_status
+    get_stripe_status -->|"GET /v1/accounts/:id"| Stripe
 
     %% Create / Scope
     create_p -->|"Generate Tasks"| scope_h
@@ -149,8 +152,9 @@ graph TD
     tasks_p -->|"Claim Task — invoke claim-task edge fn"| claim_task
     claim_task -->|"Update claim state"| tasks
     claim_task -->|"Lock funds / claim RPC"| wallet
+    claim_task -->|"Create PI manual capture"| Stripe
 
-    %% create-payment-intent — LEGACY, no active callers; dashed reference only
+    %% create-payment-intent — LEGACY, dashed reference only, no active callers
     create_pi -.->|"(legacy) PI manual capture"| Stripe
     create_pi -.->|"(legacy) Store payment_intent_id"| tasks
 
