@@ -1,2 +1,0 @@
--- DELETED: replaced by 20260424_018_payment_intent_roles_path.sql
--- This file is intentionally empty and will be removed in the next cleanup pass.

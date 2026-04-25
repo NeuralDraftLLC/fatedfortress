@@ -1,2 +1,0 @@
--- DELETED: replaced by 20260424_021_marketplace_rls_context.sql
--- This file is intentionally empty and will be removed in the next cleanup pass.

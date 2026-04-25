@@ -1,2 +1,0 @@
--- DELETED: replaced by 20260424_019_skills_and_claimed_unique.sql
--- This file is intentionally empty and will be removed in the next cleanup pass.

@@ -1,2 +1,0 @@
--- DELETED: replaced by 20260424_015_expand_task_status_enum.sql
--- This file is intentionally empty and will be removed in the next cleanup pass.
