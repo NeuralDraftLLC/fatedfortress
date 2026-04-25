@@ -71,6 +71,7 @@ export async function mountProfile(container: HTMLElement): Promise<() => void> 
   }));
 
   // ── publishToHereNow gate ────────────────────────────────────────────────
+  // Use reliability_score — the canonical DB column name.
   const reliability   = (profile as Record<string, unknown>)?.reliability_score as number | null;
   const totalApproved = (profile as Record<string, unknown>)?.total_approved as number | null ?? 0;
   const hereNowEligible =
@@ -129,10 +130,10 @@ export async function mountProfile(container: HTMLElement): Promise<() => void> 
       <section style="margin-bottom:32px;border-bottom:1px solid var(--ff-outline-variant);padding-bottom:28px">
         <h2 class="ff-section-label" style="margin-bottom:16px">RELIABILITY SIGNALS</h2>
         <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px">
-          ${reliabilityCell("Reliability",  fmt(profile?.review_reliability, "pct"))}
-          ${reliabilityCell("Approval Rate", fmt(profile?.approval_rate,      "pct"))}
-          ${reliabilityCell("Avg Revisions", fmt(profile?.avg_revision_count,  "dec"))}
-          ${reliabilityCell("Avg Response",  fmt(profile?.avg_response_time_minutes, "min"))}
+          ${reliabilityCell("Reliability",  fmt(reliability, "pct"))}
+          ${reliabilityCell("Approval Rate", fmt((profile as Record<string, unknown>)?.approval_rate as number | null, "pct"))}
+          ${reliabilityCell("Avg Revisions", fmt((profile as Record<string, unknown>)?.avg_revision_count as number | null, "dec"))}
+          ${reliabilityCell("Avg Response",  fmt((profile as Record<string, unknown>)?.avg_response_time_minutes as number | null, "min"))}
           ${reliabilityCell("Approved",      String(profile?.total_approved ?? 0))}
           ${reliabilityCell("Rejected",      String(profile?.total_rejected ?? 0))}
         </div>
