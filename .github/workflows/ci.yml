@@ -8,6 +8,7 @@
 #   4. migrations  — supabase db push --dry-run (schema drift guard, push-to-main only)
 #   5. security    — supabase db lint (security advisor, push-to-main only)
 #   6. deploy      — supabase functions deploy (push-to-main only, needs build + migrations)
+#   7. deploy-web  — Railway web deploy via CLI (push-to-main only, needs build)
 #
 # Secrets required (repo Settings → Secrets → Actions):
 #   SUPABASE_ACCESS_TOKEN   — personal access token from supabase.com/dashboard/account/tokens
@@ -15,6 +16,8 @@
 #   SUPABASE_PROJECT_REF    — project ref slug (e.g. pfrtxfuuatzgddenyttm)
 #   VITE_SUPABASE_URL       — public Supabase URL (safe to store as secret)
 #   VITE_SUPABASE_ANON_KEY  — public anon key (safe to store as secret)
+#   RAILWAY_TOKEN           — Railway API token (from railway.app → Account Settings → Tokens)
+#   RAILWAY_SERVICE_ID      — Railway service ID for the web frontend
 
 name: CI
 
@@ -204,7 +207,8 @@ jobs:
 
       - name: Smoke-test deployed functions
         # Hits the health endpoint of each critical function.
-        # A non-2xx response fails the pipeline before any traffic hits it.
+        # A non-2xx response (5xx) fails the pipeline.
+        # scope-tasks is intentionally excluded — it is tombstoned (returns 410).
         env:
           SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           ANON_KEY:     ${{ secrets.VITE_SUPABASE_ANON_KEY }}
@@ -224,10 +228,52 @@ jobs:
             echo "✅  ${fn} → HTTP ${status}"
           }
 
-          check scope-tasks
           check claim-task
           check submit-task
           check review-submission
           check expire-claims
           check auto-release
           check stripe-webhook
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 7. Deploy web (Railway)
+# Push-to-main only. Waits for build to succeed before deploying.
+# Uses the Railway CLI to trigger a deployment from the pre-built dist artifact.
+#
+# Required secrets:
+#   RAILWAY_TOKEN      — railway.app → Account Settings → API Tokens
+#   RAILWAY_SERVICE_ID — Railway service ID for the web frontend
+# ──────────────────────────────────────────────────────────────────────────────
+  deploy-web:
+    name: Deploy web → Railway
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [build, lint]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: apps/web/dist
+
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy to Railway
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+        run: |
+          railway up \
+            --service ${{ secrets.RAILWAY_SERVICE_ID }} \
+            --detach
