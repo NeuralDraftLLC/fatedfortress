@@ -5,15 +5,21 @@
  * System of record: Supabase
  *
  * Routes:
- *   /                — Public landing page (no auth required)
- *   /login           — Supabase Auth
- *   /tasks           — Contributor: browse (public) + claim (auth-gated)
- *   /create          — Host: project brief + SCOPE
- *   /submit/:taskId  — Contributor: upload + submit
- *   /reviews         — Host: review queue (MVP moat)
- *   /project/:id     — Project detail + activity feed
- *   /profile         — Profile + review_reliability
- *   /settings        — GitHub + Stripe Connect onboarding
+ *   /                  — Public landing page (no auth required)
+ *   /login             — Supabase Auth (reads ?mode, ?role, ?next)
+ *   /auth/callback     — Supabase OAuth/magic-link return (new)
+ *   /tasks             — Contributor: browse (public) + claim (auth-gated)
+ *   /create            — Host: project brief + SCOPE
+ *   /submit/:taskId    — Contributor: upload + submit
+ *   /reviews           — Host: review queue (MVP moat)
+ *   /project/:id       — Project detail + activity feed
+ *   /profile           — Profile + review_reliability
+ *   /settings          — GitHub + Stripe Connect onboarding
+ *
+ * ?next= preservation:
+ *   requireAuth() appends ?next=<encoded-path> when redirecting to /login.
+ *   After sign-in, the router reads ?next= and navigates there instead of
+ *   the default role-based redirect.
  */
 
 import * as Sentry from "@sentry/browser";
@@ -37,12 +43,12 @@ Sentry.init({
 // ── Shell HTML (rendered once; nav active state updated per route) ─────────
 
 const NAV_LINKS: Array<{ href: string; label: string; roles?: string[] }> = [
-  { href: "/tasks",   label: "Tasks" },
-  { href: "/submit",  label: "Submit",  roles: ["contributor"] },
-  { href: "/create",  label: "Create",  roles: ["host"] },
-  { href: "/reviews", label: "Reviews", roles: ["host"] },
-  { href: "/profile", label: "Profile" },
-  { href: "/settings",label: "Settings" },
+  { href: "/tasks",    label: "Tasks" },
+  { href: "/submit",   label: "Submit",   roles: ["contributor"] },
+  { href: "/create",   label: "Create",   roles: ["host"] },
+  { href: "/reviews",  label: "Reviews",  roles: ["host"] },
+  { href: "/profile",  label: "Profile" },
+  { href: "/settings", label: "Settings" },
 ];
 
 function buildShell(role: string | null): string {
@@ -100,19 +106,36 @@ function getMain(): HTMLElement {
   return document.getElementById("ff-main") as HTMLElement;
 }
 
+// ── ?next= helpers ──────────────────────────────────────────────────────────
+
+/** Pop the ?next= param if we just landed from a requireAuth() redirect. */
+function consumeNextParam(): string | null {
+  const params = new URLSearchParams(window.location.search);
+  const next   = params.get("next");
+  if (!next) return null;
+  // Strip ?next= from the address bar without a history entry
+  params.delete("next");
+  const clean = window.location.pathname + (params.toString() ? "?" + params.toString() : "");
+  window.history.replaceState({}, "", clean);
+  return decodeURIComponent(next);
+}
+
 // ── Route registry ────────────────────────────────────────────────────────────
 
-type PageLoader = (container: HTMLElement) => Promise<() => void>;
+type PageLoader       = (container: HTMLElement) => Promise<() => void>;
 type RouteInitializer = () => Promise<() => PageLoader>;
 
 const routes: Record<string, RouteInitializer> = {
   "/login":           () => import("./pages/login.js").then(m => () => m.mountLogin),
+  "/auth/callback":   () => import("./pages/callback.js").then(m => () => m.mountCallback),
   "/create":          () => import("./pages/create.js").then(m => () => m.mountCreate),
   "/tasks":           () => import("./pages/tasks.js").then(m => () => m.mountTasks),
   "/reviews":         () => import("./pages/reviews.js").then(m => () => m.mountReviews),
   "/profile":         () => import("./pages/profile.js").then(m => () => m.mountProfile),
   "/settings":        () => import("./pages/settings.js").then(m => () => m.mountSettings),
   "/github/callback": () => import("./pages/settings.js").then(m => () => m.mountGitHubCallback),
+  "/terms":           () => Promise.resolve(() => (c: HTMLElement) => { c.innerHTML = `<div class="ff-panel" style="max-width:640px;margin:40px auto;padding:32px"><h1 class="ff-h1">Terms of Service</h1><p class="ff-subtitle" style="margin-top:16px">Coming soon.</p></div>`; return Promise.resolve(() => {}); }),
+  "/privacy":         () => Promise.resolve(() => (c: HTMLElement) => { c.innerHTML = `<div class="ff-panel" style="max-width:640px;margin:40px auto;padding:32px"><h1 class="ff-h1">Privacy Policy</h1><p class="ff-subtitle" style="margin-top:16px">Coming soon.</p></div>`; return Promise.resolve(() => {}); }),
 };
 
 type PageCleanup = (() => void) | void | Promise<() => void>;
@@ -146,6 +169,13 @@ async function route(path: string, isLoggedIn: boolean) {
     return;
   }
 
+  // /auth/callback — token exchange; handleAuthCallback() redirects away
+  if (path === "/auth/callback" || path.startsWith("/auth/callback")) {
+    const mod = await import("./pages/callback.js");
+    currentCleanup = await mod.mountCallback(container);
+    return;
+  }
+
   // /tasks — public browse for guests, full authed view for members
   if (path === "/tasks" || path.startsWith("/tasks")) {
     const mod = await import("./pages/tasks.js");
@@ -158,10 +188,10 @@ async function route(path: string, isLoggedIn: boolean) {
   }
 
   // Static routes
-  const routePath = "/" + path.split("/")[1];
-  const routeInit = routes[routePath];
+  const routePath  = "/" + path.split("/")[1];
+  const routeInit  = routes[routePath];
   if (routeInit) {
-    const getPage = await routeInit();
+    const getPage  = await routeInit();
     currentCleanup = await getPage()(container);
     return;
   }
@@ -170,7 +200,7 @@ async function route(path: string, isLoggedIn: boolean) {
   const submitMatch = path.match(/^\/submit\/(.+)/);
   if (submitMatch) {
     const taskId = submitMatch[1];
-    const mod = await import("./pages/submit.js");
+    const mod    = await import("./pages/submit.js");
     currentCleanup = await mod.mountSubmit(container, taskId);
     return;
   }
@@ -179,28 +209,44 @@ async function route(path: string, isLoggedIn: boolean) {
   const projectMatch = path.match(/^\/project\/(.+)/);
   if (projectMatch) {
     const projectId = projectMatch[1];
-    const mod = await import("./pages/project.js");
-    currentCleanup = await mod.mountProject(container, projectId);
+    const mod       = await import("./pages/project.js");
+    currentCleanup  = await mod.mountProject(container, projectId);
     return;
   }
 
   // 404
-  container.innerHTML = `<div class="ff-empty-state"><h1 class="ff-empty-state__title">404</h1><p class="ff-empty-state__description">Page not found.</p><a href="/tasks" class="ff-btn ff-btn--ghost ff-btn--sm" style="margin-top:16px">Back to Tasks</a></div>`;
+  container.innerHTML = `
+    <div class="ff-empty-state">
+      <h1 class="ff-empty-state__title">404</h1>
+      <p class="ff-empty-state__description">Page not found.</p>
+      <a href="/tasks" class="ff-btn ff-btn--ghost ff-btn--sm" style="margin-top:16px">Back to Tasks</a>
+    </div>`;
 }
 
-// ── Auth guard + init ─────────────────────────────────────────────────────────
+// ── Auth guard + init ───────────────────────────────────────────────────────────
 
 // Routes that never require authentication
 // /tasks is public for browsing; the Claim action inside tasks.ts handles its own auth.
-const PUBLIC_ROUTES = new Set(["/", "/login", "/tasks"]);
+const PUBLIC_ROUTES = new Set(["/", "/login", "/tasks", "/auth/callback", "/terms", "/privacy"]);
 
 async function init() {
   const supabase = getSupabase();
   const { data: { session } } = await supabase.auth.getSession();
-  const isLoggedIn = !!session?.user;
+  const isLoggedIn  = !!session?.user;
   const currentPath = window.location.pathname;
-  const isPublic = PUBLIC_ROUTES.has(currentPath) ||
-    currentPath.startsWith("/tasks");
+  const isPublic    = PUBLIC_ROUTES.has(currentPath) ||
+    currentPath.startsWith("/tasks") ||
+    currentPath.startsWith("/auth/");
+
+  // ── ?next= redirect: if we just returned from a requireAuth() bounce,
+  // and the user is now logged in, honour the saved destination.
+  if (isLoggedIn && !isPublic) {
+    const next = consumeNextParam();
+    if (next && next !== currentPath) {
+      window.history.replaceState({}, "", next);
+      return init(); // re-init with the resolved path
+    }
+  }
 
   // Auth redirect — skip for public routes
   if (!isPublic) {
@@ -224,14 +270,18 @@ async function init() {
 
   // Landing page: render a minimal wrapper (no shell nav)
   if (currentPath === "/") {
-    let main = document.createElement("main");
+    const main = document.createElement("main");
     main.id = "ff-main";
     document.body.innerHTML = "";
     document.body.appendChild(main);
-  } else if (currentPath === "/login") {
-    let app = document.createElement("div");
-    app.id = "ff-main";
+
+  } else if (currentPath === "/login" || currentPath.startsWith("/auth/")) {
+    // Auth flow pages — minimal, no nav
+    const app = document.createElement("div");
+    app.id    = "ff-main";
+    document.body.innerHTML = "";
     document.body.appendChild(app);
+
   } else if (isPublic && !isLoggedIn) {
     // Guest browsing a public route — minimal wrapper, no authenticated shell
     document.body.innerHTML = `
@@ -241,14 +291,17 @@ async function init() {
           <span class="ff-brand__badge">MVP</span>
         </div>
         <nav style="display:flex;gap:12px;align-items:center">
-          <a href="/tasks" class="ff-nav-link" style="font-family:var(--ff-font-mono);font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--ff-muted);text-decoration:none;font-weight:700">Tasks</a>
+          <a href="/tasks" class="ff-nav-link"
+             style="font-family:var(--ff-font-mono);font-size:10px;text-transform:uppercase;
+                    letter-spacing:.08em;color:var(--ff-muted);text-decoration:none;font-weight:700"
+          >Tasks</a>
           <a href="/login" class="ff-btn ff-btn--primary ff-btn--sm">Sign In</a>
         </nav>
       </header>
       <main class="ff-main ff-main--guest" id="ff-main"></main>
     `;
   } else {
-    // Authenticated shell with nav
+    // Authenticated shell with role-filtered nav
     document.body.innerHTML = buildShell(role);
   }
 
@@ -267,10 +320,13 @@ async function init() {
     if (!href || href.startsWith("http") || href.startsWith("mailto:")) return;
     if (href.startsWith("/")) {
       e.preventDefault();
+      const nextPath    = href.split("?")[0];
+      const nextIsPublic = PUBLIC_ROUTES.has(nextPath) ||
+        nextPath.startsWith("/tasks") ||
+        nextPath.startsWith("/auth/");
       window.history.pushState({}, "", href);
-      const nextPath = href.split("?")[0];
-      const nextIsPublic = PUBLIC_ROUTES.has(nextPath) || nextPath.startsWith("/tasks");
-      // Re-init shell if crossing auth boundary (guest → authed or vice-versa)
+      // Cross-boundary nav (guest → authed or vice versa) — full re-init
+      // so the shell renders correctly for the new auth state.
       if (nextIsPublic !== isPublic) {
         init();
       } else {
