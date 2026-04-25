@@ -1,7 +1,7 @@
 /**
  * apps/web/src/state/identity.ts — Browser tab identity (Ed25519 keypair with persisted private key).
  *
- * Distinct from the worker’s signing keypair (minted inside the iframe keystore).
+ * Distinct from the worker's signing keypair (minted inside the iframe keystore).
  * Pubkey + signing here are used for relay peerId, CRDT rows, receipt signing, etc.
  *
  * FIX — Medium #13: Identity key loss
@@ -9,6 +9,9 @@
  *   Now the PKCS#8 private key is wrapped with AES-256-GCM using a key derived (HKDF)
  *   from a random device seed in IndexedDB — never plaintext private material on disk.
  *   Schema key `identity_v2` replaces legacy pubkey-only `pubkey` records.
+ *
+ * FIX — display name: getMyDisplayName() now returns the Supabase profile
+ *   display_name set via setProfileDisplayName() at auth bootstrap.
  */
 
 import { assertEd25519Supported, fromBase58, toBase58 } from "@fatedfortress/protocol";
@@ -194,10 +197,19 @@ async function loadPersistedIdentity(db: IDBDatabase): Promise<{ keyPair: Crypto
 
 let _cachedPubkey: string | null = null;
 let _cachedPrivateKey: CryptoKey | null = null;
+let _cachedDisplayName: string | null = null;
 
 function setCachedIdentity(pubkey: string, privateKey: CryptoKey): void {
   _cachedPubkey = pubkey;
   _cachedPrivateKey = privateKey;
+}
+
+/**
+ * Call once at auth bootstrap after fetching the Supabase profile.
+ * Sets the display name returned by getMyDisplayName() and getIdentity().
+ */
+export function setProfileDisplayName(name: string | null | undefined): void {
+  _cachedDisplayName = name ?? null;
 }
 
 export async function createIdentity(): Promise<Identity> {
@@ -247,8 +259,12 @@ export function getMyPrivateKey(): CryptoKey {
   return _cachedPrivateKey;
 }
 
+/**
+ * Returns the display name from the Supabase profile (set via setProfileDisplayName)
+ * or falls back to "Anonymous" if not yet loaded.
+ */
 export function getMyDisplayName(): string {
-  return "Anonymous";
+  return _cachedDisplayName ?? "Anonymous";
 }
 
 export function getIdentity(): Identity {
@@ -258,7 +274,7 @@ export function getIdentity(): Identity {
   };
 }
 
-// ─── PRIORITY 3: Identity Export / Import ─────────────────────────────────────
+// ─── PRIORITY 3: Identity Export / Import ───────────────────────────────────────────────
 
 const EXPORT_MAGIC = "FFID1";
 const PBKDF2_ITERATIONS = 600_000; // OWASP 2026 recommendation
@@ -428,7 +444,7 @@ export async function importIdentity(
     { name: "AES-GCM", iv: wrapIv },
   );
 
-  // Persist to IndexedDB using existing idbPut (2-arg: db, key, value)
+  // Persist to IndexedDB
   const db = await openIdentityDB();
   await idbPut(db, IDENTITY_KEY, {
     pubkey: envelope.pubkey,
