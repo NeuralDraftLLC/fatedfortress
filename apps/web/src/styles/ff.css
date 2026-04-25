@@ -304,6 +304,12 @@
 
 @keyframes ff-spin { to { transform: rotate(360deg); } }
 
+/* Filter tabs (tasks page) — active state owned by CSS, not inline JS */
+.ff-btn.filter-btn.active {
+  background: var(--ff-ink);
+  color: var(--ff-bg);
+}
+
 /* ── Badges ──────────────────────────────────────────────────────────────── */
 
 .ff-badge {
