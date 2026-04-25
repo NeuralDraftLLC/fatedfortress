@@ -18,95 +18,95 @@ graph TD
     %% ============================================================
     %% ZONE 1: BROWSER MAIN THREAD
     %% ============================================================
-    subgraph SPA ["🌐 Zone 1: Untrusted UI (apps/web — Cloudflare Pages)"]
-        subgraph Pages ["📄 Page Views"]
-            login_p["/login<br/>Magic Link + Google OAuth<br/>(pages/login.ts)"]:::page
-            create_p["/create<br/>Brief → SCOPE → Edit → Publish<br/>(pages/create.ts)"]:::page
-            tasks_p["/tasks<br/>Marketplace · Claim · Skill Gate<br/>(pages/tasks.ts)"]:::page
-            submit_p["/submit/:taskId<br/>Upload → Deep-Spec Verify<br/>(pages/submit.ts)"]:::page
-            reviews_p["/reviews<br/>Realtime Queue · Y.js Collab<br/>(pages/reviews.ts)"]:::page
-            project_p["/project/:id<br/>Wallet · Audit Feed<br/>(pages/project.ts)"]:::page
-            settings_p["/settings<br/>Stripe Connect · GitHub<br/>(pages/settings.ts)"]:::page
+    subgraph SPA ["Zone 1: Untrusted UI (apps/web - Cloudflare Pages)"]
+        subgraph Pages ["Page Views"]
+            login_p["/login<br/>Magic Link + Google OAuth<br/>pages/login.ts"]:::page
+            create_p["/create<br/>Brief to SCOPE to Edit to Publish<br/>pages/create.ts"]:::page
+            tasks_p["/tasks<br/>Marketplace - Claim - Skill Gate<br/>pages/tasks.ts"]:::page
+            submit_p["/submit/:taskId<br/>Upload to Deep-Spec Verify<br/>pages/submit.ts"]:::page
+            reviews_p["/reviews<br/>Realtime Queue - Y.js Collab<br/>pages/reviews.ts"]:::page
+            project_p["/project/:id<br/>Wallet - Audit Feed<br/>pages/project.ts"]:::page
+            settings_p["/settings<br/>Stripe Connect - GitHub<br/>pages/settings.ts"]:::page
         end
 
-        subgraph Components ["🧩 UI Components"]
-            PV_Wallet["WalletGauge<br/>(Deposited / Locked / Released)"]:::comp
-            RV_Diff["SideBySide<br/>(AI Brief vs Specialist Asset)"]:::comp
-            RV_Decide["DecisionModal<br/>(Structured Feedback)"]:::comp
+        subgraph Components ["UI Components"]
+            PV_Wallet["WalletGauge<br/>Deposited / Locked / Released"]:::comp
+            RV_Diff["SideBySide<br/>AI Brief vs Specialist Asset"]:::comp
+            RV_Decide["DecisionModal<br/>Structured Feedback"]:::comp
         end
 
-        subgraph Handlers ["⚡ Client Handlers"]
-            payout_h["handlers/payout.ts<br/>createConnectAccountLink · fundProjectWallet<br/>(Connect onboarding + wallet pre-fund only)"]:::handler
-            review_h["handlers/review.ts<br/>reviewSubmission → verdict<br/>(approved · rejected · revision_requested)"]:::handler
-            scope_h["handlers/scope.ts<br/>generateScopedTasks (GPT-4o)"]:::handler
+        subgraph Handlers ["Client Handlers"]
+            payout_h["handlers/payout.ts<br/>createConnectAccountLink<br/>fundProjectWallet"]:::handler
+            review_h["handlers/review.ts<br/>reviewSubmission<br/>approved / rejected / revision_requested"]:::handler
+            scope_h["handlers/scope.ts<br/>generateScopedTasks GPT-4o"]:::handler
         end
 
-        subgraph State ["📦 Client State"]
-            identity_s["state/identity.ts<br/>Ed25519 Keys (Audit Signing)"]:::state
-            ydoc_s["state/ydoc.ts<br/>Y.js (Review Sessions Only)"]:::state
+        subgraph State ["Client State"]
+            identity_s["state/identity.ts<br/>Ed25519 Keys - Audit Signing"]:::state
+            ydoc_s["state/ydoc.ts<br/>Y.js - Review Sessions Only"]:::state
             handoff_s["state/handoff.ts<br/>Task Handoff State"]:::state
         end
     end
 
     %% ============================================================
-    %% ZONE 2: SECURE SANDBOX (apps/worker)
+    %% ZONE 2: SECURE SANDBOX
     %% ============================================================
-    subgraph VaultZone ["🔒 Zone 2: Secure Sandbox (apps/worker — isolated origin)"]
+    subgraph VaultZone ["Zone 2: Secure Sandbox (apps/worker - isolated origin)"]
         W_Keys["keystore.ts<br/>AES-256-GCM Vault<br/>AI Provider API Keys"]:::zone
     end
 
     %% ============================================================
-    %% ZONE 3: CLOUDFLARE EDGE (apps/relay)
+    %% ZONE 3: CLOUDFLARE EDGE
     %% ============================================================
-    subgraph EdgeZone ["⚡ Zone 3: Stateless Edge (apps/relay — Cloudflare Workers)"]
+    subgraph EdgeZone ["Zone 3: Stateless Edge (apps/relay - Cloudflare Workers)"]
         RelayDO["RelayDO<br/>Y.js WebRTC Signaling Hub<br/>+ TURN Credential Endpoint"]:::edgefn
     end
 
     %% ============================================================
-    %% PERSISTENCE LAYER (Supabase)
+    %% PERSISTENCE LAYER
     %% ============================================================
-    subgraph Supabase ["🗄️ Supabase — Database · Edge Functions · Storage"]
-        subgraph Schema ["Schema (migrations 001–008 + refactor + blueprint)"]
-            projects[("projects<br/>Blueprint · readme_draft<br/>folder_structure<br/>brief_* columns (009)")]:::db
-            wallet[("project_wallet<br/>deposited / locked / released<br/>Atomic RPCs (003)")]:::db
-            tasks[("tasks<br/>State Machine · spec_constraints jsonb (008)<br/>payment_intent_id · accepted_roles[]<br/>deliverable_type · context_inferred (501-001)")]:::db
-            submissions[("submissions<br/>Asset URL · Revision Count")]:::db
-            decisions[("decisions ★<br/>Verdict · Feedback · Audit Trail<br/>payout_ledger (013)")]:::db
+    subgraph Supabase ["Supabase - Database / Edge Functions / Storage"]
+        subgraph Schema ["Schema (migrations 001-008 + refactor + blueprint)"]
+            projects[("projects<br/>Blueprint - readme_draft<br/>folder_structure - brief_* cols 009")]:::db
+            wallet[("project_wallet<br/>deposited / locked / released<br/>Atomic RPCs 003")]:::db
+            tasks[("tasks<br/>State Machine - spec_constraints jsonb 008<br/>payment_intent_id - accepted_roles[]<br/>deliverable_type - context_inferred 501-001")]:::db
+            submissions[("submissions<br/>Asset URL - Revision Count")]:::db
+            decisions[("decisions<br/>Verdict - Feedback - Audit Trail<br/>payout_ledger 013")]:::db
             invitations[("invitations<br/>Invite Tokens")]:::db
-            profiles[("profiles<br/>skills[] · reliability (005)<br/>Stripe Connect ID")]:::db
-            notifications[("notifications<br/>auto_release_warning (006)")]:::db
+            profiles[("profiles<br/>skills[] - reliability 005<br/>Stripe Connect ID")]:::db
+            notifications[("notifications<br/>auto_release_warning 006")]:::db
         end
 
         subgraph EdgeFunctions ["Edge Functions"]
-            create_pi["create-payment-intent<br/>Stripe PI (manual capture)<br/>stored on tasks.payment_intent_id"]:::edgefn
-            stripe_wh["stripe-webhook<br/>PI succeeded/failed<br/>transfer.created · account.updated"]:::edgefn
-            asset_scan["asset-scanner<br/>9-sub-pass layered engine<br/>(deterministic → heuristic → gap)"]:::edgefn
-            verify_fn["verify-submission<br/>Deep-Spec Gate<br/>GLB · WAV · MP3 · PNG · JPEG"]:::edgefn
+            create_pi["create-payment-intent<br/>Stripe PI manual capture<br/>stored on tasks.payment_intent_id"]:::edgefn
+            stripe_wh["stripe-webhook<br/>PI succeeded/failed<br/>transfer.created - account.updated"]:::edgefn
+            asset_scan["asset-scanner<br/>9-sub-pass layered engine<br/>deterministic to heuristic to gap"]:::edgefn
+            verify_fn["verify-submission<br/>Deep-Spec Gate<br/>GLB / WAV / MP3 / PNG / JPEG"]:::edgefn
             scope_fn["create-and-scope-project<br/>GPT-4o Task Decomposition<br/>+ Project Creation"]:::edgefn
             stripe_fn["stripe-payment<br/>capture / cancel / refund / transfer"]:::edgefn
-            review_fn["review-submission<br/>review_submission_atomic RPC<br/>Stripe capture/cancel + wallet movements"]:::edgefn
+            review_fn["review-submission<br/>review_submission_atomic RPC<br/>Stripe capture/cancel + wallet moves"]:::edgefn
             submit_fn["submit-task<br/>Asset Link + Trigger Deep-Spec Gate"]:::edgefn
-            auto_release["auto-release (Cron 30min)<br/>24h warning → 48h auto-approve<br/>release_wallet_lock RPC"]:::edgefn
-            expire_claims["expire-claims (Cron 5min)<br/>Reclaim Stale Soft-locks<br/>unlock_wallet RPC"]:::edgefn
-            storage_fn["r2-upload-url<br/>Presigned PUT URLs (Cloudflare R2)"]:::edgefn
+            auto_release["auto-release Cron 30min<br/>24h warning to 48h auto-approve<br/>release_wallet_lock RPC"]:::edgefn
+            expire_claims["expire-claims Cron 5min<br/>Reclaim Stale Soft-locks<br/>unlock_wallet RPC"]:::edgefn
+            storage_fn["r2-upload-url<br/>Presigned PUT URLs Cloudflare R2"]:::edgefn
             connect_onboard["stripe-connect-onboard<br/>Stripe Express Onboarding"]:::edgefn
             connect_link["stripe-connect-link<br/>Dashboard Link / Reauth"]:::edgefn
             github_fn["github-oauth<br/>Server-side Token Exchange"]:::edgefn
         end
 
-        subgraph Storage ["Storage (Cloudflare R2 via r2-upload-url)"]
-            S3[("submissions/<br/>Deliverable Assets (R2)")]:::db
+        subgraph Storage ["Storage - Cloudflare R2"]
+            S3[("submissions/<br/>Deliverable Assets R2")]:::db
         end
     end
 
     %% ============================================================
     %% EXTERNAL WORLD
     %% ============================================================
-    subgraph World ["🌍 External World"]
-        Stripe[("Stripe Connect<br/>Express · Manual Capture<br/>10% Platform Fee")]:::ext
-        GitHub[("GitHub API<br/>Asset Scanner · OAuth")]:::ext
-        OpenAI[("OpenAI GPT-4o<br/>create-and-scope-project · asset-scanner")]:::ext
-        Sentry[("Sentry<br/>Error Tracking · PII Scrubbed")]:::ext
+    subgraph World ["External World"]
+        Stripe[("Stripe Connect<br/>Express - Manual Capture<br/>10% Platform Fee")]:::ext
+        GitHub[("GitHub API<br/>Asset Scanner - OAuth")]:::ext
+        OpenAI[("OpenAI GPT-4o<br/>create-and-scope-project - asset-scanner")]:::ext
+        Sentry[("Sentry<br/>Error Tracking - PII Scrubbed")]:::ext
     end
 
     %% ============================================================
@@ -122,7 +122,7 @@ graph TD
     payout_h -->|"reauth / dashboard link"| connect_link
     connect_onboard --> Stripe
     connect_link --> Stripe
-    payout_h -->|"fundProjectWallet → upsert_wallet_deposited RPC"| wallet
+    payout_h -->|"fundProjectWallet RPC"| wallet
     settings_p -->|"GitHub OAuth"| github_fn
     github_fn --> GitHub
 
@@ -130,7 +130,8 @@ graph TD
     create_p -->|"Generate Tasks"| scope_h
     scope_h -->|"Invoke"| scope_fn
     scope_fn --> OpenAI
-    scope_fn -->|"Persist"| projects & tasks
+    scope_fn -->|"Persist projects"| projects
+    scope_fn -->|"Persist tasks"| tasks
 
     %% Asset Scanner
     create_p -->|"Scan Repo Gaps"| asset_scan
@@ -138,48 +139,55 @@ graph TD
     asset_scan --> OpenAI
     asset_scan -->|"asset_scanner_write RPC"| tasks
 
-    %% Claim → PaymentIntent (claim-time authorization)
-    tasks_p -->|"Claim Task (skill gate)"| create_pi
+    %% Claim - PaymentIntent
+    tasks_p -->|"Claim Task skill gate"| create_pi
     create_pi -->|"PI manual capture"| Stripe
     create_pi -->|"Store payment_intent_id"| tasks
 
     %% Submit
-    submit_p ==>|"Presigned PUT (R2)"| storage_fn
+    submit_p ==>|"Presigned PUT R2"| storage_fn
     storage_fn --> S3
     submit_p -->|"Invoke submit-task"| submit_fn
     submit_fn -->|"Trigger Deep-Spec Gate"| verify_fn
     verify_fn -->|"Reads spec_constraints"| tasks
     verify_fn -.->|"auto_reject on mismatch"| decisions
 
-    %% Review (live collab)
-    reviews_p <-->|"Supabase Realtime"| tasks
-    reviews_p <-->|"Y.js CRDT"| RelayDO
-    ydoc_s <--> RelayDO
+    %% Review - live collab
+    reviews_p -->|"Supabase Realtime"| tasks
+    tasks -->|"Realtime push"| reviews_p
+    reviews_p -->|"Y.js CRDT"| RelayDO
+    RelayDO -->|"Y.js sync"| reviews_p
+    ydoc_s -->|"Y.js updates"| RelayDO
+    RelayDO -->|"Y.js sync"| ydoc_s
     handoff_s -.->|"Handoff context"| reviews_p
 
-    %% Review Decision — all verdicts flow through review_h → review_fn
+    %% Review Decision
     reviews_p -->|"Host verdict"| review_h
-    review_h ==>|"reviewSubmission (approved · rejected · revision_requested)"| review_fn
-    review_fn -->|"review_submission_atomic RPC"| decisions & tasks & wallet
+    review_h ==>|"reviewSubmission"| review_fn
+    review_fn -->|"atomic RPC"| decisions
+    review_fn -->|"update status"| tasks
+    review_fn -->|"wallet movement"| wallet
     review_fn ==>|"Stripe capture / cancel"| stripe_fn
     stripe_fn --> Stripe
     stripe_fn -->|"Webhook confirms"| stripe_wh
     stripe_wh -->|"Mark Paid"| tasks
 
     %% Autonomous Release
-    auto_release -->|"24h: Warning"| notifications
-    auto_release ==>|"48h: Capture PI"| stripe_fn
-    auto_release -->|"Update State"| tasks & wallet & decisions
+    auto_release -->|"24h Warning"| notifications
+    auto_release ==>|"48h Capture PI"| stripe_fn
+    auto_release -->|"Update tasks"| tasks
+    auto_release -->|"Update wallet"| wallet
+    auto_release -->|"Update decisions"| decisions
 
     %% Expire Claims
     expire_claims ==>|"unlock_wallet RPC"| wallet
     expire_claims -->|"Reopen Task"| tasks
 
-    %% Keystore → AI calls
-    W_Keys -.->|"Isolated origin (same-origin boundary)"| SPA
+    %% Keystore
+    W_Keys -.->|"Isolated origin boundary"| SPA
 
     %% Error tracking
-    SPA -.->|"Sentry (PII scrubbed)"| Sentry
+    SPA -.->|"Sentry PII scrubbed"| Sentry
 ```
 
 ---
@@ -188,15 +196,15 @@ graph TD
 
 | Date | Change |
 |---|---|
-| 2026-04-24 | `scope-tasks` → `create-and-scope-project` (actual function name) |
+| 2026-04-24 | `scope-tasks` to `create-and-scope-project` (actual function name) |
 | 2026-04-24 | `stripe-connect-onboard/link` split into two separate functions |
-| 2026-04-24 | Storage: `supabase-storage-upload` → `r2-upload-url` (Cloudflare R2) |
+| 2026-04-24 | Storage: `supabase-storage-upload` to `r2-upload-url` (Cloudflare R2) |
 | 2026-04-24 | Added `submit-task` edge function node in submit flow |
 | 2026-04-24 | Added `review-submission` edge function node |
-| 2026-04-24 | Added `handlers/review.ts` node (was missing) |
-| 2026-04-24 | **`payout_h` corrected**: methods `releasePayout/reject/requestRevision` removed — those moved to `review.ts`. `payout.ts` now only handles `createConnectAccountLink` + `fundProjectWallet` |
-| 2026-04-24 | **`payout_h` flows corrected**: routes to `connect_onboard`, `connect_link`, `wallet` (not `stripe_fn` or `decisions`) |
-| 2026-04-24 | **`review_h` flows corrected**: sole entry point for all verdicts → `review_fn` → `decisions/tasks/wallet/stripe_fn` |
-| 2026-04-24 | **Added `state/handoff.ts`** node (was missing) |
-| 2026-04-24 | Schema: annotated migration numbers on each table node |
-| 2026-04-24 | Page nodes: annotated source file paths |
+| 2026-04-24 | Added `handlers/review.ts` node |
+| 2026-04-24 | `payout_h` corrected: methods moved to `review.ts`; now only Connect onboarding + fundProjectWallet |
+| 2026-04-24 | `review_h` is sole entry point for all verdicts to `review_fn` |
+| 2026-04-24 | Added `state/handoff.ts` node |
+| 2026-04-24 | Fixed mermaid syntax: removed `&` multi-target fan-out (invalid in graph TD) |
+| 2026-04-24 | Fixed mermaid syntax: replaced `<-->` bidirectional arrows with explicit pairs |
+| 2026-04-24 | Removed emoji from subgraph labels (render compatibility) |
