@@ -48,27 +48,30 @@ export async function mountLanding(container: HTMLElement): Promise<() => void> 
       <!-- ── Hero ───────────────────────────────────────────────────── -->
       <section class="ff-landing__hero">
         <div class="ff-landing__hero-inner">
-          <div class="ff-landing__eyebrow">TASK MARKETPLACE · STRUCTURED PAYOUTS · ZERO AMBIGUITY</div>
+          <div class="ff-landing__eyebrow">AI SCOPING · STRIPE ESCROW · ZERO AMBIGUITY</div>
           <h1 class="ff-landing__headline">
-            Ship work that<br/>actually ships.
+            Replace vague briefs<br/>with math and guaranteed payouts.
           </h1>
           <p class="ff-landing__subhead">
-            FatedFortress connects hosts with contributors through a structured
-            claim-and-verify pipeline — every task scoped by AI, every payout
-            protected by Stripe escrow.
+            FatedFortress turns messy project ideas into machine-enforced contracts:
+            funds are pre-authorized, scope is written as code, and files are
+            auto-verified before money moves.
           </p>
+
+          <!-- Role-split CTAs — host primary, contributor secondary -->
           <div class="ff-landing__cta-row">
-            <a href="/login?mode=signup&role=contributor" class="ff-btn ff-btn--primary">Start Contributing</a>
-            <a href="/login?mode=signup&role=host" class="ff-btn ff-btn--ghost">Post a Project</a>
+            <div class="ff-landing__cta-block">
+              <a href="/login?mode=signup&role=host" class="ff-btn ff-btn--primary">Post a Project</a>
+              <span class="ff-landing__cta-sub">Describe what you need — AI scopes and locks the budget.</span>
+            </div>
+            <div class="ff-landing__cta-block">
+              <a href="/tasks" class="ff-btn ff-btn--ghost">Browse &amp; Claim Tasks</a>
+              <span class="ff-landing__cta-sub">See funded work that's ready to start right now.</span>
+            </div>
           </div>
 
           <!-- Social proof strip -->
           <div class="ff-landing__social-proof">
-            <!--
-              IMAGE_ASSET: avatar-grid.webp
-              <img src="/assets/avatar-grid.webp" alt="" width="120" height="24"
-                   loading="lazy" class="ff-landing__avatars" />
-            -->
             <div class="ff-landing__avatars ff-landing__avatars--placeholder" aria-hidden="true">
               <span class="ff-landing__avatar-dot"></span>
               <span class="ff-landing__avatar-dot"></span>
@@ -76,7 +79,9 @@ export async function mountLanding(container: HTMLElement): Promise<() => void> 
               <span class="ff-landing__avatar-dot"></span>
               <span class="ff-landing__avatar-dot"></span>
             </div>
-            <span class="ff-landing__social-text">Join contributors earning on structured tasks</span>
+            <span class="ff-landing__social-text">
+              Designed for builders who are done waiting 60 days to get paid or arguing about what "done" means.
+            </span>
           </div>
         </div>
 
@@ -143,36 +148,44 @@ export async function mountLanding(container: HTMLElement): Promise<() => void> 
           <div class="ff-landing__section-inner--center">
             <div class="ff-landing__eyebrow">HOW IT WORKS</div>
             <h2 class="ff-landing__section-title">From brief to paid in four steps.</h2>
-            <p class="ff-landing__section-sub">No back-and-forth. No scope creep. Just structured execution.</p>
+            <p class="ff-landing__section-sub">No back-and-forth. No scope creep. No chasing invoices.</p>
           </div>
-
-          <!--
-            IMAGE_ASSET: how-it-works.webp (optional illustration above steps)
-            <img src="/assets/how-it-works.webp" alt=""
-                 class="ff-landing__how-illustration"
-                 width="800" height="300" loading="lazy" />
-          -->
 
           <ol class="ff-landing__steps">
             <li class="ff-landing__step">
               <div class="ff-step__num">01</div>
-              <h3 class="ff-step__title">Host scopes the project</h3>
-              <p class="ff-step__desc">Paste a brief. GPT-4o decomposes it into discrete, deliverable tasks with explicit spec constraints — no ambiguity allowed.</p>
+              <h3 class="ff-step__title">Scope it in code</h3>
+              <p class="ff-step__desc">
+                You describe the work in plain language. The AI turns it into a rigid
+                spec: JSON fields, file formats, polygon counts, sample rates — the exact
+                rules for "done". Then you fund the project with a hotel-style hold.
+              </p>
             </li>
             <li class="ff-landing__step">
               <div class="ff-step__num">02</div>
-              <h3 class="ff-step__title">Contributor claims a task</h3>
-              <p class="ff-step__desc">Open tasks are publicly visible. Stripe escrow locks funds the moment a task is claimed — contributors know payment is guaranteed.</p>
+              <h3 class="ff-step__title">Lock the funds up front</h3>
+              <p class="ff-step__desc">
+                When a contributor claims a task, Stripe reserves the payout instantly.
+                Contributors know the money is there before they start. Hosts know no
+                one works for phantom promises.
+              </p>
             </li>
             <li class="ff-landing__step">
               <div class="ff-step__num">03</div>
               <h3 class="ff-step__title">Deep-spec gate verifies delivery</h3>
-              <p class="ff-step__desc">Submissions run through an AI verification engine that checks file format, resolution, duration, and content against the task spec before a human ever reviews it.</p>
+              <p class="ff-step__desc">
+                Submissions run through an AI verifier that checks file headers, resolution,
+                duration, and content against the task spec before a human ever reviews it.
+                Garbage in, bounced out automatically.
+              </p>
             </li>
             <li class="ff-landing__step">
               <div class="ff-step__num">04</div>
               <h3 class="ff-step__title">Host approves → funds release</h3>
-              <p class="ff-step__desc">Host has 48 hours to review. If they don't act, funds auto-release. Every decision is immutably logged.</p>
+              <p class="ff-step__desc">
+                Host has 48 hours to review. If they don't act, funds auto-release to the
+                contributor. Every decision is immutably logged. No arguing about "done".
+              </p>
             </li>
           </ol>
         </div>
@@ -204,15 +217,15 @@ export async function mountLanding(container: HTMLElement): Promise<() => void> 
         </div>
       </section>
 
-      <!-- ── CTA ────────────────────────────────────────────────────── -->
+      <!-- ── Bottom CTA ──────────────────────────────────────────────── -->
       <section class="ff-landing__bottom-cta">
         <div class="ff-landing__section-inner ff-landing__section-inner--center">
           <div class="ff-landing__eyebrow">READY TO START</div>
           <h2 class="ff-landing__cta-headline">Your next task is waiting.</h2>
-          <p class="ff-landing__cta-sub">Browse open tasks without an account. Sign up only when you're ready to claim.</p>
+          <p class="ff-landing__cta-sub">Browse open tasks without an account. Sign up only when you're ready to claim or post.</p>
           <div class="ff-landing__cta-row" style="justify-content:center">
-            <a href="/tasks" class="ff-btn ff-btn--primary">Browse Open Tasks</a>
-            <a href="/login?mode=signup" class="ff-btn ff-btn--ghost">Create Free Account</a>
+            <a href="/login?mode=signup&role=host" class="ff-btn ff-btn--primary">Post a Project</a>
+            <a href="/tasks" class="ff-btn ff-btn--ghost">Browse Open Tasks</a>
           </div>
         </div>
       </section>
@@ -229,6 +242,25 @@ export async function mountLanding(container: HTMLElement): Promise<() => void> 
 
     </div>
   `;
+
+  // Add CTA subtext styles inline (scoped to landing, no global side effects)
+  const style = document.createElement("style");
+  style.textContent = `
+    .ff-landing__cta-block {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 6px;
+    }
+    .ff-landing__cta-sub {
+      font-family: var(--ff-font-mono);
+      font-size: 11px;
+      color: var(--ff-muted);
+      max-width: 220px;
+      line-height: 1.5;
+    }
+  `;
+  container.appendChild(style);
 
   return () => {};
 }
