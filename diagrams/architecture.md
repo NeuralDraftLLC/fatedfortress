@@ -1,10 +1,10 @@
-# FatedFortress — System Architecture
-
-> Auto-reconciled against live repo on 2026-04-24.
-> Source files: `apps/web/src/`, `supabase/functions/`, `supabase/migrations/`
-
-```mermaid
-%%{init: {"theme": "dark", "fontFamily": "Geist Mono, monospace", "fontSize": 12}}%%
+%%{init: {
+  "theme": "dark",
+  "themeVariables": {
+    "fontFamily": "Geist Mono, monospace",
+    "fontSize": "12px"
+  }
+}}%%
 graph TD
     classDef page     fill:#171717,stroke:#fafafa,stroke-width:2px,color:#fafafa
     classDef comp     fill:#0a0a0a,stroke:#525252,stroke-width:1px,color:#d4d4d4
@@ -18,8 +18,8 @@ graph TD
     %% ============================================================
     %% ZONE 1: BROWSER MAIN THREAD
     %% ============================================================
-    subgraph SPA ["Zone 1: Untrusted UI (apps/web - Cloudflare Pages)"]
-        subgraph Pages ["Page Views"]
+    subgraph SPA["Zone 1: Untrusted UI (apps/web - Cloudflare Pages)"]
+        subgraph Pages["Page Views"]
             login_p["/login<br/>Magic Link + Google OAuth<br/>pages/login.ts"]:::page
             create_p["/create<br/>Brief to SCOPE to Edit to Publish<br/>pages/create.ts"]:::page
             tasks_p["/tasks<br/>Marketplace - Claim - Skill Gate<br/>pages/tasks.ts"]:::page
@@ -29,19 +29,19 @@ graph TD
             settings_p["/settings<br/>Stripe Connect - GitHub<br/>pages/settings.ts"]:::page
         end
 
-        subgraph Components ["UI Components"]
+        subgraph Components["UI Components"]
             PV_Wallet["WalletGauge<br/>Deposited / Locked / Released"]:::comp
             RV_Diff["SideBySide<br/>AI Brief vs Specialist Asset"]:::comp
             RV_Decide["DecisionModal<br/>Structured Feedback"]:::comp
         end
 
-        subgraph Handlers ["Client Handlers"]
+        subgraph Handlers["Client Handlers"]
             payout_h["handlers/payout.ts<br/>createConnectAccountLink<br/>fundProjectWallet"]:::handler
             review_h["handlers/review.ts<br/>reviewSubmission<br/>approved / rejected / revision_requested"]:::handler
             scope_h["handlers/scope.ts<br/>generateScopedTasks GPT-4o"]:::handler
         end
 
-        subgraph State ["Client State"]
+        subgraph State["Client State"]
             identity_s["state/identity.ts<br/>Ed25519 Keys - Audit Signing"]:::state
             ydoc_s["state/ydoc.ts<br/>Y.js - Review Sessions Only"]:::state
             handoff_s["state/handoff.ts<br/>Task Handoff State"]:::state
@@ -51,22 +51,22 @@ graph TD
     %% ============================================================
     %% ZONE 2: SECURE SANDBOX
     %% ============================================================
-    subgraph VaultZone ["Zone 2: Secure Sandbox (apps/worker - isolated origin)"]
+    subgraph VaultZone["Zone 2: Secure Sandbox (apps/worker - isolated origin)"]
         W_Keys["keystore.ts<br/>AES-256-GCM Vault<br/>AI Provider API Keys"]:::zone
     end
 
     %% ============================================================
     %% ZONE 3: CLOUDFLARE EDGE
     %% ============================================================
-    subgraph EdgeZone ["Zone 3: Stateless Edge (apps/relay - Cloudflare Workers)"]
+    subgraph EdgeZone["Zone 3: Stateless Edge (apps/relay - Cloudflare Workers)"]
         RelayDO["RelayDO<br/>Y.js WebRTC Signaling Hub<br/>+ TURN Credential Endpoint"]:::edgefn
     end
 
     %% ============================================================
     %% PERSISTENCE LAYER
     %% ============================================================
-    subgraph Supabase ["Supabase - Database / Edge Functions / Storage"]
-        subgraph Schema ["Schema (migrations 001-008 + refactor + blueprint)"]
+    subgraph Supabase["Supabase - Database / Edge Functions / Storage"]
+        subgraph Schema["Schema (migrations 001-008 + refactor + blueprint)"]
             projects[("projects<br/>Blueprint - readme_draft<br/>folder_structure - brief_* cols 009")]:::db
             wallet[("project_wallet<br/>deposited / locked / released<br/>Atomic RPCs 003")]:::db
             tasks[("tasks<br/>State Machine - spec_constraints jsonb 008<br/>payment_intent_id - accepted_roles[]<br/>deliverable_type - context_inferred 501-001")]:::db
@@ -77,8 +77,9 @@ graph TD
             notifications[("notifications<br/>auto_release_warning 006")]:::db
         end
 
-        subgraph EdgeFunctions ["Edge Functions"]
-            create_pi["create-payment-intent<br/>Stripe PI manual capture<br/>stored on tasks.payment_intent_id"]:::edgefn
+        subgraph EdgeFunctions["Edge Functions"]
+            claim_task["claim-task<br/>Active claim path from tasks.ts"]:::edgefn
+            create_pi["create-payment-intent<br/>Stripe PI manual capture<br/>separate / non-primary path"]:::edgefn
             stripe_wh["stripe-webhook<br/>PI succeeded/failed<br/>transfer.created - account.updated"]:::edgefn
             asset_scan["asset-scanner<br/>9-sub-pass layered engine<br/>deterministic to heuristic to gap"]:::edgefn
             verify_fn["verify-submission<br/>Deep-Spec Gate<br/>GLB / WAV / MP3 / PNG / JPEG"]:::edgefn
@@ -88,21 +89,21 @@ graph TD
             submit_fn["submit-task<br/>Asset Link + Trigger Deep-Spec Gate"]:::edgefn
             auto_release["auto-release Cron 30min<br/>24h warning to 48h auto-approve<br/>release_wallet_lock RPC"]:::edgefn
             expire_claims["expire-claims Cron 5min<br/>Reclaim Stale Soft-locks<br/>unlock_wallet RPC"]:::edgefn
-            storage_fn["r2-upload-url<br/>Presigned PUT URLs Cloudflare R2"]:::edgefn
+            storage_fn["supabase-storage-upload<br/>Upload URL / Supabase Storage path"]:::edgefn
             connect_onboard["stripe-connect-onboard<br/>Stripe Express Onboarding"]:::edgefn
             connect_link["stripe-connect-link<br/>Dashboard Link / Reauth"]:::edgefn
             github_fn["github-oauth<br/>Server-side Token Exchange"]:::edgefn
         end
 
-        subgraph Storage ["Storage - Cloudflare R2"]
-            S3[("submissions/<br/>Deliverable Assets R2")]:::db
+        subgraph Storage["Storage - Supabase Storage"]
+            SB_STORAGE[("submissions/<br/>Deliverable Assets")]:::db
         end
     end
 
     %% ============================================================
     %% EXTERNAL WORLD
     %% ============================================================
-    subgraph World ["External World"]
+    subgraph World["External World"]
         Stripe[("Stripe Connect<br/>Express - Manual Capture<br/>10% Platform Fee")]:::ext
         GitHub[("GitHub API<br/>Asset Scanner - OAuth")]:::ext
         OpenAI[("OpenAI GPT-4o<br/>create-and-scope-project - asset-scanner")]:::ext
@@ -139,14 +140,18 @@ graph TD
     asset_scan --> OpenAI
     asset_scan -->|"asset_scanner_write RPC"| tasks
 
-    %% Claim - PaymentIntent
-    tasks_p -->|"Claim Task skill gate"| create_pi
+    %% Claim - Active path
+    tasks_p -->|"Claim Task skill gate"| claim_task
+    claim_task -->|"Update claim state"| tasks
+    claim_task -->|"Lock funds / claim RPC"| wallet
+
+    %% Optional PaymentIntent path
     create_pi -->|"PI manual capture"| Stripe
     create_pi -->|"Store payment_intent_id"| tasks
 
     %% Submit
-    submit_p ==>|"Presigned PUT R2"| storage_fn
-    storage_fn --> S3
+    submit_p -->|"Upload asset"| storage_fn
+    storage_fn --> SB_STORAGE
     submit_p -->|"Invoke submit-task"| submit_fn
     submit_fn -->|"Trigger Deep-Spec Gate"| verify_fn
     verify_fn -->|"Reads spec_constraints"| tasks
@@ -188,23 +193,3 @@ graph TD
 
     %% Error tracking
     SPA -.->|"Sentry PII scrubbed"| Sentry
-```
-
----
-
-## Change Log
-
-| Date | Change |
-|---|---|
-| 2026-04-24 | `scope-tasks` to `create-and-scope-project` (actual function name) |
-| 2026-04-24 | `stripe-connect-onboard/link` split into two separate functions |
-| 2026-04-24 | Storage: `supabase-storage-upload` to `r2-upload-url` (Cloudflare R2) |
-| 2026-04-24 | Added `submit-task` edge function node in submit flow |
-| 2026-04-24 | Added `review-submission` edge function node |
-| 2026-04-24 | Added `handlers/review.ts` node |
-| 2026-04-24 | `payout_h` corrected: methods moved to `review.ts`; now only Connect onboarding + fundProjectWallet |
-| 2026-04-24 | `review_h` is sole entry point for all verdicts to `review_fn` |
-| 2026-04-24 | Added `state/handoff.ts` node |
-| 2026-04-24 | Fixed mermaid syntax: removed `&` multi-target fan-out (invalid in graph TD) |
-| 2026-04-24 | Fixed mermaid syntax: replaced `<-->` bidirectional arrows with explicit pairs |
-| 2026-04-24 | Removed emoji from subgraph labels (render compatibility) |

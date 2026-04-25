@@ -1,26 +1,111 @@
 /**
  * apps/web/src/pages/tasks.ts — Contributor task listing + claim flow.
  *
- * Sacred objects: Task, Submission, Decision
+ * Refactored: all data access through data.ts, UI through components.ts.
+ * Pages own mount logic, event binding, and state only.
  *
+ * Sacred objects: Task, Submission, Decision
  * Task visibility: task_access = 'public' OR host OR claimed_by OR
  *   has accepted invitation (invitations.accepted_at is not null).
  * Claim requires: task_access = 'public' OR valid accepted invitation.
  * Invitation token passed via ?invite=<token> URL param on the claim flow.
  */
 
-import { getSupabase } from "../auth/index.js";
 import { requireAuth } from "../auth/middleware.js";
-import type { Task } from "@fatedfortress/protocol";
-import { renderShell } from "../ui/shell.js";
+import { getCurrentUserId, getOpenTasks, getMyClaimedTasks, getMyAcceptedInvitedTaskIds, getTask, insertAuditEntry, insertNotification } from "../net/data.js";
 import { getStripe } from "../net/stripe.js";
+import { getSupabase } from "../auth/index.js";
+import { renderShell } from "../ui/shell.js";
+import { Card, Badge, Btn, Spinner, EmptyState, escHtml } from "../ui/components.js";
+import type { Task, TaskStatus } from "@fatedfortress/protocol";
+
+// ─── Task card renderer ────────────────────────────────────────────────────
+
+function renderTaskCard(
+  task: Task & { project?: { title?: string; host_id?: string; host?: { display_name?: string; review_reliability?: number } } },
+  userId: string,
+  currentFilter: string
+): string {
+  const isMyClaim = task.claimed_by === userId;
+  const isOpen = task.status === "open";
+  const softLockExpired = task.soft_lock_expires_at && new Date(task.soft_lock_expires_at as number) < new Date();
+  const canClaim = isOpen && !isMyClaim;
+  const canReclaim = isOpen && !isMyClaim && softLockExpired;
+  const host = task.project?.host;
+  const hostName = host?.display_name ?? "Unknown host";
+  const hostReliability = host?.review_reliability ?? 0;
+  const ambiguityScore = task.ambiguity_score ?? null;
+  const status = (task.status as string).toUpperCase();
+
+  const statusBadge = status === "OPEN"
+    ? Badge({ label: "OPEN", variant: "gold" })
+    : status === "CLAIMED"
+    ? Badge({ label: "CLAIMED", variant: "warning" })
+    : Badge({ label: status, variant: "neutral" });
+
+  const ambiguityLabel = ambiguityScore !== null
+    ? (ambiguityScore > 0.7 ? "HIGH_AMBIGUITY" : ambiguityScore > 0.4 ? "MEDIUM_AMBIGUITY" : "LOW_AMBIGUITY")
+    : "";
+
+  const payoutBadge = `$${task.payout_min}–$${task.payout_max}`;
+  const etaLabel = task.estimated_minutes ? `~${task.estimated_minutes}min` : "?";
+
+  let actionBtn = "";
+  if (canClaim) {
+    actionBtn = Btn({ label: "CLAIM_TASK", variant: "primary", size: "sm" });
+  } else if (canReclaim) {
+    actionBtn = Btn({ label: "RECLAIM_EXPIRED", variant: "ghost", size: "sm" });
+  } else if (isMyClaim && task.status === "claimed") {
+    actionBtn = `<a href="/submit/${task.id}" style="display:inline-block; text-decoration:none;">
+      ${Btn({ label: "SUBMIT", variant: "primary", size: "sm" })}
+    </a>`;
+  } else if (isMyClaim && ["submitted", "under_review", "revision_requested"].includes(task.status as string)) {
+    actionBtn = Btn({ label: "VIEW", variant: "ghost", size: "sm" });
+  } else if (!isMyClaim && !isOpen && !canReclaim) {
+    actionBtn = `<span class="ff-subtitle">LOCKED: ${escHtml(task.status as string)}</span>`;
+  }
+
+  return Card({
+    class: "task-card",
+    hoverable: false,
+    children: `
+      <div style="display:flex; justify-content:space-between; gap:12px; align-items:flex-start; margin-bottom:12px;">
+        <div>
+          <div style="font-family:var(--ff-font-mono); font-weight:900; text-transform:uppercase; margin-bottom:4px;">
+            ${escHtml(task.title)}
+          </div>
+          <div class="ff-subtitle">
+            HOST: ${escHtml(hostName)}${hostReliability > 0 ? ` · ${Math.round(hostReliability * 100)}% reliable` : ""}
+          </div>
+        </div>
+        <div>${statusBadge}</div>
+      </div>
+      <div class="ff-subtitle" style="margin-bottom:12px; font-size:13px;">
+        ${escHtml(((task.description as string) ?? "").slice(0, 220))}${(task.description as string)?.length > 220 ? "..." : ""}
+      </div>
+      <div style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px; font-family:var(--ff-font-mono); font-size:11px;">
+        ${Badge({ label: `PAYOUT ${payoutBadge}`, variant: "neutral" })}
+        ${Badge({ label: `ETA ${etaLabel}`, variant: "neutral" })}
+        ${ambiguityLabel ? Badge({ label: ambiguityLabel, variant: ambiguityScore > 0.4 ? "warning" : "success" }) : ""}
+      </div>
+      <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap">
+        <div data-task-id="${task.id}" data-action="claim">${actionBtn}</div>
+      </div>
+      ${task.soft_lock_expires_at && isMyClaim ? `
+        <div class="ff-subtitle" style="margin-top:10px; font-family:var(--ff-font-mono); font-size:11px;">
+          SOFT_LOCK_EXPIRES: ${new Date(task.soft_lock_expires_at as number).toLocaleString()}
+        </div>` : ""}
+    `,
+  }).replace('<div class="ff-card"', `<div class="ff-card" data-task-id="${task.id}">`);
+}
+
+// ─── Main mount function ───────────────────────────────────────────────────
 
 export async function mountTasks(container: HTMLElement): Promise<() => void> {
   await requireAuth();
 
-  const supabase = getSupabase();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return () => {};
+  const userId = await getCurrentUserId();
+  if (!userId) return () => {};
 
   container.innerHTML = renderShell({
     title: "Assignment Depot",
@@ -28,199 +113,135 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
     activePath: "/tasks",
     contentHtml: `
       <div class="ff-grid">
-        <section class="ff-panel ff-panel--rust" style="grid-column: span 8;">
-          <div style="display:flex; gap:8px; margin-bottom:12px;">
-            <button class="ff-btn filter-btn active" data-filter="open" style="flex:1; background:#1a1614; border-color: var(--ff-rust);">OPEN</button>
-            <button class="ff-btn filter-btn" data-filter="claimed" style="flex:1; background:#1a1614; border-color: var(--ff-rust);">MY_CLAIMS</button>
-            <button class="ff-btn filter-btn" data-filter="submitted" style="flex:1; background:#1a1614; border-color: var(--ff-rust);">SUBMITTED</button>
+        <section class="ff-panel" style="grid-column: span 8;">
+          <div style="display:flex; gap:8px; margin-bottom:12px;" id="filter-tabs">
+            <button class="ff-btn filter-btn active" data-filter="open" style="flex:1; background:var(--ff-ink); color:var(--ff-paper);">OPEN</button>
+            <button class="ff-btn filter-btn" data-filter="claimed" style="flex:1;">MY_CLAIMS</button>
+            <button class="ff-btn filter-btn" data-filter="submitted" style="flex:1;">SUBMITTED</button>
           </div>
           <div id="tasks-list">
-            <div class="ff-subtitle">Loading tasks...</div>
+            ${Spinner({ label: "Loading tasks..." })}
           </div>
         </section>
-
         <aside class="ff-panel" style="grid-column: span 4;">
           <div class="ff-kpi__label">CONTRACTOR_STATUS</div>
-          <div class="ff-subtitle" style="margin-top:10px; font-family: var(--ff-mono);">
-            SIG_ID: ${user.id.slice(0, 8).toUpperCase()}<br/>
+          <div class="ff-subtitle" style="margin-top:10px; font-family:var(--ff-font-mono);">
+            SIG_ID: ${userId.slice(0, 8).toUpperCase()}<br/>
             TRUST_RATING: derived from profiles.review_reliability<br/>
             ACCESS: public OR accepted invitation
           </div>
           <div class="ff-panel" style="margin-top:12px">
             <div class="ff-kpi__label">LIVE_ACTION_FEED</div>
-            <div class="ff-subtitle" style="margin-top:10px; font-family: var(--ff-mono);">
+            <div class="ff-subtitle" style="margin-top:10px; font-family:var(--ff-font-mono); font-size:12px;">
               [feed] claims · submits · payouts (future)
             </div>
           </div>
         </aside>
-      </div>
-    `,
+      </div>`,
   });
 
-  let currentFilter = "open";
-  let allTasks: Record<string, unknown>[] = [];
+  let currentFilter: "open" | "claimed" | "submitted" = "open";
+  let allTasks: (Task & { project?: { title?: string; host_id?: string; host?: { display_name?: string; review_reliability?: number } } })[] = [];
   let pollInterval: ReturnType<typeof setInterval>;
 
+  // ── Fetch ──────────────────────────────────────────────────────────────────
   async function fetchTasks(): Promise<void> {
-    const { data, error } = await supabase
-      .from("tasks")
-      .select(`
-        *,
-        project:projects(id, title, host_id, host:profiles(display_name, review_reliability))
-      `)
-      .in("status", ["open", "claimed", "submitted", "under_review", "revision_requested"])
-      .order("created_at", { ascending: false });
+    try {
+      const [openTasks, claimedTasks] = await Promise.all([
+        getOpenTasks(),
+        getMyClaimedTasks(userId),
+      ]);
 
-    if (error) {
-      (container.querySelector("#tasks-list") as HTMLElement).innerHTML = `<p class="tasks-error">Failed to load tasks.</p>`;
-      return;
+      const invitedTaskIds = await getMyAcceptedInvitedTaskIds(userId);
+
+      allTasks = [...openTasks, ...claimedTasks].filter((t) => {
+        const isPublic = t.task_access === "public";
+        const isHost = t.project?.host_id === userId;
+        const isClaimedByMe = t.claimed_by === userId;
+        const isInvited = invitedTaskIds.has(t.id);
+        return isPublic || isHost || isClaimedByMe || isInvited;
+      });
+
+      render();
+    } catch {
+      const list = container.querySelector("#tasks-list");
+      if (list) list.innerHTML = `<p style="color:var(--ff-error); font-family:var(--ff-font-mono);">Failed to load tasks.</p>`;
     }
-
-    const { data: invitations } = await supabase
-      .from("invitations")
-      .select("task_id, accepted_at")
-      .eq("invited_user_id", user.id)
-      .not("accepted_at", "is", null);
-
-    const invitedTaskIds = new Set((invitations ?? []).map((i: Record<string, unknown>) => i.task_id as string));
-
-    allTasks = (data ?? []).filter((t: Record<string, unknown>) => {
-      const isPublic = t.task_access === "public";
-      const isHost = (t.project as Record<string, unknown>)?.host_id === user.id;
-      const isClaimedByMe = t.claimed_by === user.id;
-      const isInvited = invitedTaskIds.has(t.id as string);
-      return isPublic || isHost || isClaimedByMe || isInvited;
-    });
-
-    render();
   }
 
+  // ── Render ─────────────────────────────────────────────────────────────────
   function render(): void {
-    const $list = container.querySelector("#tasks-list") as HTMLElement;
+    const $list = container.querySelector<HTMLElement>("#tasks-list");
+    if (!$list) return;
 
-    let filtered: Record<string, unknown>[];
+    let filtered: typeof allTasks;
     if (currentFilter === "claimed") {
-      filtered = allTasks.filter(t => t.claimed_by === user!.id);
+      filtered = allTasks.filter(t => t.claimed_by === userId);
     } else if (currentFilter === "submitted") {
       filtered = allTasks.filter(t =>
-        t.claimed_by === user!.id &&
-        ["submitted", "under_review", "revision_requested"].includes(t.status as string)
+        t.claimed_by === userId &&
+        (["submitted", "under_review", "revision_requested"] as TaskStatus[]).includes(t.status as TaskStatus)
       );
     } else {
       filtered = allTasks.filter(t => t.status === "open");
     }
 
     if (filtered.length === 0) {
-      $list.innerHTML = `<div class="tasks-empty">
-        <p>No ${currentFilter === "open" ? "open tasks" : currentFilter + " tasks"} right now.</p>
-        ${currentFilter === "open" ? `<p>Check back soon or <a href="/create">create a project</a>.</p>` : ""}
-      </div>`;
+      $list.innerHTML = EmptyState({
+        icon: "inbox",
+        title: currentFilter === "open" ? "NO_OPEN_TASKS" : `NO_${currentFilter.toUpperCase()}_TASKS`,
+        description: currentFilter === "open"
+          ? "Check back soon or create a project."
+          : undefined,
+      });
       return;
     }
 
-    $list.innerHTML = filtered.map(t => renderTaskCard(t)).join("");
+    $list.innerHTML = filtered.map(t => renderTaskCard(t, userId, currentFilter)).join("");
 
-    $list.querySelectorAll(".claim-btn, .submit-btn, .view-btn").forEach(btn => {
+    // Bind action buttons
+    $list.querySelectorAll("[data-task-id][data-action]").forEach(btn => {
       btn.addEventListener("click", async (e) => {
-        const taskId = (e.currentTarget as HTMLElement).dataset.taskId!;
-        const action = (e.currentTarget as HTMLElement).dataset.action!;
+        const el = e.currentTarget as HTMLElement;
+        const taskId = el.dataset.taskId!;
+        const action = el.dataset.action!;
         await handleAction(taskId, action);
       });
     });
   }
 
-  function renderTaskCard(t: Record<string, unknown>): string {
-    const isMyClaim = t.claimed_by === user!.id;
-    const isOpen = t.status === "open";
-    const softLockExpired = t.soft_lock_expires_at && new Date(t.soft_lock_expires_at as string) < new Date();
-    const canClaim = isOpen && !isMyClaim;
-    const canReclaim = isOpen && !isMyClaim && softLockExpired;
-
-    const host = (t.project as Record<string, unknown>)?.host as Record<string, unknown> | undefined;
-    const hostName = host?.display_name ?? "Unknown host";
-    const hostReliability = (host?.review_reliability as number | null) ?? 0;
-    const ambiguityScore = t.ambiguity_score as number | null;
-    const ambiguityLabel = ambiguityScore != null
-      ? (ambiguityScore > 0.7 ? "High ambiguity" : ambiguityScore > 0.4 ? "Medium ambiguity" : "Low ambiguity")
-      : "";
-
-    const status = (t.status as string).toUpperCase();
-    const statusTag = status === "OPEN"
-      ? `<span style="color: var(--ff-gold); font-family: var(--ff-mono); font-size: 10px; font-weight: 900;">ROUTINE</span>`
-      : status === "CLAIMED"
-        ? `<span style="color: var(--ff-gold); font-family: var(--ff-mono); font-size: 10px; font-weight: 900;">ENGAGED</span>`
-        : `<span style="color: var(--ff-dim); font-family: var(--ff-mono); font-size: 10px; font-weight: 900;">${escHtml(status)}</span>`;
-
-    return `
-      <div class="ff-panel" style="margin-bottom:12px" data-task-id="${t.id}">
-        <div style="display:flex; justify-content:space-between; gap:12px; align-items:flex-start">
-          <div style="font-family: var(--ff-mono); font-weight: 900; text-transform: uppercase;">
-            ${escHtml(t.title as string)}
-            <div class="ff-subtitle" style="margin-top:6px">HOST: ${escHtml(String(hostName))}${hostReliability > 0 ? ` · ${Math.round(+hostReliability * 100)}% reliable` : ""}</div>
-          </div>
-          <div>${statusTag}</div>
-        </div>
-
-        <div class="ff-subtitle" style="margin-top:10px">
-          ${escHtml(((t.description as string) ?? "").slice(0, 220))}${(t.description as string)?.length > 220 ? "..." : ""}
-        </div>
-
-        <div style="margin-top:12px; display:flex; flex-wrap:wrap; gap:8px; font-family: var(--ff-mono); font-size: 11px;">
-          <span style="border:1px solid var(--ff-rust); padding:4px 8px;">PAYOUT $${t.payout_min}–$${t.payout_max}</span>
-          <span style="border:1px solid var(--ff-rust); padding:4px 8px;">ETA ~${t.estimated_minutes ?? "?"}min</span>
-          ${ambiguityScore ? `<span style="border:1px solid var(--ff-rust); padding:4px 8px;">${escHtml(ambiguityLabel)}</span>` : ""}
-        </div>
-
-        <div style="margin-top:12px; display:flex; gap:10px; align-items:center; flex-wrap:wrap">
-          ${canClaim ? `<button class="ff-btn claim-btn" data-task-id="${t.id}" data-action="claim" style="width:auto; padding:10px 12px;">CLAIM_TASK</button>` : ""}
-          ${canReclaim ? `<button class="ff-btn claim-btn" data-task-id="${t.id}" data-action="claim" style="width:auto; padding:10px 12px;">RECLAIM_EXPIRED</button>` : ""}
-          ${isMyClaim && t.status === "claimed" ? `<a class="ff-btn submit-btn" data-task-id="${t.id}" data-action="submit" href="/submit/${t.id}" style="width:auto; padding:10px 12px; text-decoration:none; display:inline-block;">SUBMIT</a>` : ""}
-          ${isMyClaim && ["submitted","under_review","revision_requested"].includes(t.status as string) ? `<button class="ff-btn view-btn" data-task-id="${t.id}" data-action="view" style="width:auto; padding:10px 12px; background:#1a1614; border-color: var(--ff-rust);">VIEW</button>` : ""}
-          ${!isMyClaim && !isOpen && !canReclaim ? `<span class="ff-subtitle">LOCKED: ${escHtml(String(t.status))}</span>` : ""}
-        </div>
-
-        ${t.soft_lock_expires_at && isMyClaim ? `
-          <div class="ff-subtitle" style="margin-top:10px; font-family: var(--ff-mono);">
-            SOFT_LOCK_EXPIRES: ${new Date(t.soft_lock_expires_at as string).toLocaleString()}
-          </div>` : ""}
-      </div>
-    `;
-  }
-
+  // ── Claim action ──────────────────────────────────────────────────────────────
   async function handleAction(taskId: string, action: string): Promise<void> {
     if (action !== "claim") return;
 
-    // Read invitation token from URL if present
+    // Handle invitation token from URL
     const urlParams = new URLSearchParams(window.location.search);
     const invitationToken = urlParams.get("invite");
 
     if (invitationToken) {
-      const { data: invitation } = await supabase
-        .from("invitations")
-        .select("id, task_id, invited_user_id, accepted_at, expires_at")
-        .eq("token", invitationToken)
-        .maybeSingle();
-
-      if (!invitation || new Date(invitation.expires_at) < new Date()) {
-        alert("Invalid or expired invitation link.");
+      try {
+        const { getInvitationByToken, acceptInvitation } = await import("../net/data.js");
+        const invitation = await getInvitationByToken(invitationToken);
+        if (!invitation || new Date((invitation as { expires_at?: string }).expires_at) < new Date()) {
+          alert("Invalid or expired invitation link.");
+          return;
+        }
+        if ((invitation as { accepted_at?: string }).accepted_at) {
+          alert("Invitation already used.");
+          return;
+        }
+        await acceptInvitation(invitation.id);
+      } catch {
+        alert("Failed to process invitation.");
         return;
       }
-
-      if (invitation.accepted_at) {
-        alert("Invitation already used.");
-        return;
-      }
-
-      await supabase
-        .from("invitations")
-        .update({ accepted_at: new Date().toISOString() } as Record<string, unknown>)
-        .eq("id", invitation.id);
     }
 
     try {
-      const { data: claimResult, error: claimError } = await supabase
-        .functions
-        .invoke("claim-task", { body: { taskId } });
+      const supabase = getSupabase();
+      const { data: claimResult, error: claimError } = await supabase.functions.invoke("claim-task", {
+        body: { taskId },
+      });
 
       if (claimError) {
         console.error("claim-task invoke error", claimError);
@@ -244,19 +265,16 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
             window.location.href = payload.onboarding_url ?? "/settings/stripe-connect";
             return;
           case "already_claimed":
-            alert(payload.message ?? "Another contributor just claimed this task. Try a different one.");
+            alert(payload.message ?? "Another contributor just claimed this task.");
             break;
           case "wallet_error":
-            alert(payload.message ?? "Project wallet has insufficient funds for this task.");
+            alert(payload.message ?? "Project wallet has insufficient funds.");
             break;
           case "invite_only":
             alert(payload.message ?? "This task requires an invitation.");
             break;
-          case "not_open":
-            alert(payload.message ?? "This task is no longer open for claiming.");
-            break;
           default:
-            alert(payload?.message ?? "Failed to claim task. It may have been taken by someone else.");
+            alert(payload?.message ?? "Failed to claim task.");
             break;
         }
         await fetchTasks();
@@ -271,22 +289,23 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
         return;
       }
 
+      // ── Stripe payment authorization ─────────────────────────────────────
       let stripeErrorMessage: string | null = null;
       try {
         const stripe = await getStripe();
         const { error: stripeErr } = await stripe.confirmPayment({
-          clientSecret: clientSecret,
+          clientSecret,
           confirmParams: {
             return_url: `${window.location.origin}/submit/${taskId}`,
           },
         });
         if (stripeErr) {
           console.error("Stripe confirmPayment error", stripeErr);
-          stripeErrorMessage = stripeErr.message ?? "Payment authorization failed. Your claim was not completed.";
+          stripeErrorMessage = stripeErr.message ?? "Payment authorization failed.";
         }
       } catch (e) {
         console.error("Stripe.js error", e);
-        stripeErrorMessage = "Payment authorization failed. Your claim was not completed.";
+        stripeErrorMessage = "Payment authorization failed.";
       }
 
       if (stripeErrorMessage) {
@@ -295,38 +314,18 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
         return;
       }
 
-      const claimExpiresAt = payload.claim_expires_at;
+      // ── Post-claim side effects ───────────────────────────────────────────
+      await insertAuditEntry({ actor_id: userId, task_id: taskId, action: "claimed" });
 
-      await supabase.from("audit_log").insert({
-        actor_id: user!.id,
-        task_id: taskId,
-        action: "claimed",
-        payload: { claimExpiresAt },
-      } as Record<string, unknown>);
-
-      const { data: taskRow } = await supabase
-        .from("tasks")
-        .select("project:projects(host_id)")
-        .eq("id", taskId)
-        .single();
-
-      if (taskRow) {
-        const hostProject = taskRow as Record<string, unknown>;
-        const hostId = (hostProject.project as Record<string, unknown>)?.host_id as string | undefined;
-        if (hostId) {
-          await supabase.from("notifications").insert({
-            user_id: hostId,
-            type: "task_claimed",
-            task_id: taskId,
-          } as Record<string, unknown>);
-        }
+      const task = await getTask(taskId);
+      const hostId = task.project?.host_id;
+      if (hostId) {
+        await insertNotification({ user_id: hostId, type: "task_claimed", task_id: taskId });
       }
 
-      if (payload.message) {
-        console.info(payload.message);
-      }
-
+      if (payload.message) console.info(payload.message);
       window.location.href = `/submit/${taskId}`;
+
     } catch (err) {
       console.error("claim-task unexpected error", err);
       alert("Failed to claim task. Please try again.");
@@ -334,21 +333,24 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
     }
   }
 
+  // ── Filter tabs ──────────────────────────────────────────────────────────────
   container.querySelectorAll(".filter-btn").forEach(btn => {
     btn.addEventListener("click", () => {
-      container.querySelectorAll(".filter-btn").forEach(b => b.classList.remove("active"));
-      btn.classList.add("active");
-      currentFilter = (btn as HTMLElement).dataset.filter!;
+      container.querySelectorAll(".filter-btn").forEach(b => {
+        (b as HTMLElement).style.background = "";
+        (b as HTMLElement).style.color = "";
+      });
+      const el = btn as HTMLElement;
+      el.style.background = "var(--ff-ink)";
+      el.style.color = "var(--ff-paper)";
+      currentFilter = (el.dataset.filter ?? "open") as typeof currentFilter;
       render();
     });
   });
 
+  // ── Boot ───────────────────────────────────────────────────────────────────
   await fetchTasks();
   pollInterval = setInterval(fetchTasks, 30_000);
 
   return () => clearInterval(pollInterval);
-}
-
-function escHtml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }

@@ -15,6 +15,9 @@ import { requireAuth } from "../auth/middleware.js";
 import { generateScopedTasks } from "../handlers/scope.js";
 import type { ScopedTask } from "@fatedfortress/protocol";
 import { renderShell } from "../ui/shell.js";
+import { insertAuditEntry } from "../net/data.js";
+import { persistScopedProject, updateTaskPayout, activateProject, createProjectWallet } from "../net/data.js";
+import { escHtml } from "../ui/components.js";
 
 export async function mountCreate(container: HTMLElement): Promise<() => void> {
   await requireAuth();
@@ -151,7 +154,7 @@ export async function mountCreate(container: HTMLElement): Promise<() => void> {
   let generatedFolderStructure: string[] = [];
   let projectId: string | null = null;
   let references: string[] = [];
-  let persistedTaskRows: Array<Record<string, unknown>> = [];
+  let persistedTaskRows: Array<{ id: string; payout_min: number; payout_max: number; title: string }> = [];
 
   // ── Events ───────────────────────────────────────────────────────────
   const $form = container.querySelector("#create-form") as HTMLFormElement;
@@ -243,13 +246,8 @@ export async function mountCreate(container: HTMLElement): Promise<() => void> {
       }
 
       // Fetch inserted tasks to get real IDs for payout editing
-      const { data: insertedTasks, error: tasksErr } = await supabase
-        .from("tasks")
-        .select("id, payout_min, payout_max, title")
-        .eq("project_id", projectId)
-        .order("created_at", { ascending: true });
-      if (tasksErr) throw new Error(`Task fetch failed: ${tasksErr.message}`);
-      persistedTaskRows = (insertedTasks ?? []) as Array<Record<string, unknown>>;
+      const { getInsertedTasks } = await import("../net/data.js");
+      persistedTaskRows = await getInsertedTasks(projectId);
 
       // 3) Show preview
       renderTaskPreview();
@@ -268,46 +266,23 @@ export async function mountCreate(container: HTMLElement): Promise<() => void> {
     if (!projectId) return;
 
     const $payoutInputs = $taskList.querySelectorAll(".task-payout-input") as NodeListOf<HTMLInputElement>;
-    const updates: Promise<unknown>[] = [];
+    const { updateTaskPayout: updPayout } = await import("../net/data.js");
+    const { activateProject: actProj } = await import("../net/data.js");
+    const { createProjectWallet: createWallet } = await import("../net/data.js");
+    const { insertAuditEntry: audit } = await import("../net/data.js");
 
-    $payoutInputs.forEach((input, i) => {
-      const taskId = input.dataset.taskId!;
-      const payout = parseFloat(input.value);
+    for (let i = 0; i < $payoutInputs.length; i++) {
+      const input = $payoutInputs[i];
       const task = generatedTasks[i];
+      const payout = parseFloat(input.value);
       if (!isNaN(payout) && task && payout >= task.payoutMin && payout <= task.payoutMax) {
-        updates.push(
-          supabase
-            .from("tasks")
-            .update({
-              status: "open",
-              payout_max: payout,
-              updated_at: new Date().toISOString(),
-            } as Record<string, unknown>)
-            .eq("id", taskId) as unknown as Promise<unknown>
-        );
+        await updPayout(input.dataset.taskId!, payout);
       }
-    });
+    }
 
-    await Promise.all(updates);
-
-    // Publish project
-    await supabase
-      .from("projects")
-      .update({ status: "active", updated_at: new Date().toISOString() } as Record<string, unknown>)
-      .eq("id", projectId);
-
-    // Create project_wallet row with deposited = 0 (Section 3.2)
-    await supabase
-      .from("project_wallet")
-      .insert({ project_id: projectId, deposited: 0, locked: 0, released: 0 } as Record<string, unknown>);
-
-    // Audit log
-    await supabase.from("audit_log").insert({
-      actor_id: user.id,
-      task_id: null,
-      action: "task_published",
-      payload: { projectId, count: generatedTasks.length },
-    } as Record<string, unknown>);
+    await actProj(projectId);
+    await createWallet(projectId);
+    await audit({ actor_id: user.id, project_id: projectId, action: "task_published", payload: { count: generatedTasks.length } });
 
     window.location.href = `/project/${projectId}`;
   }

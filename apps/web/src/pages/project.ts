@@ -1,58 +1,38 @@
 /**
  * apps/web/src/pages/project.ts — Project detail + activity feed + audit log.
+ *
+ * Refactored: all data access through data.ts, UI through components.ts.
  */
 
-import { getSupabase } from "../auth/index.js";
 import { requireAuth } from "../auth/middleware.js";
+import { getProject, getProjectTasks, getProjectWallet, getProjectAuditLog, getCurrentUserId } from "../net/data.js";
 import { renderShell } from "../ui/shell.js";
+import { escHtml } from "../ui/components.js";
 
 export async function mountProject(container: HTMLElement, projectId: string): Promise<() => void> {
   await requireAuth();
 
-  const supabase = getSupabase();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return () => {};
-
-  container.innerHTML = `<div class="project-page">
-    <div class="project-loading">Loading project...</div>
-  </div>`;
-
-  // ── Fetch ──────────────────────────────────────────────────────────────
-  const { data: project } = await supabase
-    .from("projects")
-    .select("*")
-    .eq("id", projectId)
-    .single();
-
-  if (!project) {
-    container.innerHTML = `<div class="project-page"><p>Project not found.</p></div>`;
+  // ── Data layer ────────────────────────────────────────────────────────────────
+  let project;
+  try {
+    project = await getProject(projectId);
+  } catch {
+    container.innerHTML = `<div class="ff-shell"><div class="ff-main"><p style="font-family:var(--ff-font-mono);">Project not found.</p></div></div>`;
     return () => {};
   }
 
-  const isHost = project.host_id === user.id;
-
-  const [{ data: tasks }, { data: wallet }] = await Promise.all([
-    supabase.from("tasks").select("*").eq("project_id", projectId).order("created_at"),
-    supabase.from("project_wallet").select("*").eq("project_id", projectId).maybeSingle(),
+  const [taskList, wallet, logs, userId] = await Promise.all([
+    getProjectTasks(projectId),
+    getProjectWallet(projectId),
+    getProjectAuditLog(projectId),
+    getCurrentUserId(),
   ]);
 
-  const taskList = tasks ?? [];
-  const taskIds = taskList.map((t: Record<string, unknown>) => t.id as string);
-
-  const { data: auditLog } = await supabase
-    .from("audit_log")
-    .select("*")
-    .in("task_id", taskIds)
-    .order("created_at", { ascending: false })
-    .limit(50);
-
-  const logs = (auditLog ?? []).filter(Boolean);
-
-  // Compute wallet available = deposited - locked - released
   const walletDeposited = wallet?.deposited ?? 0;
   const walletLocked = wallet?.locked ?? 0;
   const walletReleased = wallet?.released ?? 0;
   const walletAvailable = walletDeposited - walletLocked - walletReleased;
+  const isHost = project.host_id === userId;
 
   // ── Render ──────────────────────────────────────────────────────────────
   const blueprintReadme =
@@ -63,7 +43,6 @@ export async function mountProject(container: HTMLElement, projectId: string): P
     (project as Record<string, unknown>).folderStructure ??
     (project as Record<string, unknown>).folder_structure ??
     null;
-
   const folderItems: string[] = Array.isArray(blueprintFolder) ? (blueprintFolder as string[]) : [];
 
   container.innerHTML = renderShell({
@@ -75,18 +54,16 @@ export async function mountProject(container: HTMLElement, projectId: string): P
         <!-- LEFT: BlueprintTree -->
         <aside class="ff-panel" style="grid-column: span 3;">
           <div class="ff-kpi__label">BLUEPRINT_TREE</div>
-
           <details open style="margin-top:12px">
             <summary style="cursor:pointer; font-family: var(--ff-font-mono); font-weight:900; text-transform:uppercase;">README_DRAFT</summary>
             <div style="margin-top:10px; white-space:pre-wrap; font-family: var(--ff-font-mono); font-size:12px; line-height:1.35;">
               ${
                 typeof blueprintReadme === "string" && blueprintReadme.trim()
                   ? escHtml(blueprintReadme.trim().slice(0, 4000))
-                  : `<span style="color: var(--ff-muted);">Not persisted yet. (Currently SCOPE returns readmeDraft/folderStructure but the DB schema does not store them.)</span>`
+                  : `<span style="color: var(--ff-muted);">Not persisted yet.</span>`
               }
             </div>
           </details>
-
           <details open style="margin-top:12px">
             <summary style="cursor:pointer; font-family: var(--ff-font-mono); font-weight:900; text-transform:uppercase;">FOLDER_STRUCTURE</summary>
             <div style="margin-top:10px; font-family: var(--ff-font-mono); font-size:12px;">
@@ -111,7 +88,7 @@ export async function mountProject(container: HTMLElement, projectId: string): P
               </div>
               <div class="ff-subtitle">available = deposited - locked - released</div>
             </div>
-            <div class="ff-subtitle">${taskList.length} TASKS · ${(taskList.filter((t: Record<string, unknown>) => t.status === "paid").length)} PAID</div>
+            <div class="ff-subtitle">${taskList.length} TASKS · ${taskList.filter(t => t.status === "paid").length} PAID</div>
           </div>
 
           <div class="ff-kpi__label" style="margin-top:10px">TASKBOARD</div>
@@ -128,10 +105,10 @@ export async function mountProject(container: HTMLElement, projectId: string): P
               ${
                 taskList.length === 0
                   ? `<tr><td colspan="4" style="padding:10px; border:1px solid var(--ff-ink); color: var(--ff-muted);">NO_TASKS</td></tr>`
-                  : taskList.map((t: Record<string, unknown>) => {
+                  : taskList.map(t => {
                       const status = String(t.status ?? "").toUpperCase();
                       const canHostReview = isHost && t.status === "under_review";
-                      const canSubmit = !isHost && t.claimed_by === user.id && t.status === "claimed";
+                      const canSubmit = !isHost && t.claimed_by === (project as Record<string, unknown>).host_id && t.status === "claimed";
                       const action = canHostReview
                         ? `<a href="/reviews" style="text-decoration:underline;">REVIEW</a>`
                         : canSubmit
@@ -151,15 +128,15 @@ export async function mountProject(container: HTMLElement, projectId: string): P
           </table>
         </section>
 
-        <!-- RIGHT: Audit Feed (System Purge) -->
+        <!-- RIGHT: Audit Feed -->
         <aside class="ff-panel" style="grid-column: span 3;">
           <div class="ff-kpi__label">SYSTEM_PURGE_FEED</div>
           <div style="margin-top:12px; font-family: var(--ff-font-mono); font-size:11px; line-height:1.4; white-space:pre-wrap;">
             ${
               logs.length === 0
                 ? `<span style="color: var(--ff-muted);">NO_ACTIVITY</span>`
-                : logs.map((l: Record<string, unknown>) => {
-                    const ts = new Date(l.created_at as string).toISOString().replace("T", " ").slice(0, 19);
+                : logs.map(l => {
+                    const ts = new Date(l.created_at).toISOString().replace("T", " ").slice(0, 19);
                     const actor = l.actor_id ? `0x${String(l.actor_id).slice(0, 8)}` : "SYSTEM";
                     const action = String(l.action ?? "").toUpperCase();
                     return `[${escHtml(ts)}] ${escHtml(action)} by ${escHtml(actor)}`;
@@ -172,8 +149,4 @@ export async function mountProject(container: HTMLElement, projectId: string): P
   });
 
   return () => {};
-}
-
-function escHtml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }

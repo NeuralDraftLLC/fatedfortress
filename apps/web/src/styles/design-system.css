@@ -1,19 +1,67 @@
-/* Fated Fortress Design System (non-legacy import)
- * Constraints:
- * - Typography: Geist Mono + Iosevka only
- * - Palette: ff-paper / ff-ink
+/* Fated Fortress Design System — Dark "Command-Grade" theme.
+ * Migrated from Stitch export: OP_PLATFORM V2.0.48_STABLE
+ *
+ * Constraints preserved:
+ * - Fonts: Geist Mono + Iosevka (monospace only — Space Grotesk not imported)
  * - Borders: 1px solid var(--ff-ink), radius 0
- * - Tone: high-density, intel-classified, underlined links, monospace utility
+ * - Tone: high-density, intel-classified, monospace utility
+ * - Swiss-brutalist: black/white, precise, dense, calm
+ *
+ * Token contract preserved: --ff-paper, --ff-ink, --ff-muted, --ff-faint
+ * New tokens added for dark-mode interactive surfaces and surface elevation.
  */
 
 :root {
-  --ff-paper: #f4f4f2;
-  --ff-ink: #0a0a0a;
-  --ff-muted: rgba(10, 10, 10, 0.65);
-  --ff-faint: rgba(10, 10, 10, 0.25);
+  /* ── Base palette (preserved contract, remapped semantics) ────────────── */
+  /* --ff-paper: darkest surface — used as page/app root background */
+  --ff-paper: #0a0a0a;
+  /* --ff-ink: primary text on dark surfaces + border color */
+  --ff-ink: #e5e2e1;
+  /* --ff-muted: secondary text on dark surfaces */
+  --ff-muted: rgba(190, 200, 206, 0.7);
+  /* --ff-faint: subtle dark surface (cards, hover states) */
+  --ff-faint: #1c1b1b;
 
+  /* ── Typography ─────────────────────────────────────────────────────────── */
   --ff-font-mono: "Geist Mono", "Iosevka", ui-monospace, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  /* --ff-label-compact: uppercase panel labels — 10px, 0.1em tracking, 700wt */
+  --ff-label-compact: 700 10px/1 var(--ff-font-mono);
   --ff-step: 4px;
+
+  /* ── Interactive surfaces (new semantic tokens) ───────────────────────── */
+  /* Primary blue — used for buttons, active nav, selected states */
+  --ff-interactive: #c5eaff;
+  --ff-on-interactive: #003547;
+
+  /* ── Accent (sky-300 from Stitch export) ──────────────────────────────── */
+  --ff-primary: #7dd3fc;
+  --ff-on-primary: #005b78;
+
+  /* ── Root page background ──────────────────────────────────────────────── */
+  --ff-bg: #131313;
+
+  /* ── Surface elevation layers (Stitch-inspired) ───────────────────────── */
+  --ff-surface-container-lowest:  #0e0e0e;
+  --ff-surface-container-low:    #1c1b1b;
+  --ff-surface-container:        #201f1f;
+  --ff-surface-container-high:   #2a2a2a;
+  --ff-surface-container-highest: #353534;
+
+  /* ── Borders ──────────────────────────────────────────────────────────── */
+  --ff-outline:        #899298;
+  --ff-outline-variant: #3f484e;
+
+  /* ── Status colors (unchanged — work on any background) ──────────────── */
+  --ff-success:    #4edea3;
+  --ff-success-bg: rgba(78, 222, 163, 0.1);
+  --ff-warning:   #ffb95f;
+  --ff-warning-bg: rgba(255, 185, 95, 0.1);
+  --ff-error:     #ffb4ab;
+  --ff-error-bg:  rgba(255, 180, 171, 0.1);
+  --ff-info:      #b4c5ff;
+  --ff-info-bg:   rgba(180, 197, 255, 0.1);
+  --ff-gold:      #ffd166;
+  --ff-gold-bg:   rgba(255, 209, 102, 0.1);
 }
 
 html, body {
@@ -22,7 +70,7 @@ html, body {
 
 body.ff-body {
   margin: 0;
-  background: var(--ff-paper);
+  background: var(--ff-bg);
   color: var(--ff-ink);
   font-family: var(--ff-font-mono);
   font-size: 13px;
@@ -41,3 +89,8 @@ a {
   box-sizing: border-box;
 }
 
+/* ── Custom scrollbar (Stitch export pattern) ───────────────────────────── */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: var(--ff-bg); }
+::-webkit-scrollbar-thumb { background: var(--ff-outline-variant); }
+::-webkit-scrollbar-thumb:hover { background: var(--ff-primary); }
