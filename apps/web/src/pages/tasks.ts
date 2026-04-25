@@ -32,6 +32,14 @@
  *     stripe_charges_enabled) into CONTRACTOR_STATUS sidebar.
  *   - Feat: live ACTIVITY_FEED via Supabase Realtime postgres_changes on
  *     tasks table. Prepends last 8 events. Unsubscribed on page teardown.
+ *
+ * Changes (2026-04-25 — race guard):
+ *   - Fix: double-tap race condition on CLAIM_TASK button.
+ *     Added module-scoped `_claimingTasks: Set<string>` — handleAction returns
+ *     immediately if the task ID is already in the set. Button container gets
+ *     [data-claiming] attribute during flight for visual feedback + pointer
+ *     suppression. Attribute is always cleared on exit (success, error, or
+ *     early return).
  */
 
 import { requireAuth } from "../auth/middleware.js";
@@ -46,6 +54,13 @@ import { renderShell } from "../ui/shell.js";
 import { Card, Badge, Btn, Spinner, EmptyState, escHtml } from "../ui/components.js";
 import type { Task, TaskStatus, Profile } from "@fatedfortress/protocol";
 import type { RealtimeChannel } from "@supabase/supabase-js";
+
+// ─── In-flight claim guard ────────────────────────────────────────────────────
+// Tracks task IDs currently being claimed. Prevents double-tap races where two
+// concurrent claim-task invocations race to the backend before either resolves.
+// Module-scoped so it survives render() re-runs; cleared on teardown.
+
+const _claimingTasks = new Set<string>();
 
 // ─── Payout math (roadmap 1.3) ──────────────────────────────────────────────
 
@@ -518,31 +533,68 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
   async function handleAction(taskId: string, action: string): Promise<void> {
     if (action !== "claim") return;
 
-    await showEscrowModal();
+    // ── Race condition guard ─────────────────────────────────────────────────
+    // Prevents a second claim-task invocation from firing while the first is
+    // still in flight. Covers:
+    //   (a) rapid double-tap / double-click before the button re-renders,
+    //   (b) Realtime UPDATE rebuilding the DOM (and thus removing [data-claiming])
+    //       before the first in-flight call resolves — the Set survives re-renders.
+    if (_claimingTasks.has(taskId)) return;
+    _claimingTasks.add(taskId);
 
-    const urlParams = new URLSearchParams(window.location.search);
-    const invitationToken = urlParams.get("invite");
-
-    if (invitationToken) {
-      try {
-        const { getInvitationByToken, acceptInvitation } = await import("../net/data.js");
-        const invitation = await getInvitationByToken(invitationToken);
-        if (!invitation || new Date((invitation as { expires_at?: string }).expires_at) < new Date()) {
-          alert("Invalid or expired invitation link.");
-          return;
-        }
-        if ((invitation as { accepted_at?: string }).accepted_at) {
-          alert("Invitation already used.");
-          return;
-        }
-        await acceptInvitation(invitation.id);
-      } catch {
-        alert("Failed to process invitation.");
-        return;
-      }
+    // Visually dim the button container so the user gets immediate feedback.
+    // We target the wrapper div that carries data-task-id + data-action because
+    // the card itself is re-rendered by render() and the attribute must survive.
+    const $btn = document.querySelector<HTMLElement>(
+      `[data-task-id="${taskId}"][data-action="claim"]`
+    );
+    if ($btn) {
+      $btn.setAttribute("data-claiming", "1");
+      $btn.style.opacity = "0.45";
+      $btn.style.pointerEvents = "none";
     }
 
+    const clearGuard = (): void => {
+      _claimingTasks.delete(taskId);
+      // Re-query in case DOM was rebuilt by a Realtime-triggered render()
+      const $b = document.querySelector<HTMLElement>(
+        `[data-task-id="${taskId}"][data-action="claim"]`
+      );
+      if ($b) {
+        $b.removeAttribute("data-claiming");
+        $b.style.opacity = "";
+        $b.style.pointerEvents = "";
+      }
+    };
+
     try {
+      await showEscrowModal();
+
+      const urlParams = new URLSearchParams(window.location.search);
+      const invitationToken = urlParams.get("invite");
+
+      if (invitationToken) {
+        try {
+          const { getInvitationByToken, acceptInvitation } = await import("../net/data.js");
+          const invitation = await getInvitationByToken(invitationToken);
+          if (!invitation || new Date((invitation as { expires_at?: string }).expires_at) < new Date()) {
+            alert("Invalid or expired invitation link.");
+            clearGuard();
+            return;
+          }
+          if ((invitation as { accepted_at?: string }).accepted_at) {
+            alert("Invitation already used.");
+            clearGuard();
+            return;
+          }
+          await acceptInvitation(invitation.id);
+        } catch {
+          alert("Failed to process invitation.");
+          clearGuard();
+          return;
+        }
+      }
+
       const supabase = getSupabase();
       const { data: claimResult, error: claimError } = await supabase.functions.invoke("claim-task", {
         body: { taskId },
@@ -552,6 +604,7 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
         console.error("claim-task invoke error", claimError);
         alert("Failed to claim task — network error. Please try again.");
         await fetchTasks();
+        clearGuard();
         return;
       }
 
@@ -567,6 +620,7 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
       if (!payload?.success) {
         switch (payload?.error) {
           case "stripe_onboarding_required":
+            clearGuard();
             window.location.href = payload.onboarding_url ?? "/settings/stripe-connect";
             return;
           case "already_claimed":
@@ -597,6 +651,7 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
               "You need to link your GitHub account before claiming your first task. " +
               "Head to Settings → GitHub to connect."
             );
+            clearGuard();
             window.location.href = "/settings?section=github";
             return;
           default:
@@ -604,6 +659,7 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
             break;
         }
         await fetchTasks();
+        clearGuard();
         return;
       }
 
@@ -612,6 +668,7 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
         console.error("claim-task: missing payment_intent_client_secret");
         alert("Claim failed: payment could not be initialized.");
         await fetchTasks();
+        clearGuard();
         return;
       }
 
@@ -636,6 +693,7 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
       if (stripeErrorMessage) {
         alert(stripeErrorMessage);
         await fetchTasks();
+        clearGuard();
         return;
       }
 
@@ -647,6 +705,8 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
         await insertNotification({ user_id: hostId, type: "task_claimed", task_id: taskId });
       }
 
+      // Guard intentionally NOT cleared on success — the page navigates away.
+      // clearGuard() would be a no-op here and the Set is GC'd with the module.
       if (payload.message) console.info(payload.message);
       window.location.href = `/submit/${taskId}`;
 
@@ -654,6 +714,7 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
       console.error("claim-task unexpected error", err);
       alert("Failed to claim task. Please try again.");
       await fetchTasks();
+      clearGuard();
     }
   }
 
@@ -699,5 +760,6 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
       realtimeChannel = null;
     }
     feedEvents = [];
+    _claimingTasks.clear();
   };
 }
