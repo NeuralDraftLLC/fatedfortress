@@ -4,7 +4,7 @@
  * Sections:
  *   - Identity: display name, github username (editable)
  *   - Reliability signals: score, approval rate, avg revisions, response time, totals
- *   - Completed Work: approved decisions joined with submission asset URL + payout
+ *   - Completed Work: approved audit_log entries joined with task title + payout
  *   - Portfolio: up to 3 pieces; file picker -> supabase-storage-upload -> thumbnail chip
  *   - HereNow CTA: only visible when reliability >= 0.70 AND total_approved >= 1
  */
@@ -41,20 +41,34 @@ export async function mountProfile(container: HTMLElement): Promise<() => void> 
       ? ((profile as Record<string, unknown>).portfolio_urls as string[])
       : [];
 
-  // ── Completed Work: approved decisions joined with task title + payout ───
-  const { data: completedWork } = await supabase
-    .from("decisions")
+  // ── Completed Work: approved entries from audit_log joined with task + submission ─
+  // audit_log rows with event='submission_approved' carry contributor_id, task_id,
+  // submission_id, and payout_amount in the metadata JSONB column.
+  const { data: auditRows } = await supabase
+    .from("audit_log")
     .select(`
       id,
-      approved_at,
-      payout_amount,
+      created_at,
+      metadata,
+      task_id,
+      submission_id,
       tasks ( id, title ),
-      submissions ( asset_url )
+      submissions ( asset_url, payout_amount )
     `)
     .eq("contributor_id", user.id)
-    .eq("verdict", "approved")
-    .order("approved_at", { ascending: false })
+    .eq("event", "submission_approved")
+    .order("created_at", { ascending: false })
     .limit(20);
+
+  const completedWork: CompletedWorkItem[] = (auditRows ?? []).map((r: Record<string, unknown>) => ({
+    id:           r.id as string,
+    approved_at:  r.created_at as string | null,
+    payout_amount: (r.submissions as Record<string, unknown> | null)?.payout_amount as number | null
+                  ?? (r.metadata as Record<string, unknown> | null)?.payout_amount as number | null
+                  ?? null,
+    tasks:        r.tasks as { id: string; title: string } | null,
+    submissions:  r.submissions as { asset_url: string | null } | null,
+  }));
 
   // ── publishToHereNow gate ────────────────────────────────────────────────
   const reliability   = (profile as Record<string, unknown>)?.reliability_score as number | null;
@@ -127,9 +141,9 @@ export async function mountProfile(container: HTMLElement): Promise<() => void> 
       <!-- Completed Work -->
       <section style="margin-bottom:32px;border-bottom:1px solid var(--ff-outline-variant);padding-bottom:28px">
         <h2 class="ff-section-label" style="margin-bottom:16px">COMPLETED WORK</h2>
-        ${completedWork && completedWork.length > 0
+        ${completedWork.length > 0
           ? `<div style="display:flex;flex-direction:column;gap:8px">
-               ${completedWork.map(d => completedWorkRow(d as CompletedWorkItem)).join("")}
+               ${completedWork.map(d => completedWorkRow(d)).join("")}
              </div>`
           : `<p style="font-family:var(--ff-font-mono);font-size:11px;color:var(--ff-muted)">No approved work yet.</p>`
         }
@@ -189,7 +203,7 @@ export async function mountProfile(container: HTMLElement): Promise<() => void> 
       const githubUsername = (container.querySelector("#github-username") as HTMLInputElement).value.trim().replace("@", "");
       saveBtn.disabled = true;
       saveStatus.style.display = "inline";
-      saveStatus.textContent = "Saving…";
+      saveStatus.textContent = "Saving\u2026";
       try {
         await updateMyProfile({ display_name: displayName, github_username: githubUsername || null } as any);
         saveStatus.textContent = "Saved.";
@@ -234,7 +248,7 @@ export async function mountProfile(container: HTMLElement): Promise<() => void> 
 
       portfolioBanner.innerHTML = "";
       addBtn.disabled = true;
-      addBtn.textContent = "Uploading…";
+      addBtn.textContent = "Uploading\u2026";
 
       try {
         const presigned = await createPortfolioUploadUrl(user.id, file.name, file.type);
@@ -284,7 +298,7 @@ function escHtml(s: string | null | undefined): string {
 }
 
 function fmt(val: number | null | undefined, type: "pct" | "dec" | "min"): string {
-  if (val == null) return "—";
+  if (val == null) return "\u2014";
   if (type === "pct") return `${Math.round(val * 100)}%`;
   if (type === "dec") return val.toFixed(1);
   if (type === "min") return `${val}m`;
