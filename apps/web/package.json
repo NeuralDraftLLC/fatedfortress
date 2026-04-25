@@ -12,9 +12,14 @@
     "vite": "^6.2.0"
   },
   "dependencies": {
+    "@codemirror/lang-javascript": "^6.2.2",
+    "@codemirror/language": "^6.10.2",
+    "@codemirror/state": "^6.4.1",
+    "@codemirror/view": "^6.35.3",
     "@sentry/browser": "^10.49.0",
-    "@supabase/supabase-js": "^2.49.0",
     "@stripe/stripe-js": "^3.0.0",
+    "@supabase/supabase-js": "^2.49.0",
+    "y-codemirror.next": "^0.3.5",
     "y-webrtc": "^10.3.0",
     "yjs": "^13.6.0"
   }
