@@ -75,6 +75,16 @@ export async function getCurrentUserId(): Promise<string | null> {
 }
 
 // ---------------------------------------------------------------------------
+// Safe profile columns — never request stripe_account_id, notification_trigger_url,
+// or stripe_charges_enabled from the client. Those are service_role / edge-fn only.
+// If you need to add a column here, confirm it contains no PII or financial data.
+// ---------------------------------------------------------------------------
+const PROFILE_SAFE_COLS =
+  "id, username, avatar_url, display_name, review_reliability, skills, stripe_charges_enabled, created_at, updated_at";
+// Note: stripe_charges_enabled is a boolean flag (not the account ID) — safe to
+// expose so the UI can show "payouts enabled" without revealing the Stripe account.
+
+// ---------------------------------------------------------------------------
 // PROJECTS
 // ---------------------------------------------------------------------------
 
@@ -434,6 +444,9 @@ export async function getWalletDeposit(projectId: string, amount: number): Promi
 
 // ---------------------------------------------------------------------------
 // PROFILE
+// Safe columns only — see PROFILE_SAFE_COLS above.
+// Sensitive fields (stripe_account_id, notification_trigger_url) are
+// service_role / edge-fn only and must never appear in client queries.
 // ---------------------------------------------------------------------------
 
 export async function getMyProfile(): Promise<Profile | null> {
@@ -445,7 +458,7 @@ export async function getMyProfile(): Promise<Profile | null> {
 export async function getProfile(userId: string): Promise<Profile | null> {
   const { data, error } = await getSupabase()
     .from("profiles")
-    .select("*")
+    .select(PROFILE_SAFE_COLS)
     .eq("id", userId)
     .single();
 
@@ -461,7 +474,7 @@ export async function updateProfile(userId: string, updates: Partial<Profile>): 
     .from("profiles")
     .update({ ...updates, updated_at: new Date().toISOString() } as Record<string, unknown>)
     .eq("id", userId)
-    .select()
+    .select(PROFILE_SAFE_COLS)
     .single();
 
   if (error) throw normalizeError(error, "updateProfile");
