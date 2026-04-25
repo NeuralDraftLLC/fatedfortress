@@ -115,7 +115,7 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
       <div class="ff-grid">
         <section class="ff-panel" style="grid-column: span 8;">
           <div style="display:flex; gap:8px; margin-bottom:12px;" id="filter-tabs">
-            <button class="ff-btn filter-btn active" data-filter="open" style="flex:1; background:var(--ff-ink); color:var(--ff-paper);">OPEN</button>
+            <button class="ff-btn filter-btn active" data-filter="open" style="flex:1;">OPEN</button>
             <button class="ff-btn filter-btn" data-filter="claimed" style="flex:1;">MY_CLAIMS</button>
             <button class="ff-btn filter-btn" data-filter="submitted" style="flex:1;">SUBMITTED</button>
           </div>
@@ -131,9 +131,9 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
             ACCESS: public OR accepted invitation
           </div>
           <div class="ff-panel" style="margin-top:12px">
-            <div class="ff-kpi__label">LIVE_ACTION_FEED</div>
+            <div class="ff-kpi__label">ACTIVITY_FEED</div>
             <div class="ff-subtitle" style="margin-top:10px; font-family:var(--ff-font-mono); font-size:12px;">
-              [feed] claims · submits · payouts (future)
+              Live claims / submissions will appear here once wired.
             </div>
           </div>
         </aside>
@@ -187,13 +187,21 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
     }
 
     if (filtered.length === 0) {
-      $list.innerHTML = EmptyState({
-        icon: "inbox",
-        title: currentFilter === "open" ? "NO_OPEN_TASKS" : `NO_${currentFilter.toUpperCase()}_TASKS`,
-        description: currentFilter === "open"
-          ? "Check back soon or create a project."
-          : undefined,
-      });
+      let title: string;
+      let description: string | undefined;
+
+      if (currentFilter === "open") {
+        title = "NO_OPEN_TASKS";
+        description = "Check back soon or create a project.";
+      } else if (currentFilter === "claimed") {
+        title = "NO_CLAIMED_TASKS";
+        description = "You haven't claimed any tasks yet.";
+      } else {
+        title = "NO_SUBMITTED_TASKS";
+        description = "Once you submit work, it will show up here.";
+      }
+
+      $list.innerHTML = EmptyState({ icon: "inbox", title, description });
       return;
     }
 
@@ -333,17 +341,14 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
     }
   }
 
-  // ── Filter tabs ──────────────────────────────────────────────────────────────
-  container.querySelectorAll(".filter-btn").forEach(btn => {
+  // ── Filter tabs — use CSS active class, never inline styles ──────────────────
+  container.querySelectorAll<HTMLButtonElement>(".filter-btn").forEach(btn => {
     btn.addEventListener("click", () => {
-      container.querySelectorAll(".filter-btn").forEach(b => {
-        (b as HTMLElement).style.background = "";
-        (b as HTMLElement).style.color = "";
-      });
-      const el = btn as HTMLElement;
-      el.style.background = "var(--ff-ink)";
-      el.style.color = "var(--ff-paper)";
-      currentFilter = (el.dataset.filter ?? "open") as typeof currentFilter;
+      container.querySelectorAll<HTMLButtonElement>(".filter-btn").forEach(b =>
+        b.classList.remove("active")
+      );
+      btn.classList.add("active");
+      currentFilter = (btn.dataset.filter ?? "open") as typeof currentFilter;
       render();
     });
   });
