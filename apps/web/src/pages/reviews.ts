@@ -30,6 +30,7 @@ import { renderShell } from "../ui/shell.js";
 import { Spinner, EmptyState, Badge, escHtml } from "../ui/components.js";
 
 const PAGE_SIZE = 20;
+// Mark submissions as STALE after 12h in queue (badge only; no behavior change).
 const STALENESS_THRESHOLD_MS = 12 * 60 * 60 * 1000;
 
 interface ReviewQueueItem {
@@ -179,7 +180,7 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
     `,
   });
 
-  // ── DOM refs ──────────────────────────────────────────────────────────────
+  // ── DOM refs ───────────────────────────────────────────────────────────
   const $queueList      = container.querySelector<HTMLElement>("#queue-list")!;
   const $queueFooter    = container.querySelector<HTMLElement>("#queue-footer")!;
   const $loadMoreBtn    = container.querySelector<HTMLButtonElement>("#load-more-btn")!;
@@ -200,7 +201,7 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
   let items: ReviewQueueItem[] = [];
   let selectedItem: ReviewQueueItem | null = null;
 
-  // ── Queue card renderer ───────────────────────────────────────────────────
+  // ── Queue card renderer ──────────────────────────────────────────────────
   function renderQueueCard(item: ReviewQueueItem): string {
     const isStale = item.elapsedMs > STALENESS_THRESHOLD_MS;
     const sub = item.submission as unknown as Record<string, unknown>;
@@ -220,7 +221,7 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
     `;
   }
 
-  // ── Asset preview renderer ────────────────────────────────────────────────
+  // ── Asset preview renderer ───────────────────────────────────────────────
   function renderPreview(item: ReviewQueueItem): void {
     const sub = item.submission as unknown as Record<string, unknown>;
     const assetUrl = String(sub.asset_url ?? "");
@@ -243,7 +244,9 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
     } else if (deliverableType.includes("audio") || /\.(mp3|wav|ogg|flac)$/i.test(assetUrl)) {
       html = `<audio controls src="${escHtml(assetUrl)}">Your browser does not support audio.</audio>`;
     } else if (deliverableType.includes("code") || deliverableType.includes("text")) {
-      html = `<pre>Loading code preview…<br/><a href="${escHtml(assetUrl)}" target="_blank" rel="noopener noreferrer" style="color:var(--ff-primary)">Open raw ↗</a></pre>`;
+      // Text/code assets are fetched and previewed inline, truncated at 8 000 chars.
+      // The "OPEN ↗" link in the header always points to the full raw asset.
+      html = `<pre data-asset-url="${escHtml(assetUrl)}">Loading code preview…<br/><a href="${escHtml(assetUrl)}" target="_blank" rel="noopener noreferrer" style="color:var(--ff-primary)">Open raw ↗</a></pre>`;
     } else {
       html = `
         <div class="crucible-placeholder" style="opacity:1">
@@ -254,6 +257,22 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
     }
 
     $previewBody.innerHTML = html;
+
+    // Async-fetch text/code assets and populate the <pre> inline.
+    const pre = $previewBody.querySelector<HTMLPreElement>("pre[data-asset-url]");
+    if (pre) {
+      const url = pre.dataset.assetUrl!;
+      fetch(url)
+        .then(r => r.text())
+        .then(text => {
+          const truncated = text.length > 8000;
+          pre.textContent = text.slice(0, 8000);
+          if (truncated) {
+            pre.textContent += "\n\n…[TRUNCATED — USE \u201cOPEN ↗\u201d ABOVE FOR FULL ASSET]";
+          }
+        })
+        .catch(() => { pre.textContent = "Could not load asset."; });
+    }
   }
 
   // ── Decision panel renderer ───────────────────────────────────────────────
@@ -315,7 +334,7 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
     renderDecisionPanel(item);
   }
 
-  // ── Remove item after decision ────────────────────────────────────────────
+  // ── Remove item after decision ───────────────────────────────────────────────
   function removeItem(taskId: string): void {
     items = items.filter(i => String(i.task.id) !== taskId);
     $queueList.querySelector(`[data-task-id="${escHtml(taskId)}"]`)?.remove();
@@ -340,7 +359,7 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
     }
   }
 
-  // ── Decision action ───────────────────────────────────────────────────────
+  // ── Decision action ───────────────────────────────────────────────────────────
   async function handleDecision(
     verb: "approved" | "revision_requested" | "rejected",
     reason: DecisionReason
@@ -367,7 +386,7 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
   $btnRevise.addEventListener( "click", () => handleDecision("revision_requested", "requirements_not_met" as DecisionReason));
   $btnReject.addEventListener( "click", () => handleDecision("rejected", "quality_issue" as DecisionReason));
 
-  // ── Render queue list ─────────────────────────────────────────────────────
+  // ── Render queue list ───────────────────────────────────────────────────────────
   function renderQueueList(newItems: ReviewQueueItem[]): void {
     if (items.length === 0 && newItems.length === 0) {
       $loadingInd.style.display = "none";
@@ -401,7 +420,7 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
     $loadingInd.style.display = "none";
   }
 
-  // ── Load page ─────────────────────────────────────────────────────────────
+  // ── Load page ─────────────────────────────────────────────────────────────────
   async function loadPage(): Promise<void> {
     $loadingInd.style.display = "";
     try {

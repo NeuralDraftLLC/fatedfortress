@@ -80,7 +80,9 @@ graph TD
 
         subgraph EdgeFunctions["Edge Functions"]
             claim_task["claim-task<br/>Active claim path — invoked from tasks.ts<br/>Locks wallet + updates task state"]:::edgefn
-            create_pi["create-payment-intent<br/>Stripe PI manual capture<br/>LEGACY — not in active claim path"]:::legacy
+            %% create-payment-intent is LEGACY: superseded by claim-task flow.
+            %% Retained for reference; not invoked in active claim path.
+            create_pi["create-payment-intent<br/>Stripe PI manual capture<br/>LEGACY — superseded by claim-task flow"]:::legacy
             stripe_wh["stripe-webhook<br/>PI succeeded/failed<br/>transfer.created - account.updated"]:::edgefn
             asset_scan["asset-scanner<br/>9-sub-pass layered engine<br/>deterministic to heuristic to gap"]:::edgefn
             verify_fn["verify-submission<br/>Deep-Spec Gate<br/>GLB / WAV / MP3 / PNG / JPEG"]:::edgefn
@@ -90,6 +92,7 @@ graph TD
             submit_fn["submit-task<br/>Asset Link + Trigger Deep-Spec Gate"]:::edgefn
             auto_release["auto-release Cron 30min<br/>24h warning to 48h auto-approve<br/>release_wallet_lock RPC"]:::edgefn
             expire_claims["expire-claims Cron 5min<br/>Reclaim Stale Soft-locks<br/>unlock_wallet RPC"]:::edgefn
+            %% storage_fn: previously r2-upload-url (Cloudflare R2); migrated to Supabase Storage.
             storage_fn["supabase-storage-upload<br/>Upload URL / Supabase Storage path"]:::edgefn
             connect_onboard["stripe-connect-onboard<br/>Stripe Express Onboarding"]:::edgefn
             connect_link["stripe-connect-link<br/>Dashboard Link / Reauth"]:::edgefn
