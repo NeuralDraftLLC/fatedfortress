@@ -10,7 +10,7 @@ import { getTask, getSubmissionCount } from "../net/data.js";
 import { createPresignedUploadUrl, uploadToFortressStorage, validateFile } from "../net/storage.js";
 import { getCurrentUserId } from "../net/data.js";
 import type { DeliverableType } from "@fatedfortress/protocol";
-import { Btn, Badge, Input, ToastContainer, showToast, Spinner, escHtml } from "../ui/components.js";
+import { Btn, ToastContainer, showToast, Spinner, escHtml } from "../ui/components.js";
 
 const ALL_DELIVERABLE_TYPES: DeliverableType[] = [
   "file", "pr", "code_patch", "design_asset", "text", "audio", "video", "3d_model", "figma_link",
@@ -80,11 +80,15 @@ export async function mountSubmit(container: HTMLElement, taskId: string): Promi
             </p>
             <p class="hint" style="font-family:var(--ff-font-mono); font-size:11px; color:var(--ff-muted); margin-top:8px;">Max 500MB · Any file type</p>
           </div>
-          <div id="progress" class="hidden" style="display:none;">
+          <div id="progress" class="hidden">
             <div id="progress-fill" style="height:4px; background:var(--ff-ink); width:0%; transition:width 0.2s;"></div>
             <p id="progress-text" style="font-family:var(--ff-font-mono); font-size:12px; margin-top:8px;">Uploading… 0%</p>
+            <button id="cancel-upload-btn" type="button" style="
+              margin-top:8px; background:none; border:1px solid var(--ff-ink);
+              font-family:var(--ff-font-mono); font-size:11px; padding:4px 10px; cursor:pointer;
+            ">CANCEL</button>
           </div>
-          <div id="verify-status" class="hidden" style="display:none; font-family:var(--ff-font-mono); font-size:12px;">
+          <div id="verify-status" class="hidden">
             ${Spinner({ label: "Verifying...", size: "sm" })}
           </div>
         </div>
@@ -96,6 +100,7 @@ export async function mountSubmit(container: HTMLElement, taskId: string): Promi
         <div id="submit-success" class="hidden" style="margin-top:20px; padding:16px; border:1px solid var(--ff-success); font-family:var(--ff-font-mono); font-size:13px;">
           <strong style="color:var(--ff-success);">Submit confirmed.</strong> Task is in review.
           <span id="submit-success-msg" style="display:block; margin-top:4px; color:var(--ff-muted);"></span>
+          <a href="/tasks" style="display:inline-block; margin-top:12px; font-family:var(--ff-font-mono); font-size:12px; text-decoration:underline;">← BACK_TO_TASKS</a>
         </div>
 
         <div style="margin-top:20px;">
@@ -105,37 +110,38 @@ export async function mountSubmit(container: HTMLElement, taskId: string): Promi
     </div>`;
 
   // ── DOM refs ───────────────────────────────────────────────────────────────
-  const $dropzone     = container.querySelector<HTMLElement>("#dropzone")!;
-  const $dropzoneInner= container.querySelector<HTMLElement>("#dropzone-inner")!;
-  const $progress     = container.querySelector<HTMLElement>("#progress")!;
-  const $progressFill = container.querySelector<HTMLElement>("#progress-fill")!;
-  const $progressText = container.querySelector<HTMLElement>("#progress-text")!;
-  const $verifyStatus = container.querySelector<HTMLElement>("#verify-status")!;
-  const $fileInput    = container.querySelector<HTMLInputElement>("#file-input")!;
-  const $submitBtn    = container.querySelector<HTMLButtonElement>("#submit-btn")!;
-  const $hintText     = container.querySelector<HTMLElement>("#hint-text")!;
-  const $statusMsg    = container.querySelector<HTMLElement>("#status-msg")!;
-  const $successEl    = container.querySelector<HTMLElement>("#submit-success")!;
-  const $successMsgEl = container.querySelector<HTMLElement>("#submit-success-msg")!;
+  const $dropzone      = container.querySelector<HTMLElement>("#dropzone")!;
+  const $dropzoneInner = container.querySelector<HTMLElement>("#dropzone-inner")!;
+  const $progress      = container.querySelector<HTMLElement>("#progress")!;
+  const $progressFill  = container.querySelector<HTMLElement>("#progress-fill")!;
+  const $progressText  = container.querySelector<HTMLElement>("#progress-text")!;
+  const $verifyStatus  = container.querySelector<HTMLElement>("#verify-status")!;
+  const $fileInput     = container.querySelector<HTMLInputElement>("#file-input")!;
+  const $submitBtn     = container.querySelector<HTMLButtonElement>("#submit-btn")!;
+  const $hintText      = container.querySelector<HTMLElement>("#hint-text")!;
+  const $statusMsg     = container.querySelector<HTMLElement>("#status-msg")!;
+  const $successEl     = container.querySelector<HTMLElement>("#submit-success")!;
+  const $successMsgEl  = container.querySelector<HTMLElement>("#submit-success-msg")!;
 
   // ── Local state ─────────────────────────────────────────────────────────────
   let selectedFile: File | null = null;
   let selectedType: DeliverableType = "file";
   let uploadAbortController: AbortController | null = null;
 
-  // ── Event helpers ────────────────────────────────────────────────────────────
+  // ── Helpers ──────────────────────────────────────────────────────────────────
   function showError(msg: string): void {
     $statusMsg.textContent = msg;
     $statusMsg.classList.remove("hidden");
   }
 
+  function showPhase(phase: "idle" | "uploading" | "verifying"): void {
+    $dropzoneInner.classList.toggle("hidden", phase !== "idle");
+    $progress.classList.toggle("hidden", phase !== "uploading");
+    $verifyStatus.classList.toggle("hidden", phase !== "verifying");
+  }
+
   function resetDropzone(): void {
-    $dropzoneInner.classList.remove("hidden");
-    $dropzoneInner.style.display = "";
-    $progress.classList.add("hidden");
-    $progress.style.display = "none";
-    $verifyStatus.classList.add("hidden");
-    $verifyStatus.style.display = "none";
+    showPhase("idle");
     $submitBtn.disabled = true;
     $hintText.textContent = "Upload a file to continue";
     $hintText.classList.remove("hidden");
@@ -165,7 +171,7 @@ export async function mountSubmit(container: HTMLElement, taskId: string): Promi
   }
 
   // ── Dropzone ────────────────────────────────────────────────────────────────
-  $dropzone.addEventListener("click", () => { if ($dropzoneInner.style.display !== "none") $fileInput.click(); });
+  $dropzone.addEventListener("click", () => { if (!$dropzoneInner.classList.contains("hidden")) $fileInput.click(); });
   $dropzone.addEventListener("dragover", (e) => { e.preventDefault(); $dropzone.style.borderColor = "var(--ff-gold)"; });
   $dropzone.addEventListener("dragleave", () => { $dropzone.style.borderColor = ""; });
   $dropzone.addEventListener("drop", (e) => {
@@ -175,6 +181,13 @@ export async function mountSubmit(container: HTMLElement, taskId: string): Promi
     if (f) selectFile(f);
   });
   rebindBrowse();
+
+  // ── Cancel upload ────────────────────────────────────────────────────────────
+  container.querySelector("#cancel-upload-btn")?.addEventListener("click", () => {
+    uploadAbortController?.abort();
+    resetDropzone();
+    $hintText.textContent = "Upload cancelled. Select a file to try again.";
+  });
 
   // ── Type chips ──────────────────────────────────────────────────────────────
   container.querySelectorAll(".type-chip").forEach((chip) => {
@@ -200,9 +213,7 @@ export async function mountSubmit(container: HTMLElement, taskId: string): Promi
     try {
       const presigned = await createPresignedUploadUrl(taskId, userId, selectedFile.name, selectedFile.type, selectedType);
 
-      $dropzoneInner.style.display = "none";
-      $progress.classList.remove("hidden");
-      $progress.style.display = "";
+      showPhase("uploading");
       uploadAbortController = new AbortController();
 
       const uploadedAssetUrl = await uploadToFortressStorage(presigned, selectedFile, (pct) => {
@@ -210,12 +221,8 @@ export async function mountSubmit(container: HTMLElement, taskId: string): Promi
         $progressText.textContent = `Uploading… ${pct}%`;
       }, uploadAbortController.signal);
 
-      $progress.classList.add("hidden");
-      $progress.style.display = "none";
-      $verifyStatus.classList.remove("hidden");
-      $verifyStatus.style.display = "";
+      showPhase("verifying");
 
-      // Stage 3: submit-task edge function
       const supabase = (await import("../auth/index.js")).getSupabase();
       const { data: submitResult, error: submitError } = await supabase.functions.invoke("submit-task", {
         body: { taskId, assetUrl: uploadedAssetUrl },
@@ -228,8 +235,8 @@ export async function mountSubmit(container: HTMLElement, taskId: string): Promi
         throw new Error((sr?.message as string) ?? "Submission failed.");
       }
 
-      $verifyStatus.classList.add("hidden");
-      $verifyStatus.style.display = "none";
+      showPhase("idle");
+      $dropzoneInner.classList.add("hidden");
       $submitBtn.disabled = true;
       $hintText.classList.add("hidden");
 
@@ -237,6 +244,7 @@ export async function mountSubmit(container: HTMLElement, taskId: string): Promi
       $successMsgEl.textContent = (sr?.message as string) ?? "Submission received. AI review in progress.";
 
     } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") return; // cancelled — resetDropzone already called
       console.error("submit error:", err);
       showError(err instanceof Error ? err.message : "Submission failed. Please try again.");
       resetDropzone();

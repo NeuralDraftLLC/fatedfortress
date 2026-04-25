@@ -15,8 +15,7 @@ import { requireAuth } from "../auth/middleware.js";
 import { generateScopedTasks } from "../handlers/scope.js";
 import type { ScopedTask } from "@fatedfortress/protocol";
 import { renderShell } from "../ui/shell.js";
-import { insertAuditEntry } from "../net/data.js";
-import { persistScopedProject, updateTaskPayout, activateProject, createProjectWallet } from "../net/data.js";
+import { insertAuditEntry, persistScopedProject, updateTaskPayout, activateProject, createProjectWallet, getInsertedTasks } from "../net/data.js";
 import { escHtml } from "../ui/components.js";
 
 export async function mountCreate(container: HTMLElement): Promise<() => void> {
@@ -142,8 +141,12 @@ export async function mountCreate(container: HTMLElement): Promise<() => void> {
         <div id="scoped-tasks" style="margin-top:10px"></div>
         <div style="display:flex; gap:10px; margin-top:14px">
           <button class="ff-btn" style="background: var(--ff-paper); color: var(--ff-ink); flex:1" id="re-scope-btn">REGENERATE</button>
-          <button class="ff-btn" style="flex:1" id="publish-btn">PUBLISH_TASKS</button>
+          <button class="ff-btn" style="flex:1" id="publish-btn">
+            <span class="publish-text">PUBLISH_TASKS</span>
+            <span class="publish-loading hidden">PUBLISHING...</span>
+          </button>
         </div>
+        <div id="publish-error" class="hidden" style="margin-top:10px; font-family:var(--ff-font-mono); font-size:11px; color:var(--ff-error);"></div>
       </div>
     `,
   });
@@ -166,7 +169,6 @@ export async function mountCreate(container: HTMLElement): Promise<() => void> {
   const $readme = container.querySelector("#scoped-readme") as HTMLElement;
   const $structure = container.querySelector("#scoped-structure") as HTMLElement;
 
-  // Heavy action button triggers forge
   $scopeBtn.addEventListener("click", async () => {
     if (!$scopeBtn.disabled) await handleScope();
   });
@@ -177,6 +179,24 @@ export async function mountCreate(container: HTMLElement): Promise<() => void> {
   const $descTextarea = container.querySelector("#project-description") as HTMLTextAreaElement;
   $descTextarea.addEventListener("input", () => {
     (container.querySelector("#desc-count") as HTMLElement).textContent = String($descTextarea.value.length);
+  });
+
+  // ── Reference file picker ────────────────────────────────────────────
+  const $refInput = container.querySelector("#ref-input") as HTMLInputElement;
+  const $fileList = container.querySelector("#file-list") as HTMLElement;
+
+  container.querySelector("#add-ref-btn")?.addEventListener("click", () => $refInput.click());
+
+  $refInput.addEventListener("change", () => {
+    const files = Array.from($refInput.files ?? []);
+    // Accumulate names into the references list (storage upload is out of scope here).
+    for (const f of files) {
+      if (!references.includes(f.name)) references.push(f.name);
+    }
+    $fileList.textContent = references.length
+      ? references.join(", ")
+      : "";
+    $refInput.value = "";
   });
 
   // ── Handle SCOPE ────────────────────────────────────────────────────
@@ -197,10 +217,8 @@ export async function mountCreate(container: HTMLElement): Promise<() => void> {
     startForgeOverlay();
 
     try {
-      // Deterministic project id so SCOPE + DB persistence match
       projectId = crypto.randomUUID();
 
-      // 1) Call SCOPE AI with ScopeProjectIntent (the "Moment")
       const result = await generateScopedTasks({
         projectId,
         title,
@@ -219,7 +237,6 @@ export async function mountCreate(container: HTMLElement): Promise<() => void> {
         throw new Error("No tasks generated");
       }
 
-      // 2) Persist blueprint artifacts + tasks atomically (single transaction)
       const taskJson = generatedTasks.map((t) => ({
         title: t.title,
         description: t.description,
@@ -245,11 +262,8 @@ export async function mountCreate(container: HTMLElement): Promise<() => void> {
         throw new Error(`Persist failed: ${persistErr?.message ?? "unknown error"}`);
       }
 
-      // Fetch inserted tasks to get real IDs for payout editing
-      const { getInsertedTasks } = await import("../net/data.js");
       persistedTaskRows = await getInsertedTasks(projectId);
 
-      // 3) Show preview
       renderTaskPreview();
       $preview.classList.remove("hidden");
       $form.classList.add("hidden");
@@ -265,26 +279,40 @@ export async function mountCreate(container: HTMLElement): Promise<() => void> {
   async function handlePublish(): Promise<void> {
     if (!projectId) return;
 
-    const $payoutInputs = $taskList.querySelectorAll(".task-payout-input") as NodeListOf<HTMLInputElement>;
-    const { updateTaskPayout: updPayout } = await import("../net/data.js");
-    const { activateProject: actProj } = await import("../net/data.js");
-    const { createProjectWallet: createWallet } = await import("../net/data.js");
-    const { insertAuditEntry: audit } = await import("../net/data.js");
+    const $publishBtn = container.querySelector("#publish-btn") as HTMLButtonElement;
+    const $publishText = container.querySelector(".publish-text") as HTMLElement;
+    const $publishLoading = container.querySelector(".publish-loading") as HTMLElement;
+    const $publishError = container.querySelector("#publish-error") as HTMLElement;
 
-    for (let i = 0; i < $payoutInputs.length; i++) {
-      const input = $payoutInputs[i];
-      const task = generatedTasks[i];
-      const payout = parseFloat(input.value);
-      if (!isNaN(payout) && task && payout >= task.payoutMin && payout <= task.payoutMax) {
-        await updPayout(input.dataset.taskId!, payout);
+    $publishBtn.disabled = true;
+    $publishText.classList.add("hidden");
+    $publishLoading.classList.remove("hidden");
+    $publishError.classList.add("hidden");
+
+    try {
+      const $payoutInputs = $taskList.querySelectorAll(".task-payout-input") as NodeListOf<HTMLInputElement>;
+
+      for (let i = 0; i < $payoutInputs.length; i++) {
+        const input = $payoutInputs[i];
+        const task = generatedTasks[i];
+        const payout = parseFloat(input.value);
+        if (!isNaN(payout) && task && payout >= task.payoutMin && payout <= task.payoutMax) {
+          await updateTaskPayout(input.dataset.taskId!, payout);
+        }
       }
+
+      await activateProject(projectId);
+      await createProjectWallet(projectId);
+      await insertAuditEntry({ actor_id: user.id, project_id: projectId, action: "task_published", payload: { count: generatedTasks.length } });
+
+      window.location.href = `/project/${projectId}`;
+    } catch (err: unknown) {
+      $publishError.textContent = `Publish failed: ${err instanceof Error ? err.message : "Unknown error"}`;
+      $publishError.classList.remove("hidden");
+      $publishBtn.disabled = false;
+      $publishText.classList.remove("hidden");
+      $publishLoading.classList.add("hidden");
     }
-
-    await actProj(projectId);
-    await createWallet(projectId);
-    await audit({ actor_id: user.id, project_id: projectId, action: "task_published", payload: { count: generatedTasks.length } });
-
-    window.location.href = `/project/${projectId}`;
   }
 
   // ── Render task preview ───────────────────────────────────────────────
@@ -355,7 +383,6 @@ export async function mountCreate(container: HTMLElement): Promise<() => void> {
 
     if (forgeTimer) clearInterval(forgeTimer);
     forgeTimer = setInterval(() => {
-      // Fake progress up to 90% while awaiting the real result.
       if (forgeProgress < 90) {
         forgeProgress += Math.max(1, Math.floor((90 - forgeProgress) / 12));
         updateForgeProgress(forgeProgress);
@@ -381,13 +408,5 @@ export async function mountCreate(container: HTMLElement): Promise<() => void> {
     if ($meta) $meta.textContent = `operator_count: ${generatedTasks.length || "—"}`;
   }
 
-  container.querySelector("#add-ref-btn")?.addEventListener("click", () => {
-    (container.querySelector("#ref-input") as HTMLInputElement)?.click();
-  });
-
   return () => {};
-}
-
-function escHtml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }

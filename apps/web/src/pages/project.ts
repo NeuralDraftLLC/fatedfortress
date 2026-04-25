@@ -86,7 +86,9 @@ export async function mountProject(container: HTMLElement, projectId: string): P
               <div style="margin-top:6px; font-family: var(--ff-font-mono); font-weight:900;">
                 DEPOSITED_$${Number(walletDeposited).toFixed(2)} · LOCKED_$${Number(walletLocked).toFixed(2)} · RELEASED_$${Number(walletReleased).toFixed(2)}
               </div>
-              <div class="ff-subtitle">available = deposited - locked - released</div>
+              <div class="ff-subtitle">available = deposited - locked - released${
+                walletDeposited === 0 ? " · <span style=\"color:var(--ff-muted);\">No funds deposited yet</span>" : ""
+              }</div>
             </div>
             <div class="ff-subtitle">${taskList.length} TASKS · ${taskList.filter(t => t.status === "paid").length} PAID</div>
           </div>
@@ -104,11 +106,13 @@ export async function mountProject(container: HTMLElement, projectId: string): P
             <tbody>
               ${
                 taskList.length === 0
-                  ? `<tr><td colspan="4" style="padding:10px; border:1px solid var(--ff-ink); color: var(--ff-muted);">NO_TASKS</td></tr>`
+                  ? `<tr><td colspan="4" style="padding:10px; border:1px solid var(--ff-ink); color: var(--ff-muted);">NO_TASKS · Publish tasks from the create screen to populate this board.</td></tr>`
                   : taskList.map(t => {
                       const status = String(t.status ?? "").toUpperCase();
+                      // Host can review a task when it's under review.
                       const canHostReview = isHost && t.status === "under_review";
-                      const canSubmit = !isHost && t.claimed_by === (project as Record<string, unknown>).host_id && t.status === "claimed";
+                      // Contributor can submit a task they have claimed.
+                      const canSubmit = !isHost && t.claimed_by === userId && t.status === "claimed";
                       const action = canHostReview
                         ? `<a href="/reviews" style="text-decoration:underline;">REVIEW</a>`
                         : canSubmit
@@ -130,7 +134,7 @@ export async function mountProject(container: HTMLElement, projectId: string): P
 
         <!-- RIGHT: Audit Feed -->
         <aside class="ff-panel" style="grid-column: span 3;">
-          <div class="ff-kpi__label">SYSTEM_PURGE_FEED</div>
+          <div class="ff-kpi__label">AUDIT_FEED</div>
           <div style="margin-top:12px; font-family: var(--ff-font-mono); font-size:11px; line-height:1.4; white-space:pre-wrap;">
             ${
               logs.length === 0
