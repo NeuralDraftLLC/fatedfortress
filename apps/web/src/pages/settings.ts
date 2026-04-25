@@ -1,12 +1,35 @@
 /**
- * apps/web/src/pages/settings.ts — GitHub + Stripe Connect onboarding.
+ * apps/web/src/pages/settings.ts — GitHub + Stripe Connect + wallet onboarding.
+ *
+ * Sections by role:
+ *   All users  : Account info, GitHub connect
+ *   Host only  : Stripe Connect, Fund Project Wallet
+ *   Contributor: Skills list, Reliability score
  */
 
-import { getSupabase } from "../auth/index.js";
+import { getSupabase, signOut } from "../auth/index.js";
 import { requireAuth } from "../auth/middleware.js";
-import { createConnectAccountLink } from "../handlers/payout.js";
-import { signOut } from "../auth/index.js";
-import { exchangeGitHubCode, initiateGitHubOAuth } from "../net/github.js";
+import { createConnectAccountLink, fundProjectWallet } from "../handlers/payout.js";
+import { initiateGitHubOAuth, exchangeGitHubCode } from "../net/github.ts";
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function banner(type: "success" | "error", text: string): string {
+  const bg = type === "success" ? "var(--ff-success-bg, #0f2b1a)" : "var(--ff-error-bg, #2b0f0f)";
+  const border = type === "success" ? "var(--ff-success, #2a9d8f)" : "var(--ff-error, #ef476f)";
+  const color = type === "success" ? "var(--ff-success, #2a9d8f)" : "var(--ff-error, #ef476f)";
+  return `<div class="settings-banner" style="background:${bg};border-left:3px solid ${border};color:${color};padding:10px 14px;margin-bottom:16px;font-size:13px;border-radius:2px">${text}</div>`;
+}
+
+function chip(label: string): string {
+  return `<span class="ff-badge ff-badge--neutral" style="font-size:11px;letter-spacing:.04em">${label}</span>`;
+}
+
+// ---------------------------------------------------------------------------
+// Main mount
+// ---------------------------------------------------------------------------
 
 export async function mountSettings(container: HTMLElement): Promise<() => void> {
   await requireAuth();
@@ -21,84 +44,227 @@ export async function mountSettings(container: HTMLElement): Promise<() => void>
     .eq("id", user.id)
     .single();
 
-  const isHost = profile?.role === "host";
+  const isHost        = profile?.role === "host";
+  const isContributor = profile?.role === "contributor";
+  const stripeId      = (profile as Record<string, unknown>)?.stripe_account_id as string | null;
+  const githubUser    = (profile as Record<string, unknown>)?.github_username as string | null;
+  const skills        = (profile as Record<string, unknown>)?.skills as string[] | null ?? [];
+  const reliability   = (profile as Record<string, unknown>)?.reliability_score as number | null;
 
+  // Read URL params (set by OAuth redirect or Stripe return)
+  const params           = new URLSearchParams(window.location.search);
+  const githubConnected  = params.get("github_connected") === "1";
+  const githubError      = params.get("github_error") === "1";
+  const stripeReturn     = params.get("stripe_return") === "1";
+
+  // Strip params from URL without reload
+  if (githubConnected || githubError || stripeReturn) {
+    history.replaceState({}, "", window.location.pathname);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Render
+  // ---------------------------------------------------------------------------
   container.innerHTML = `
-    <div class="settings-page">
-      <header class="settings-header">
-        <h1 class="settings-title">Settings</h1>
-      </header>
+    <div class="settings-page" style="max-width:640px;margin:0 auto;padding:32px 16px">
 
-      <section class="settings-section">
-        <h2>Account</h2>
-        <div class="settings-row">
-          <span>${user.email}</span>
-          <button class="btn btn--ghost btn--sm" id="signout-btn">Sign out</button>
+      <h1 style="font-size:18px;font-weight:700;letter-spacing:.08em;margin-bottom:28px">SETTINGS</h1>
+
+      ${githubConnected ? banner("success", "GitHub connected successfully.") : ""}
+      ${githubError     ? banner("error",   "GitHub connection failed. Please try again.") : ""}
+      ${stripeReturn    ? banner("success",  "Stripe onboarding complete. You can now fund your project wallet.") : ""}
+
+      <div id="settings-stripe-banner"></div>
+      <div id="settings-github-banner"></div>
+
+      <!-- ── Account ──────────────────────────────────────────── -->
+      <section class="settings-section" style="margin-bottom:32px;border-bottom:1px solid var(--ff-border);padding-bottom:28px">
+        <h2 style="font-size:11px;letter-spacing:.1em;color:var(--ff-muted);margin-bottom:14px">ACCOUNT</h2>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+          <span style="font-size:13px">${user.email}</span>
+          <button class="ff-btn ff-btn--ghost ff-btn--sm" id="signout-btn">Sign out</button>
         </div>
-        <div class="settings-row">
-          <span>Role: ${profile?.role ?? "—"}</span>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:12px;color:var(--ff-muted)">Role</span>
+          ${chip((profile?.role ?? "unknown").toUpperCase())}
+          ${reliability != null ? chip(`RELIABILITY ${Math.round(reliability * 100)}%`) : ""}
         </div>
       </section>
 
-      ${isHost ? `
-      <section class="settings-section">
-        <h2>Stripe Connect</h2>
-        <p class="settings-desc">Connect Stripe to add funds to your project wallet and pay contributors when you approve their work.</p>
-        <div class="stripe-status" id="stripe-status">
-          ${(profile as any)?.stripe_account_id
-            ? `<span class="status--active">Stripe connected</span>`
-            : `<span class="status--inactive">Not connected</span>`}
+      <!-- ── Contributor: Skills ───────────────────────────────── -->
+      ${isContributor ? `
+      <section class="settings-section" style="margin-bottom:32px;border-bottom:1px solid var(--ff-border);padding-bottom:28px">
+        <h2 style="font-size:11px;letter-spacing:.1em;color:var(--ff-muted);margin-bottom:14px">SKILLS</h2>
+        <p style="font-size:12px;color:var(--ff-muted);margin-bottom:12px">Skills are matched to task <code>accepted_roles[]</code> when filtering the marketplace.</p>
+        <div style="display:flex;flex-wrap:wrap;gap:6px">
+          ${skills.length > 0
+            ? skills.map((s) => chip(s.toUpperCase())).join("")
+            : `<span style="font-size:12px;color:var(--ff-faint)">No skills on profile yet. Contact support to update.</span>`
+          }
         </div>
-        <button class="btn btn--primary" id="connect-stripe-btn">
-          ${(profile as any)?.stripe_account_id ? "Manage Stripe Account" : "Connect Stripe Account"}
-        </button>
       </section>
       ` : ""}
 
-      <section class="settings-section">
-        <h2>GitHub</h2>
-        <p class="settings-desc">Connect your GitHub account to create PRs and branches for code tasks.</p>
-        <button class="btn btn--primary" id="connect-github-btn">Connect GitHub</button>
+      <!-- ── Host: Stripe Connect ───────────────────────────────── -->
+      ${isHost ? `
+      <section class="settings-section" style="margin-bottom:32px;border-bottom:1px solid var(--ff-border);padding-bottom:28px">
+        <h2 style="font-size:11px;letter-spacing:.1em;color:var(--ff-muted);margin-bottom:14px">STRIPE CONNECT</h2>
+        <p style="font-size:12px;color:var(--ff-muted);margin-bottom:14px">Connect Stripe to fund your project wallet and pay contributors on approval.</p>
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+          ${stripeId
+            ? `<span style="color:var(--ff-success,#2a9d8f);font-size:12px">&#10003; Connected</span>${chip(stripeId.slice(0, 18) + "…")}`
+            : `<span style="color:var(--ff-muted);font-size:12px">Not connected</span>`
+          }
+        </div>
+        <button class="ff-btn ff-btn--primary" id="connect-stripe-btn">
+          ${stripeId ? "Manage Stripe Account" : "Connect Stripe Account"}
+        </button>
       </section>
+
+      <!-- ── Host: Fund Wallet ─────────────────────────────────── -->
+      <section class="settings-section" style="margin-bottom:32px;border-bottom:1px solid var(--ff-border);padding-bottom:28px">
+        <h2 style="font-size:11px;letter-spacing:.1em;color:var(--ff-muted);margin-bottom:14px">FUND PROJECT WALLET</h2>
+        <p style="font-size:12px;color:var(--ff-muted);margin-bottom:14px">Pre-fund a project wallet so funds are locked at claim time. Amount in USD cents (e.g. 5000 = $50.00).</p>
+        <div id="fund-wallet-banner"></div>
+        <div style="display:flex;gap:8px;align-items:flex-end">
+          <div style="flex:1">
+            <label style="font-size:11px;color:var(--ff-muted);display:block;margin-bottom:4px">PROJECT ID</label>
+            <input id="fund-project-id" class="ff-input" type="text" placeholder="uuid" style="width:100%" />
+          </div>
+          <div style="width:120px">
+            <label style="font-size:11px;color:var(--ff-muted);display:block;margin-bottom:4px">AMOUNT (CENTS)</label>
+            <input id="fund-amount" class="ff-input" type="number" min="100" placeholder="5000" style="width:100%" />
+          </div>
+          <button class="ff-btn ff-btn--primary" id="fund-wallet-btn">Fund</button>
+        </div>
+      </section>
+      ` : ""}
+
+      <!-- ── GitHub ─────────────────────────────────────────────── -->
+      <section class="settings-section" style="margin-bottom:32px">
+        <h2 style="font-size:11px;letter-spacing:.1em;color:var(--ff-muted);margin-bottom:14px">GITHUB</h2>
+        <p style="font-size:12px;color:var(--ff-muted);margin-bottom:14px">Required for code / PR task submissions and asset scanner access.</p>
+        ${githubUser
+          ? `<div style="display:flex;align-items:center;gap:10px">
+               <span style="color:var(--ff-success,#2a9d8f);font-size:12px">&#10003; Connected as</span>${chip("@" + githubUser)}
+               <button class="ff-btn ff-btn--ghost ff-btn--sm" id="disconnect-github-btn">Disconnect</button>
+             </div>`
+          : `<button class="ff-btn ff-btn--primary" id="connect-github-btn">Connect GitHub</button>`
+        }
+      </section>
+
     </div>
   `;
 
-  container.querySelector("#signout-btn")?.addEventListener("click", async () => {
-    await signOut();
-    window.location.href = "/login";
-  });
+  // ---------------------------------------------------------------------------
+  // Event listeners
+  // ---------------------------------------------------------------------------
+  const teardowns: Array<() => void> = [];
 
-  if (isHost) {
-    container.querySelector("#connect-stripe-btn")?.addEventListener("click", async () => {
-      const btn = container.querySelector("#connect-stripe-btn") as HTMLButtonElement;
-      btn.disabled = true;
-      btn.textContent = "Redirecting to Stripe...";
-      try {
-        const url = await createConnectAccountLink(user.id);
-        window.location.href = url;
-      } catch (err: unknown) {
-        btn.disabled = false;
-        btn.textContent = "Error — try again";
-        alert(`Stripe onboarding failed: ${err instanceof Error ? err.message : "Unknown error"}`);
-      }
-    });
+  // Sign out
+  const signoutBtn = container.querySelector("#signout-btn") as HTMLButtonElement | null;
+  if (signoutBtn) {
+    const handler = async () => { await signOut(); window.location.href = "/login"; };
+    signoutBtn.addEventListener("click", handler);
+    teardowns.push(() => signoutBtn.removeEventListener("click", handler));
   }
 
-  container.querySelector("#connect-github-btn")?.addEventListener("click", () => {
-    initiateGitHubOAuth();
-  });
+  // Stripe connect
+  if (isHost) {
+    const stripeBtn = container.querySelector("#connect-stripe-btn") as HTMLButtonElement | null;
+    if (stripeBtn) {
+      const handler = async () => {
+        const stripeBanner = container.querySelector("#settings-stripe-banner") as HTMLElement;
+        stripeBtn.disabled = true;
+        stripeBtn.textContent = "Redirecting…";
+        try {
+          const url = await createConnectAccountLink(user.id);
+          window.location.href = url;
+        } catch (err) {
+          stripeBtn.disabled = false;
+          stripeBtn.textContent = stripeId ? "Manage Stripe Account" : "Connect Stripe Account";
+          stripeBanner.innerHTML = banner("error", `Stripe onboarding failed: ${err instanceof Error ? err.message : "Unknown error"}`);
+        }
+      };
+      stripeBtn.addEventListener("click", handler);
+      teardowns.push(() => stripeBtn.removeEventListener("click", handler));
+    }
 
-  return () => {};
+    // Fund wallet
+    const fundBtn       = container.querySelector("#fund-wallet-btn") as HTMLButtonElement | null;
+    const fundBanner    = container.querySelector("#fund-wallet-banner") as HTMLElement | null;
+    const fundProjectId = container.querySelector("#fund-project-id") as HTMLInputElement | null;
+    const fundAmount    = container.querySelector("#fund-amount") as HTMLInputElement | null;
+    if (fundBtn && fundBanner && fundProjectId && fundAmount) {
+      const handler = async () => {
+        const projectId = fundProjectId.value.trim();
+        const amount    = parseInt(fundAmount.value, 10);
+        if (!projectId) { fundBanner.innerHTML = banner("error", "Project ID is required."); return; }
+        if (!amount || amount < 100) { fundBanner.innerHTML = banner("error", "Minimum amount is 100 cents ($1.00)."); return; }
+        fundBtn.disabled = true;
+        fundBtn.textContent = "Funding…";
+        fundBanner.innerHTML = "";
+        try {
+          await fundProjectWallet(projectId, amount);
+          fundBanner.innerHTML = banner("success", `Wallet funded: $${(amount / 100).toFixed(2)} added to project.`);
+          fundProjectId.value = "";
+          fundAmount.value = "";
+        } catch (err) {
+          fundBanner.innerHTML = banner("error", `Fund failed: ${err instanceof Error ? err.message : "Unknown error"}`);
+        } finally {
+          fundBtn.disabled = false;
+          fundBtn.textContent = "Fund";
+        }
+      };
+      fundBtn.addEventListener("click", handler);
+      teardowns.push(() => fundBtn.removeEventListener("click", handler));
+    }
+  }
+
+  // GitHub connect
+  const connectGhBtn = container.querySelector("#connect-github-btn") as HTMLButtonElement | null;
+  if (connectGhBtn) {
+    const handler = () => initiateGitHubOAuth();
+    connectGhBtn.addEventListener("click", handler);
+    teardowns.push(() => connectGhBtn.removeEventListener("click", handler));
+  }
+
+  // GitHub disconnect (clears token + username from profile)
+  const disconnectGhBtn = container.querySelector("#disconnect-github-btn") as HTMLButtonElement | null;
+  if (disconnectGhBtn) {
+    const handler = async () => {
+      const ghBanner = container.querySelector("#settings-github-banner") as HTMLElement;
+      disconnectGhBtn.disabled = true;
+      disconnectGhBtn.textContent = "Disconnecting…";
+      try {
+        await supabase
+          .from("profiles")
+          .update({ github_token: null, github_username: null } as Record<string, unknown>)
+          .eq("id", user.id);
+        ghBanner.innerHTML = banner("success", "GitHub disconnected. Reload to reconnect.");
+        disconnectGhBtn.disabled = true;
+        disconnectGhBtn.textContent = "Disconnected";
+      } catch (err) {
+        ghBanner.innerHTML = banner("error", `Disconnect failed: ${err instanceof Error ? err.message : "Unknown error"}`);
+        disconnectGhBtn.disabled = false;
+        disconnectGhBtn.textContent = "Disconnect";
+      }
+    };
+    disconnectGhBtn.addEventListener("click", handler);
+    teardowns.push(() => disconnectGhBtn.removeEventListener("click", handler));
+  }
+
+  return () => teardowns.forEach((fn) => fn());
 }
 
-/**
- * OAuth callback handler — attached to /github/callback route in main.ts.
- * Exchanges the code, stores token + username on profile, redirects to /settings.
- */
+// ---------------------------------------------------------------------------
+// GitHub OAuth callback — mounted at /github/callback in main.ts
+// ---------------------------------------------------------------------------
+
 export async function mountGitHubCallback(_container: HTMLElement): Promise<() => void> {
   const params = new URLSearchParams(window.location.search);
-  const code = params.get("code");
-  const error = params.get("error");
+  const code   = params.get("code");
+  const error  = params.get("error");
 
   if (error || !code) {
     window.location.href = "/settings?github_error=1";
