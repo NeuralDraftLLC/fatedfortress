@@ -23,15 +23,29 @@
  *   - Claim gate: blocks claim if profile.approved_task_count === 0 AND
  *     profile.github_connected !== true (Phase 2 wiring — backend RPC enforces,
  *     frontend shows the right error message per error code)
+ *
+ * Changes (2026-04-25):
+ *   - Fix: duplicate claim button listeners on every render() call.
+ *     Replaced per-render querySelectorAll binding with a single delegated
+ *     'click' listener on #tasks-list using closest() — fires once per click.
+ *   - Feat: wire real profile data (display_name, review_reliability, skills,
+ *     stripe_charges_enabled) into CONTRACTOR_STATUS sidebar.
+ *   - Feat: live ACTIVITY_FEED via Supabase Realtime postgres_changes on
+ *     tasks table. Prepends last 8 events. Unsubscribed on page teardown.
  */
 
 import { requireAuth } from "../auth/middleware.js";
-import { getCurrentUserId, getOpenTasks, getMyClaimedTasks, getMyAcceptedInvitedTaskIds, getTask, insertAuditEntry, insertNotification } from "../net/data.js";
+import {
+  getCurrentUserId, getOpenTasks, getMyClaimedTasks,
+  getMyAcceptedInvitedTaskIds, getTask, getMyProfile,
+  insertAuditEntry, insertNotification,
+} from "../net/data.js";
 import { getStripe } from "../net/stripe.js";
 import { getSupabase } from "../auth/index.js";
 import { renderShell } from "../ui/shell.js";
 import { Card, Badge, Btn, Spinner, EmptyState, escHtml } from "../ui/components.js";
-import type { Task, TaskStatus } from "@fatedfortress/protocol";
+import type { Task, TaskStatus, Profile } from "@fatedfortress/protocol";
+import type { RealtimeChannel } from "@supabase/supabase-js";
 
 // ─── Payout math (roadmap 1.3) ──────────────────────────────────────────────
 
@@ -44,8 +58,6 @@ function computePayouts(rawMax: number): { raw: number; fee: number; net: number
 }
 
 // ─── Escrow modal (roadmap 1.4) ──────────────────────────────────────────────
-// In-memory flag — no localStorage (sandboxed iframes block it).
-// Persisted on profile via claim-task edge fn on first successful claim.
 let _escrowModalSeen = false;
 
 function showEscrowModal(): Promise<void> {
@@ -85,7 +97,6 @@ function showEscrowModal(): Promise<void> {
     `;
 
     document.body.appendChild(overlay);
-
     overlay.querySelector("#escrow-modal-confirm")?.addEventListener("click", () => {
       _escrowModalSeen = true;
       document.body.removeChild(overlay);
@@ -94,7 +105,7 @@ function showEscrowModal(): Promise<void> {
   });
 }
 
-// ─── Task card renderer (shared) ──────────────────────────────────────────
+// ─── Task card renderer (shared) ────────────────────────────────────────────
 
 function renderTaskCard(
   task: Task & { project?: { title?: string; host_id?: string; host?: { display_name?: string; review_reliability?: number } } },
@@ -112,7 +123,6 @@ function renderTaskCard(
   const ambiguityScore = task.ambiguity_score ?? null;
   const status = (task.status as string).toUpperCase();
 
-  // Payout display (roadmap 1.3)
   const { net } = computePayouts(task.payout_max);
   const payoutBadge = `$${task.payout_min}–$${task.payout_max}`;
   const netPayoutLine = `
@@ -201,7 +211,119 @@ function renderTaskCard(
   }).replace('<div class="ff-card"', `<div class="ff-card" data-task-id="${task.id}">`);
 }
 
-// ─── Guest (unauthenticated) mount ─────────────────────────────────────────
+// ─── Sidebar: contractor status ──────────────────────────────────────────────
+
+function renderContractorSidebar(profile: Profile | null, userId: string): string {
+  const sigId = userId.slice(0, 8).toUpperCase();
+  const displayName = profile?.display_name ? escHtml(profile.display_name) : sigId;
+  const reliability = profile?.review_reliability ?? 0;
+  const reliabilityPct = Math.round(reliability * 100);
+  const reliabilityColor = reliability >= 0.8
+    ? "var(--ff-success, #2e7d32)"
+    : reliability >= 0.5
+    ? "var(--ff-warning, #f57c00)"
+    : "var(--ff-error, #c62828)";
+  const payoutStatus = (profile as Record<string, unknown>)?.stripe_charges_enabled
+    ? `<span style="color:var(--ff-success,#2e7d32);font-weight:700">✓ PAYOUTS_ENABLED</span>`
+    : `<span style="color:var(--ff-muted)">⚠ <a href="/settings" style="color:inherit">CONNECT_STRIPE</a></span>`;
+
+  const skillTags = Array.isArray((profile as Record<string, unknown>)?.skills)
+    ? ((profile as Record<string, unknown>).skills as string[])
+        .map(s => Badge({ label: escHtml(s), variant: "neutral" }))
+        .join(" ")
+    : "";
+
+  return `
+    <div class="ff-kpi__label">CONTRACTOR_STATUS</div>
+    <div style="margin-top:10px; font-family:var(--ff-font-mono); font-size:12px; line-height:1.8; display:flex; flex-direction:column; gap:4px;">
+      <div>SIG_ID: <strong>${sigId}</strong></div>
+      <div>HANDLE: <strong>${displayName}</strong></div>
+      <div>TRUST_RATING:
+        <strong style="color:${reliabilityColor}">${reliabilityPct}%</strong>
+        ${reliability > 0 ? `<span style="color:var(--ff-muted);font-size:10px"> (${reliability.toFixed(2)})</span>` : ""}
+      </div>
+      <div>PAYOUT: ${payoutStatus}</div>
+    </div>
+    ${skillTags ? `<div style="margin-top:10px;display:flex;flex-wrap:wrap;gap:4px">${skillTags}</div>` : ""}
+    <div class="ff-panel" style="margin-top:12px">
+      <div class="ff-kpi__label">PAYOUT_INFO</div>
+      <div style="margin-top:10px; font-family:var(--ff-font-mono); font-size:11px; line-height:1.6;">
+        Platform fee: <strong>10%</strong><br/>
+        Shown on every card as "NET_TO_YOU"<br/>
+        Funds held via Stripe hotel-hold until approval.
+      </div>
+    </div>
+    <div class="ff-panel" style="margin-top:12px">
+      <div class="ff-kpi__label">ACTIVITY_FEED</div>
+      <div id="activity-feed" style="margin-top:10px; font-family:var(--ff-font-mono); font-size:11px; line-height:1.7; max-height:220px; overflow-y:auto; display:flex; flex-direction:column; gap:6px;">
+        <span style="color:var(--ff-muted)">Connecting…</span>
+      </div>
+    </div>
+  `;
+}
+
+// ─── Activity feed helpers ───────────────────────────────────────────────────
+
+const MAX_FEED_EVENTS = 8;
+
+interface FeedEvent {
+  ts: string;
+  label: string;
+  color?: string;
+}
+
+let feedEvents: FeedEvent[] = [];
+
+function pushFeedEvent(ev: FeedEvent): void {
+  feedEvents.unshift(ev);
+  if (feedEvents.length > MAX_FEED_EVENTS) feedEvents = feedEvents.slice(0, MAX_FEED_EVENTS);
+  renderFeed();
+}
+
+function renderFeed(): void {
+  const el = document.getElementById("activity-feed");
+  if (!el) return;
+  if (feedEvents.length === 0) {
+    el.innerHTML = `<span style="color:var(--ff-muted)">No activity yet.</span>`;
+    return;
+  }
+  el.innerHTML = feedEvents.map(ev => `
+    <div style="display:flex;gap:6px;align-items:flex-start">
+      <span style="color:var(--ff-muted);white-space:nowrap;font-size:10px;padding-top:1px">${ev.ts}</span>
+      <span style="color:${ev.color ?? "var(--ff-ink)"}">${escHtml(ev.label)}</span>
+    </div>
+  `).join("");
+  el.scrollTop = 0;
+}
+
+function fmtTime(iso: string): string {
+  return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function taskEventLabel(eventType: "INSERT" | "UPDATE", row: Record<string, unknown>): FeedEvent {
+  const title = (row.title as string | undefined)?.slice(0, 28) ?? "task";
+  const status = (row.status as string | undefined) ?? "";
+  const ts = fmtTime((row.updated_at ?? row.created_at ?? new Date().toISOString()) as string);
+
+  if (eventType === "INSERT") {
+    return { ts, label: `NEW_TASK: ${title}`, color: "var(--ff-success,#2e7d32)" };
+  }
+  const colorMap: Record<string, string> = {
+    claimed:          "var(--ff-warning,#f57c00)",
+    submitted:        "var(--ff-ink)",
+    under_review:     "var(--ff-ink)",
+    revision_requested: "var(--ff-error,#c62828)",
+    approved:         "var(--ff-success,#2e7d32)",
+    rejected:         "var(--ff-error,#c62828)",
+  };
+  return {
+    ts,
+    label: `${status.toUpperCase()}: ${title}`,
+    color: colorMap[status] ?? "var(--ff-ink)",
+  };
+}
+
+// ─── Guest (unauthenticated) mount ──────────────────────────────────────────
 
 export async function mountTasksGuest(container: HTMLElement): Promise<() => void> {
   container.innerHTML = `
@@ -244,13 +366,17 @@ export async function mountTasksGuest(container: HTMLElement): Promise<() => voi
   return () => {};
 }
 
-// ─── Authenticated mount ───────────────────────────────────────────────────
+// ─── Authenticated mount ─────────────────────────────────────────────────────
 
 export async function mountTasks(container: HTMLElement): Promise<() => void> {
   await requireAuth();
 
   const userId = await getCurrentUserId();
   if (!userId) return () => {};
+
+  // Fetch profile in parallel — used to populate sidebar.
+  // Not awaited here; sidebar renders after tasks if profile is slow.
+  let profile: Profile | null = null;
 
   container.innerHTML = renderShell({
     title: "Assignment Depot",
@@ -268,27 +394,8 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
             ${Spinner({ label: "Loading tasks..." })}
           </div>
         </section>
-        <aside class="ff-panel" style="grid-column: span 4;">
-          <div class="ff-kpi__label">CONTRACTOR_STATUS</div>
-          <div class="ff-subtitle" style="margin-top:10px; font-family:var(--ff-font-mono);">
-            SIG_ID: ${userId.slice(0, 8).toUpperCase()}<br/>
-            TRUST_RATING: derived from profiles.review_reliability<br/>
-            ACCESS: public OR accepted invitation
-          </div>
-          <div class="ff-panel" style="margin-top:12px">
-            <div class="ff-kpi__label">PAYOUT_INFO</div>
-            <div class="ff-subtitle" style="margin-top:10px; font-family:var(--ff-font-mono); font-size:11px; line-height:1.6;">
-              Platform fee: <strong>10%</strong><br/>
-              Shown on every card as "NET_TO_YOU"<br/>
-              Funds held via Stripe hotel-hold until approval.
-            </div>
-          </div>
-          <div class="ff-panel" style="margin-top:12px">
-            <div class="ff-kpi__label">ACTIVITY_FEED</div>
-            <div class="ff-subtitle" style="margin-top:10px; font-family:var(--ff-font-mono); font-size:12px;">
-              Live claims / submissions will appear here once wired.
-            </div>
-          </div>
+        <aside class="ff-panel" style="grid-column: span 4;" id="contractor-sidebar">
+          ${Spinner({ label: "Loading profile..." })}
         </aside>
       </div>`,
   });
@@ -296,7 +403,53 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
   let currentFilter: "open" | "claimed" | "submitted" = "open";
   let allTasks: (Task & { project?: { title?: string; host_id?: string; host?: { display_name?: string; review_reliability?: number } } })[] = [];
   let pollInterval: ReturnType<typeof setInterval>;
+  let realtimeChannel: RealtimeChannel | null = null;
 
+  // ── Sidebar: profile ──────────────────────────────────────────────────────
+  async function loadSidebar(): Promise<void> {
+    try {
+      profile = await getMyProfile();
+    } catch {
+      profile = null;
+    }
+    const sidebar = container.querySelector<HTMLElement>("#contractor-sidebar");
+    if (sidebar) sidebar.innerHTML = renderContractorSidebar(profile, userId);
+    // Feed el now exists — flush any events that arrived before DOM was ready
+    renderFeed();
+  }
+
+  // ── Realtime: tasks activity feed ─────────────────────────────────────────
+  function subscribeActivityFeed(): RealtimeChannel {
+    feedEvents = [];
+    const ch = getSupabase()
+      .channel("tasks-activity-feed")
+      .on(
+        "postgres_changes",
+        { event: "INSERT", schema: "public", table: "tasks" },
+        (payload) => {
+          pushFeedEvent(taskEventLabel("INSERT", payload.new as Record<string, unknown>));
+          // Reload task list so new task appears immediately
+          void fetchTasks();
+        }
+      )
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "tasks" },
+        (payload) => {
+          pushFeedEvent(taskEventLabel("UPDATE", payload.new as Record<string, unknown>));
+          // Reflect status change without waiting for next poll
+          void fetchTasks();
+        }
+      )
+      .subscribe((status) => {
+        if (status === "SUBSCRIBED") {
+          renderFeed(); // clears "Connecting…"
+        }
+      });
+    return ch;
+  }
+
+  // ── Tasks data ────────────────────────────────────────────────────────────
   async function fetchTasks(): Promise<void> {
     try {
       const [openTasks, claimedTasks] = await Promise.all([
@@ -357,22 +510,14 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
     }
 
     $list.innerHTML = filtered.map(t => renderTaskCard(t, userId, currentFilter)).join("");
-
-    $list.querySelectorAll("[data-task-id][data-action]").forEach(btn => {
-      btn.addEventListener("click", async (e) => {
-        const el = e.currentTarget as HTMLElement;
-        const taskId = el.dataset.taskId!;
-        const action = el.dataset.action!;
-        await handleAction(taskId, action);
-      });
-    });
+    // NOTE: No per-render event listener attachment here.
+    // A single delegated listener on #tasks-list handles all claim clicks (see below).
   }
 
+  // ── Claim action ──────────────────────────────────────────────────────────
   async function handleAction(taskId: string, action: string): Promise<void> {
     if (action !== "claim") return;
 
-    // ── Escrow modal gate (roadmap 1.4) ──────────────────────────────────
-    // Show once if user has never seen it. Modal resolves before claim proceeds.
     await showEscrowModal();
 
     const urlParams = new URLSearchParams(window.location.search);
@@ -433,7 +578,6 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
           case "invite_only":
             alert(payload.message ?? "This task requires an invitation.");
             break;
-          // ── Claim gate errors (roadmap 2.1–2.3) ──────────────────────
           case "reputation_gate":
             alert(
               payload.message ??
@@ -513,6 +657,20 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
     }
   }
 
+  // ── Single delegated listener on #tasks-list (fixes duplicate listeners) ──
+  // Attached ONCE after shell render. Never re-attached on render() calls.
+  const $listEl = container.querySelector<HTMLElement>("#tasks-list");
+  if ($listEl) {
+    $listEl.addEventListener("click", async (e) => {
+      const target = (e.target as Element).closest<HTMLElement>("[data-task-id][data-action]");
+      if (!target) return;
+      const taskId = target.dataset.taskId!;
+      const action = target.dataset.action!;
+      await handleAction(taskId, action);
+    });
+  }
+
+  // ── Filter tabs ───────────────────────────────────────────────────────────
   container.querySelectorAll<HTMLButtonElement>(".filter-btn").forEach(btn => {
     btn.addEventListener("click", () => {
       container.querySelectorAll<HTMLButtonElement>(".filter-btn").forEach(b =>
@@ -524,8 +682,22 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
     });
   });
 
-  await fetchTasks();
+  // ── Boot: load profile + subscribe feed + fetch tasks in parallel ─────────
+  await Promise.all([
+    loadSidebar(),
+    fetchTasks(),
+  ]);
+
+  realtimeChannel = subscribeActivityFeed();
   pollInterval = setInterval(fetchTasks, 30_000);
 
-  return () => clearInterval(pollInterval);
+  // ── Teardown ──────────────────────────────────────────────────────────────
+  return () => {
+    clearInterval(pollInterval);
+    if (realtimeChannel) {
+      realtimeChannel.unsubscribe();
+      realtimeChannel = null;
+    }
+    feedEvents = [];
+  };
 }
