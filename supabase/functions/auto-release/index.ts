@@ -16,6 +16,11 @@
  *   - 48h cohort: submitted_at < now-48h  (time to release)
  *   The 48h query is independent — it does NOT exclude the 24h cohort.
  *   Tasks may have missed the warning (e.g. function was down) and still must be released.
+ *
+ * Webhook dispatch:
+ *   After inserting notifications, if the host has notification_trigger_url set and
+ *   notification_trigger_enabled = true, we POST the notification payload to that URL.
+ *   Webhook failures are logged but never throw — they must not block the release path.
  */
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -33,6 +38,41 @@ function platformFee(amount: number): number {
   return Math.round(amount * (PLATFORM_FEE_BPS / 10000));
 }
 
+/**
+ * Fire a webhook to a host's configured notification_trigger_url.
+ * Never throws — failures are console.error only so they never interrupt the release path.
+ */
+async function dispatchWebhook(
+  hostId: string,
+  payload: Record<string, unknown>
+): Promise<void> {
+  try {
+    const { data: hostProfile } = await supabase
+      .from("profiles")
+      .select("notification_trigger_url, notification_trigger_enabled")
+      .eq("id", hostId)
+      .single();
+
+    const profile = hostProfile as Record<string, unknown> | null;
+    if (!profile?.notification_trigger_enabled || !profile?.notification_trigger_url) return;
+
+    const url = profile.notification_trigger_url as string;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      // Abort after 5 seconds — never let a slow webhook stall the cron
+      signal: AbortSignal.timeout(5000),
+    });
+
+    if (!res.ok) {
+      console.error(`auto-release: webhook POST to ${url} failed with status ${res.status}`);
+    }
+  } catch (err) {
+    console.error("auto-release: dispatchWebhook error", err);
+  }
+}
+
 Deno.serve(async (req: Request) => {
   const authHeader = req.headers.get("Authorization") ?? "";
   const cronSecret = Deno.env.get("CRON_SECRET");
@@ -43,16 +83,15 @@ Deno.serve(async (req: Request) => {
   const now = new Date();
   const warningCutoff = new Date(now.getTime() - WARNING_HOURS * 60 * 60 * 1000).toISOString();
   const warningUpperBound = new Date(now.getTime() - RELEASE_HOURS * 60 * 60 * 1000).toISOString();
-  const releaseCutoff = warningUpperBound; // tasks older than 48h get released
+  const releaseCutoff = warningUpperBound;
 
   // ── 24h: auto_release_warning ───────────────────────────────────────────
-  // Warn tasks in the 24–48h window (submitted between 48h ago and 24h ago)
   const { data: warningTasks } = await supabase
     .from("tasks")
     .select("id, title, submitted_at, project:projects(host_id)")
     .eq("status", "under_review")
-    .lt("submitted_at", warningCutoff)      // older than 24h
-    .gte("submitted_at", warningUpperBound); // but not yet 48h old
+    .lt("submitted_at", warningCutoff)
+    .gte("submitted_at", warningUpperBound);
 
   if (warningTasks && warningTasks.length > 0) {
     const warnings = warningTasks.map(t => ({
@@ -63,13 +102,24 @@ Deno.serve(async (req: Request) => {
 
     await supabase.from("notifications").insert(warnings);
     console.log(`auto-release: sent ${warnings.length} 24h warnings`);
+
+    // Dispatch webhooks for warning notifications
+    await Promise.allSettled(
+      warningTasks.map(t => {
+        const hostId = (t.project as Record<string, unknown>)?.host_id as string;
+        if (!hostId) return Promise.resolve();
+        return dispatchWebhook(hostId, {
+          event: "auto_release_warning",
+          task_id: t.id,
+          task_title: t.title,
+          hours_remaining: RELEASE_HOURS - WARNING_HOURS,
+          timestamp: now.toISOString(),
+        });
+      })
+    );
   }
 
   // ── 48h: auto_released ─────────────────────────────────────────────────
-  // Release ALL tasks older than 48h, regardless of whether they got a warning.
-  // FIX: was using .not.in(...) which is invalid PostgREST chaining syntax.
-  // The correct form is .not('col', 'in', `(${ids.join(',')})`) — but since
-  // we no longer need to exclude the warning cohort, the filter is removed entirely.
   const { data: releaseTasks } = await supabase
     .from("tasks")
     .select(`
@@ -94,7 +144,6 @@ Deno.serve(async (req: Request) => {
       const project = task.project as Record<string, unknown>;
       const hostId = project?.host_id as string;
       const projectId = project?.id as string;
-      // Use approved_payout if set, otherwise fall back to payout_max
       const approvedPayout = Number(task.approved_payout ?? task.payout_max ?? 0);
 
       if (approvedPayout <= 0) {
@@ -102,7 +151,6 @@ Deno.serve(async (req: Request) => {
         return;
       }
 
-      // Look up host's Stripe Connect account for payout transfer
       const { data: hostProfile } = await supabase
         .from("profiles")
         .select("stripe_account_id")
@@ -111,7 +159,6 @@ Deno.serve(async (req: Request) => {
 
       const connectedAccountId = (hostProfile as Record<string, unknown>)?.stripe_account_id as string | null;
 
-      // Get the latest submission for this task
       const { data: submission } = await supabase
         .from("submissions")
         .select("id, contributor_id, payment_intent_id")
@@ -129,7 +176,6 @@ Deno.serve(async (req: Request) => {
       const contributorId = sub.contributor_id as string;
       const paymentIntentId = sub.payment_intent_id as string | null;
 
-      // Insert decision (approved_fast_track)
       const { data: decisionRow } = await supabase
         .from("decisions")
         .insert({
@@ -142,7 +188,6 @@ Deno.serve(async (req: Request) => {
         .select("id")
         .single();
 
-      // Capture the Stripe PaymentIntent
       let stripeStatus = "skipped";
       if (paymentIntentId) {
         try {
@@ -163,7 +208,6 @@ Deno.serve(async (req: Request) => {
           stripeStatus = "error";
         }
 
-        // Immutable ledger entry
         const fee = platformFee(approvedPayout);
         await supabase.from("payout_ledger").insert({
           task_id:            task.id,
@@ -183,13 +227,11 @@ Deno.serve(async (req: Request) => {
         });
       }
 
-      // Update task to paid
       await supabase
         .from("tasks")
         .update({ status: "paid", reviewed_at: new Date().toISOString() } as Record<string, unknown>)
         .eq("id", task.id);
 
-      // Release locked funds atomically (moves locked → released)
       const { error: walletErr } = await supabase.rpc("release_wallet_lock", {
         p_project_id: projectId,
         p_amount:     approvedPayout,
@@ -198,7 +240,6 @@ Deno.serve(async (req: Request) => {
         console.error("auto-release: release_wallet_lock failed for task", task.id, walletErr.message);
       }
 
-      // Audit log
       await supabase.from("audit_log").insert({
         actor_id: hostId,
         task_id:  task.id,
@@ -211,6 +252,16 @@ Deno.serve(async (req: Request) => {
         { user_id: hostId,        type: "auto_released", task_id: task.id },
         { user_id: contributorId, type: "auto_released", task_id: task.id },
       ]);
+
+      // Dispatch webhooks for release notifications
+      await dispatchWebhook(hostId, {
+        event: "auto_released",
+        task_id: task.id,
+        task_title: task.title,
+        approved_payout: approvedPayout,
+        contributor_id: contributorId,
+        timestamp: now.toISOString(),
+      });
     })
   );
 

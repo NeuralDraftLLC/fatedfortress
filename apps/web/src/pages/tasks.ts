@@ -1,6 +1,10 @@
 /**
  * apps/web/src/pages/tasks.ts — Contributor task listing + claim flow.
  *
+ * Exports:
+ *   mountTasks      — authenticated full view (browse + claim)
+ *   mountTasksGuest — unauthenticated read-only view (browse only)
+ *
  * Refactored: all data access through data.ts, UI through components.ts.
  * Pages own mount logic, event binding, and state only.
  *
@@ -9,6 +13,9 @@
  *   has accepted invitation (invitations.accepted_at is not null).
  * Claim requires: task_access = 'public' OR valid accepted invitation.
  * Invitation token passed via ?invite=<token> URL param on the claim flow.
+ *
+ * Guest mode: renders public tasks read-only. Claim button redirects to
+ *   /login?return=/tasks — no auth-required calls are made.
  */
 
 import { requireAuth } from "../auth/middleware.js";
@@ -19,14 +26,14 @@ import { renderShell } from "../ui/shell.js";
 import { Card, Badge, Btn, Spinner, EmptyState, escHtml } from "../ui/components.js";
 import type { Task, TaskStatus } from "@fatedfortress/protocol";
 
-// ─── Task card renderer ────────────────────────────────────────────────────
+// ─── Task card renderer (shared) ──────────────────────────────────────────
 
 function renderTaskCard(
   task: Task & { project?: { title?: string; host_id?: string; host?: { display_name?: string; review_reliability?: number } } },
-  userId: string,
+  userId: string | null,
   currentFilter: string
 ): string {
-  const isMyClaim = task.claimed_by === userId;
+  const isMyClaim = !!userId && task.claimed_by === userId;
   const isOpen = task.status === "open";
   const softLockExpired = task.soft_lock_expires_at && new Date(task.soft_lock_expires_at as number) < new Date();
   const canClaim = isOpen && !isMyClaim;
@@ -51,7 +58,14 @@ function renderTaskCard(
   const etaLabel = task.estimated_minutes ? `~${task.estimated_minutes}min` : "?";
 
   let actionBtn = "";
-  if (canClaim) {
+  if (!userId) {
+    // Guest: always show a login-to-claim CTA for open tasks
+    if (isOpen) {
+      actionBtn = `<a href="/login?return=/tasks" class="ff-btn ff-btn--primary ff-btn--sm" style="text-decoration:none;display:inline-block">SIGN_IN_TO_CLAIM</a>`;
+    } else {
+      actionBtn = `<span class="ff-subtitle">LOCKED: ${escHtml(task.status as string)}</span>`;
+    }
+  } else if (canClaim) {
     actionBtn = Btn({ label: "CLAIM_TASK", variant: "primary", size: "sm" });
   } else if (canReclaim) {
     actionBtn = Btn({ label: "RECLAIM_EXPIRED", variant: "ghost", size: "sm" });
@@ -89,7 +103,10 @@ function renderTaskCard(
         ${ambiguityLabel ? Badge({ label: ambiguityLabel, variant: ambiguityScore > 0.4 ? "warning" : "success" }) : ""}
       </div>
       <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap">
-        <div data-task-id="${task.id}" data-action="claim">${actionBtn}</div>
+        ${userId
+          ? `<div data-task-id="${task.id}" data-action="claim">${actionBtn}</div>`
+          : actionBtn
+        }
       </div>
       ${task.soft_lock_expires_at && isMyClaim ? `
         <div class="ff-subtitle" style="margin-top:10px; font-family:var(--ff-font-mono); font-size:11px;">
@@ -99,7 +116,51 @@ function renderTaskCard(
   }).replace('<div class="ff-card"', `<div class="ff-card" data-task-id="${task.id}">`);
 }
 
-// ─── Main mount function ───────────────────────────────────────────────────
+// ─── Guest (unauthenticated) mount ─────────────────────────────────────────
+
+export async function mountTasksGuest(container: HTMLElement): Promise<() => void> {
+  container.innerHTML = `
+    <div style="max-width:860px;margin:0 auto;padding:32px 16px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px;flex-wrap:wrap;gap:12px">
+        <div>
+          <div style="font-family:var(--ff-font-mono);font-weight:900;text-transform:uppercase;font-size:18px">OPEN TASKS</div>
+          <div class="ff-subtitle" style="margin-top:4px">Browse available work. Sign in to claim.</div>
+        </div>
+        <a href="/login?return=/tasks" class="ff-btn ff-btn--primary ff-btn--sm" style="text-decoration:none">Sign In to Work</a>
+      </div>
+      <div id="guest-tasks-list">Loading tasks…</div>
+    </div>
+  `;
+
+  const list = container.querySelector<HTMLElement>("#guest-tasks-list");
+  if (!list) return () => {};
+
+  try {
+    const openTasks = await getOpenTasks();
+    // Show only public tasks to guests
+    const publicTasks = openTasks.filter(t => (t as Record<string, unknown>).task_access === "public" || t.status === "open");
+
+    if (publicTasks.length === 0) {
+      list.innerHTML = `
+        <div style="text-align:center;padding:64px 0;font-family:var(--ff-font-mono);color:var(--ff-muted)">
+          <div style="font-size:32px;margin-bottom:12px">📭</div>
+          <div style="font-weight:700;text-transform:uppercase;font-size:12px;letter-spacing:.1em">NO_OPEN_TASKS</div>
+          <div style="margin-top:8px;font-size:11px">Check back soon — new tasks are posted daily.</div>
+          <a href="/login" class="ff-btn ff-btn--ghost ff-btn--sm" style="text-decoration:none;display:inline-block;margin-top:20px">Create an Account</a>
+        </div>
+      `;
+      return () => {};
+    }
+
+    list.innerHTML = publicTasks.map(t => renderTaskCard(t, null, "open")).join("");
+  } catch {
+    list.innerHTML = `<p style="color:var(--ff-error);font-family:var(--ff-font-mono);font-size:12px">Failed to load tasks.</p>`;
+  }
+
+  return () => {};
+}
+
+// ─── Authenticated mount ───────────────────────────────────────────────────
 
 export async function mountTasks(container: HTMLElement): Promise<() => void> {
   await requireAuth();
@@ -144,7 +205,6 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
   let allTasks: (Task & { project?: { title?: string; host_id?: string; host?: { display_name?: string; review_reliability?: number } } })[] = [];
   let pollInterval: ReturnType<typeof setInterval>;
 
-  // ── Fetch ──────────────────────────────────────────────────────────────────
   async function fetchTasks(): Promise<void> {
     try {
       const [openTasks, claimedTasks] = await Promise.all([
@@ -169,7 +229,6 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
     }
   }
 
-  // ── Render ─────────────────────────────────────────────────────────────────
   function render(): void {
     const $list = container.querySelector<HTMLElement>("#tasks-list");
     if (!$list) return;
@@ -207,7 +266,6 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
 
     $list.innerHTML = filtered.map(t => renderTaskCard(t, userId, currentFilter)).join("");
 
-    // Bind action buttons
     $list.querySelectorAll("[data-task-id][data-action]").forEach(btn => {
       btn.addEventListener("click", async (e) => {
         const el = e.currentTarget as HTMLElement;
@@ -218,11 +276,9 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
     });
   }
 
-  // ── Claim action ──────────────────────────────────────────────────────────────
   async function handleAction(taskId: string, action: string): Promise<void> {
     if (action !== "claim") return;
 
-    // Handle invitation token from URL
     const urlParams = new URLSearchParams(window.location.search);
     const invitationToken = urlParams.get("invite");
 
@@ -297,7 +353,6 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
         return;
       }
 
-      // ── Stripe payment authorization ─────────────────────────────────────
       let stripeErrorMessage: string | null = null;
       try {
         const stripe = await getStripe();
@@ -322,7 +377,6 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
         return;
       }
 
-      // ── Post-claim side effects ───────────────────────────────────────────
       await insertAuditEntry({ actor_id: userId, task_id: taskId, action: "claimed" });
 
       const task = await getTask(taskId);
@@ -341,7 +395,6 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
     }
   }
 
-  // ── Filter tabs — use CSS active class, never inline styles ──────────────────
   container.querySelectorAll<HTMLButtonElement>(".filter-btn").forEach(btn => {
     btn.addEventListener("click", () => {
       container.querySelectorAll<HTMLButtonElement>(".filter-btn").forEach(b =>
@@ -353,7 +406,6 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
     });
   });
 
-  // ── Boot ───────────────────────────────────────────────────────────────────
   await fetchTasks();
   pollInterval = setInterval(fetchTasks, 30_000);
 

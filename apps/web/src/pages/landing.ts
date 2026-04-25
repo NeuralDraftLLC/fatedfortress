@@ -1,179 +1,234 @@
 /**
- * apps/web/src/pages/landing.ts
- * Public landing page — no auth required.
- * Renders before the shell; wired to / in main.ts.
+ * apps/web/src/pages/landing.ts — Public landing page.
+ *
+ * IMAGE ASSETS NEEDED (generate after code is stable):
+ *
+ *   1. HERO_ART
+ *      Prompt: "dark cinematic UI screenshot showing a task marketplace
+ *      dashboard with monospace typography, gold accent badges, minimal
+ *      dark surfaces — no faces, no logos"
+ *      Size: 1200×800px, WebP
+ *      Placement: .ff-landing__hero-art img slot
+ *      Replace: <img src="/assets/hero-art.webp" ...>
+ *
+ *   2. HOW_IT_WORKS_ILLUSTRATION
+ *      Prompt: "abstract geometric pipeline diagram — three nodes connected
+ *      by arrows, dark background, off-white lines, minimal and technical"
+ *      Size: 800×400px, WebP
+ *      Placement: .ff-landing__how-illustration
+ *      Replace: <img src="/assets/how-it-works.webp" ...>
+ *
+ *   3. SOCIAL_PROOF_AVATAR_GRID (optional)
+ *      Prompt: "grid of 5 abstract user avatar silhouettes, dark surfaces,
+ *      monochrome, no faces"
+ *      Size: 240×48px, WebP
+ *      Placement: .ff-landing__avatars img slot
+ *      Replace: <img src="/assets/avatar-grid.webp" ...>
  */
 
 export async function mountLanding(container: HTMLElement): Promise<() => void> {
   container.innerHTML = `
     <div class="ff-landing">
 
-      <!-- ── Hero ─────────────────────────────────────────────── -->
+      <!-- ── Nav ────────────────────────────────────────────────────── -->
+      <header class="ff-landing__nav">
+        <div class="ff-landing__nav-inner">
+          <a href="/" class="ff-landing__logo" style="text-decoration:none;color:inherit">
+            <span class="ff-landing__logo-mark">FF</span>
+            <span class="ff-landing__logo-name">FatedFortress</span>
+          </a>
+          <nav class="ff-landing__nav-links">
+            <a href="/tasks" class="ff-landing__nav-link">Browse Tasks</a>
+            <a href="/login" class="ff-landing__nav-cta ff-btn ff-btn--ghost ff-btn--sm">Sign In</a>
+            <a href="/login?mode=signup" class="ff-btn ff-btn--primary ff-btn--sm">Get Started</a>
+          </nav>
+        </div>
+      </header>
+
+      <!-- ── Hero ───────────────────────────────────────────────────── -->
       <section class="ff-landing__hero">
         <div class="ff-landing__hero-inner">
-          <div class="ff-landing__eyebrow">Task Marketplace</div>
+          <div class="ff-landing__eyebrow">TASK MARKETPLACE · STRUCTURED PAYOUTS · ZERO AMBIGUITY</div>
           <h1 class="ff-landing__headline">
-            Post any job.<br>
-            AI scopes it.<br>
-            Specialists deliver.
+            Ship work that<br/>actually ships.
           </h1>
           <p class="ff-landing__subhead">
-            Describe what you need in plain language — design, code, copy, video, anything.
-            FatedFortress breaks it into precise, verifiable tasks. Real specialists claim them,
-            submit verified work, and get paid automatically. No back-and-forth, no ambiguity.
+            FatedFortress connects hosts with contributors through a structured
+            claim-and-verify pipeline — every task scoped by AI, every payout
+            protected by Stripe escrow.
           </p>
           <div class="ff-landing__cta-row">
-            <a href="/login?intent=post" class="ff-btn ff-btn--primary ff-btn--lg">
-              Post a Job
-            </a>
-            <a href="/login?intent=work" class="ff-btn ff-btn--ghost ff-btn--lg">
-              Find Work
-            </a>
+            <a href="/login?mode=signup&role=contributor" class="ff-btn ff-btn--primary">Start Contributing</a>
+            <a href="/login?mode=signup&role=host" class="ff-btn ff-btn--ghost">Post a Project</a>
+          </div>
+
+          <!-- Social proof strip -->
+          <div class="ff-landing__social-proof">
+            <!--
+              IMAGE_ASSET: avatar-grid.webp
+              <img src="/assets/avatar-grid.webp" alt="" width="120" height="24"
+                   loading="lazy" class="ff-landing__avatars" />
+            -->
+            <div class="ff-landing__avatars ff-landing__avatars--placeholder" aria-hidden="true">
+              <span class="ff-landing__avatar-dot"></span>
+              <span class="ff-landing__avatar-dot"></span>
+              <span class="ff-landing__avatar-dot"></span>
+              <span class="ff-landing__avatar-dot"></span>
+              <span class="ff-landing__avatar-dot"></span>
+            </div>
+            <span class="ff-landing__social-text">Join contributors earning on structured tasks</span>
           </div>
         </div>
+
+        <!-- Hero visual -->
         <div class="ff-landing__hero-art" aria-hidden="true">
+          <!--
+            IMAGE_ASSET: hero-art.webp
+            Replace the pipeline widget below with:
+            <img src="/assets/hero-art.webp" alt="" width="560" height="400"
+                 loading="eager" decoding="async"
+                 style="width:100%;height:auto;border-radius:8px;
+                        border:1px solid rgba(240,237,232,.08)" />
+          -->
           <div class="ff-pipeline">
             <div class="ff-pipeline__node ff-pipeline__node--active">
-              <span class="ff-pipeline__icon">✦</span>
-              <span class="ff-pipeline__label">Brief</span>
+              <span class="ff-pipeline__icon">📋</span>
+              <span class="ff-pipeline__label">SCOPE</span>
             </div>
-            <div class="ff-pipeline__arrow">→</div>
+            <span class="ff-pipeline__arrow">→</span>
             <div class="ff-pipeline__node ff-pipeline__node--active">
-              <span class="ff-pipeline__icon">⬡</span>
-              <span class="ff-pipeline__label">AI Scope</span>
+              <span class="ff-pipeline__icon">⚡</span>
+              <span class="ff-pipeline__label">CLAIM</span>
             </div>
-            <div class="ff-pipeline__arrow">→</div>
+            <span class="ff-pipeline__arrow">→</span>
             <div class="ff-pipeline__node">
-              <span class="ff-pipeline__icon">◈</span>
-              <span class="ff-pipeline__label">Claim</span>
+              <span class="ff-pipeline__icon">🔬</span>
+              <span class="ff-pipeline__label">VERIFY</span>
             </div>
-            <div class="ff-pipeline__arrow">→</div>
+            <span class="ff-pipeline__arrow">→</span>
             <div class="ff-pipeline__node">
-              <span class="ff-pipeline__icon">◉</span>
-              <span class="ff-pipeline__label">Verify</span>
-            </div>
-            <div class="ff-pipeline__arrow">→</div>
-            <div class="ff-pipeline__node">
-              <span class="ff-pipeline__icon">✓</span>
-              <span class="ff-pipeline__label">Payout</span>
+              <span class="ff-pipeline__icon">💸</span>
+              <span class="ff-pipeline__label">PAY</span>
             </div>
           </div>
         </div>
       </section>
 
-      <!-- ── How it works ──────────────────────────────────────── -->
+      <!-- ── Stats strip ────────────────────────────────────────────── -->
+      <div class="ff-landing__stats-strip">
+        <div class="ff-landing__stat">
+          <span class="ff-landing__stat-num">10%</span>
+          <span class="ff-landing__stat-label">Platform fee — lowest in class</span>
+        </div>
+        <div class="ff-landing__stat-divider" aria-hidden="true"></div>
+        <div class="ff-landing__stat">
+          <span class="ff-landing__stat-num">48h</span>
+          <span class="ff-landing__stat-label">Auto-release if host doesn't review</span>
+        </div>
+        <div class="ff-landing__stat-divider" aria-hidden="true"></div>
+        <div class="ff-landing__stat">
+          <span class="ff-landing__stat-num">AI</span>
+          <span class="ff-landing__stat-label">Scope engine powered by GPT-4o</span>
+        </div>
+        <div class="ff-landing__stat-divider" aria-hidden="true"></div>
+        <div class="ff-landing__stat">
+          <span class="ff-landing__stat-num">0</span>
+          <span class="ff-landing__stat-label">Ambiguous deliverables — spec enforced</span>
+        </div>
+      </div>
+
+      <!-- ── How it works ───────────────────────────────────────────── -->
       <section class="ff-landing__how">
         <div class="ff-landing__section-inner">
-          <h2 class="ff-landing__section-title">How it works</h2>
-          <p class="ff-landing__section-sub">Four steps. No ambiguity. No chasing people down.</p>
+          <div class="ff-landing__section-inner--center">
+            <div class="ff-landing__eyebrow">HOW IT WORKS</div>
+            <h2 class="ff-landing__section-title">From brief to paid in four steps.</h2>
+            <p class="ff-landing__section-sub">No back-and-forth. No scope creep. Just structured execution.</p>
+          </div>
+
+          <!--
+            IMAGE_ASSET: how-it-works.webp (optional illustration above steps)
+            <img src="/assets/how-it-works.webp" alt=""
+                 class="ff-landing__how-illustration"
+                 width="800" height="300" loading="lazy" />
+          -->
+
           <ol class="ff-landing__steps">
             <li class="ff-landing__step">
               <div class="ff-step__num">01</div>
-              <div class="ff-step__body">
-                <h3 class="ff-step__title">Post your job</h3>
-                <p class="ff-step__desc">
-                  Describe what you need in plain language. The AI breaks it into discrete,
-                  scoped tasks — each with clear deliverable specs and acceptance criteria.
-                </p>
-              </div>
+              <h3 class="ff-step__title">Host scopes the project</h3>
+              <p class="ff-step__desc">Paste a brief. GPT-4o decomposes it into discrete, deliverable tasks with explicit spec constraints — no ambiguity allowed.</p>
             </li>
             <li class="ff-landing__step">
               <div class="ff-step__num">02</div>
-              <div class="ff-step__body">
-                <h3 class="ff-step__title">Specialists claim tasks</h3>
-                <p class="ff-step__desc">
-                  Verified contributors browse the marketplace and claim tasks that match
-                  their skills. Stripe locks the payout at claim time — no payment surprises.
-                </p>
-              </div>
+              <h3 class="ff-step__title">Contributor claims a task</h3>
+              <p class="ff-step__desc">Open tasks are publicly visible. Stripe escrow locks funds the moment a task is claimed — contributors know payment is guaranteed.</p>
             </li>
             <li class="ff-landing__step">
               <div class="ff-step__num">03</div>
-              <div class="ff-step__body">
-                <h3 class="ff-step__title">Deliver and verify</h3>
-                <p class="ff-step__desc">
-                  Contributors submit work. Automated checks run on every deliverable before
-                  it reaches your review queue.
-                </p>
-              </div>
+              <h3 class="ff-step__title">Deep-spec gate verifies delivery</h3>
+              <p class="ff-step__desc">Submissions run through an AI verification engine that checks file format, resolution, duration, and content against the task spec before a human ever reviews it.</p>
             </li>
             <li class="ff-landing__step">
               <div class="ff-step__num">04</div>
-              <div class="ff-step__body">
-                <h3 class="ff-step__title">Approve and close</h3>
-                <p class="ff-step__desc">
-                  Review, approve, and payout releases instantly. Reject with feedback and
-                  the task reopens for revision or reclaim.
-                </p>
-              </div>
+              <h3 class="ff-step__title">Host approves → funds release</h3>
+              <p class="ff-step__desc">Host has 48 hours to review. If they don't act, funds auto-release. Every decision is immutably logged.</p>
             </li>
           </ol>
         </div>
       </section>
 
-      <!-- ── What ships here ───────────────────────────────────── -->
+      <!-- ── Categories ─────────────────────────────────────────────── -->
       <section class="ff-landing__categories">
         <div class="ff-landing__section-inner">
-          <h2 class="ff-landing__section-title">Anything you need built</h2>
+          <div class="ff-landing__eyebrow" style="margin-bottom:16px">WHAT GETS BUILT</div>
+          <h2 class="ff-landing__section-title" style="margin-bottom:32px">Every creative and technical deliverable.</h2>
           <div class="ff-landing__cat-grid">
             ${[
-              ["UI & UX Design", "Screens, flows, component libraries"],
-              ["Branding", "Logos, identity systems, style guides"],
-              ["Frontend Code", "React, Vue, Svelte, vanilla"],
-              ["Backend & APIs", "Node, Python, Go, edge functions"],
-              ["Marketing Assets", "Ad creative, landing pages, email templates"],
-              ["Video & Motion", "Explainers, animations, reels"],
-              ["3D & VFX", "Models, renders, product visualizations"],
-              ["Writing & Copy", "Product copy, docs, technical writing"],
-            ].map(([title, desc]) => `
+              { icon: "🎨", title: "Design Assets",     desc: "UI screens, brand kits, icon sets, illustrations" },
+              { icon: "🎵", title: "Audio",             desc: "SFX, loops, voice-over, music stems" },
+              { icon: "🎬", title: "Video",             desc: "Cutscenes, trailers, social clips, motion graphics" },
+              { icon: "💻", title: "Code",              desc: "Features, bug fixes, scripts, integrations" },
+              { icon: "✍️", title: "Copy & Docs",       desc: "UX copy, technical docs, changelogs" },
+              { icon: "🗺️", title: "World-building",   desc: "Lore, maps, narrative systems, quest design" },
+              { icon: "🧪", title: "QA & Testing",      desc: "Test plans, bug reports, regression suites" },
+              { icon: "📊", title: "Data & Research",   desc: "Market research, data labeling, analytics" },
+            ].map(c => `
               <div class="ff-cat-card">
-                <div class="ff-cat-card__title">${title}</div>
-                <div class="ff-cat-card__desc">${desc}</div>
+                <div style="font-size:24px;margin-bottom:8px">${c.icon}</div>
+                <div class="ff-cat-card__title">${c.title}</div>
+                <div class="ff-cat-card__desc">${c.desc}</div>
               </div>
             `).join("")}
           </div>
         </div>
       </section>
 
-      <!-- ── Builder CTA ────────────────────────────────────────── -->
+      <!-- ── CTA ────────────────────────────────────────────────────── -->
       <section class="ff-landing__bottom-cta">
         <div class="ff-landing__section-inner ff-landing__section-inner--center">
-          <h2 class="ff-landing__cta-headline">
-            Ship your next thing faster.
-          </h2>
-          <p class="ff-landing__cta-sub">
-            The entire loop — scoping, claiming, verification, review, payout — is live.
-            Post your first job in under two minutes.
-          </p>
-          <a href="/login?intent=post" class="ff-btn ff-btn--primary ff-btn--lg">
-            Get started
-          </a>
+          <div class="ff-landing__eyebrow">READY TO START</div>
+          <h2 class="ff-landing__cta-headline">Your next task is waiting.</h2>
+          <p class="ff-landing__cta-sub">Browse open tasks without an account. Sign up only when you're ready to claim.</p>
+          <div class="ff-landing__cta-row" style="justify-content:center">
+            <a href="/tasks" class="ff-btn ff-btn--primary">Browse Open Tasks</a>
+            <a href="/login?mode=signup" class="ff-btn ff-btn--ghost">Create Free Account</a>
+          </div>
         </div>
       </section>
 
-      <!-- ── Footer ─────────────────────────────────────────────── -->
+      <!-- ── Footer ─────────────────────────────────────────────────── -->
       <footer class="ff-landing__footer">
         <span class="ff-landing__footer-brand">FatedFortress</span>
-        <span class="ff-landing__footer-copy">Built for people who ship.</span>
+        <span class="ff-landing__footer-copy">© 2026 NeuralDraft LLC · Built for structured work.</span>
+        <nav class="ff-landing__footer-nav">
+          <a href="/tasks" class="ff-landing__footer-link">Tasks</a>
+          <a href="/login" class="ff-landing__footer-link">Sign In</a>
+        </nav>
       </footer>
 
     </div>
   `;
 
-  // Intercept CTA clicks to pass intent param through to login
-  const handleClick = (e: Event) => {
-    const target = (e.target as Element)?.closest("a");
-    if (!target) return;
-    const href = target.getAttribute("href");
-    if (href?.startsWith("/login")) {
-      e.preventDefault();
-      window.history.pushState({}, "", href);
-      window.dispatchEvent(new PopStateEvent("popstate"));
-    }
-  };
-  container.addEventListener("click", handleClick);
-
-  return () => {
-    container.removeEventListener("click", handleClick);
-  };
+  return () => {};
 }

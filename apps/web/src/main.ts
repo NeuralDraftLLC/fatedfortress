@@ -7,8 +7,8 @@
  * Routes:
  *   /                — Public landing page (no auth required)
  *   /login           — Supabase Auth
+ *   /tasks           — Contributor: browse (public) + claim (auth-gated)
  *   /create          — Host: project brief + SCOPE
- *   /tasks           — Contributor: browse + claim
  *   /submit/:taskId  — Contributor: upload + submit
  *   /reviews         — Host: review queue (MVP moat)
  *   /project/:id     — Project detail + activity feed
@@ -120,7 +120,7 @@ type PageCleanup = (() => void) | void | Promise<() => void>;
 let currentCleanup: PageCleanup = null;
 let notifChannel: ReturnType<typeof subscribeToNotifications> | null = null;
 
-async function route(path: string) {
+async function route(path: string, isLoggedIn: boolean) {
   // Teardown previous page
   if (currentCleanup) {
     const cleanup = await currentCleanup;
@@ -143,6 +143,17 @@ async function route(path: string) {
   if (path === "/") {
     const mod = await import("./pages/landing.js");
     currentCleanup = await mod.mountLanding(container);
+    return;
+  }
+
+  // /tasks — public browse for guests, full authed view for members
+  if (path === "/tasks" || path.startsWith("/tasks")) {
+    const mod = await import("./pages/tasks.js");
+    if (isLoggedIn) {
+      currentCleanup = await mod.mountTasks(container);
+    } else {
+      currentCleanup = await mod.mountTasksGuest(container);
+    }
     return;
   }
 
@@ -180,14 +191,16 @@ async function route(path: string) {
 // ── Auth guard + init ─────────────────────────────────────────────────────────
 
 // Routes that never require authentication
-const PUBLIC_ROUTES = new Set(["/", "/login"]);
+// /tasks is public for browsing; the Claim action inside tasks.ts handles its own auth.
+const PUBLIC_ROUTES = new Set(["/", "/login", "/tasks"]);
 
 async function init() {
   const supabase = getSupabase();
   const { data: { session } } = await supabase.auth.getSession();
   const isLoggedIn = !!session?.user;
   const currentPath = window.location.pathname;
-  const isPublic = PUBLIC_ROUTES.has(currentPath);
+  const isPublic = PUBLIC_ROUTES.has(currentPath) ||
+    currentPath.startsWith("/tasks");
 
   // Auth redirect — skip for public routes
   if (!isPublic) {
@@ -219,6 +232,21 @@ async function init() {
     let app = document.createElement("div");
     app.id = "ff-main";
     document.body.appendChild(app);
+  } else if (isPublic && !isLoggedIn) {
+    // Guest browsing a public route — minimal wrapper, no authenticated shell
+    document.body.innerHTML = `
+      <header class="ff-topbar ff-topbar--guest">
+        <div class="ff-brand">
+          <a href="/" class="ff-brand__name" style="text-decoration:none;color:inherit">FatedFortress</a>
+          <span class="ff-brand__badge">MVP</span>
+        </div>
+        <nav style="display:flex;gap:12px;align-items:center">
+          <a href="/tasks" class="ff-nav-link" style="font-family:var(--ff-font-mono);font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--ff-muted);text-decoration:none;font-weight:700">Tasks</a>
+          <a href="/login" class="ff-btn ff-btn--primary ff-btn--sm">Sign In</a>
+        </nav>
+      </header>
+      <main class="ff-main ff-main--guest" id="ff-main"></main>
+    `;
   } else {
     // Authenticated shell with nav
     document.body.innerHTML = buildShell(role);
@@ -228,9 +256,9 @@ async function init() {
     notifChannel = subscribeToNotifications(session.user.id);
   }
 
-  await route(currentPath);
+  await route(currentPath, isLoggedIn);
 
-  window.addEventListener("popstate", () => route(window.location.pathname));
+  window.addEventListener("popstate", () => route(window.location.pathname, isLoggedIn));
 
   document.addEventListener("click", (e) => {
     const target = (e.target as Element)?.closest("a");
@@ -240,12 +268,13 @@ async function init() {
     if (href.startsWith("/")) {
       e.preventDefault();
       window.history.pushState({}, "", href);
-      // Re-init shell if crossing auth boundary
-      const nextIsPublic = PUBLIC_ROUTES.has(href.split("?")[0]);
+      const nextPath = href.split("?")[0];
+      const nextIsPublic = PUBLIC_ROUTES.has(nextPath) || nextPath.startsWith("/tasks");
+      // Re-init shell if crossing auth boundary (guest → authed or vice-versa)
       if (nextIsPublic !== isPublic) {
         init();
       } else {
-        route(href.split("?")[0]);
+        route(nextPath, isLoggedIn);
       }
     }
   });
