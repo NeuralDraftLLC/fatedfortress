@@ -32,17 +32,71 @@ Sentry.init({
   beforeSend: (event) => scrubEvent(event as any),
 });
 
-const APP_ROOT = "#app";
+// ── Shell HTML (rendered once; nav active state updated per route) ─────────
 
-function getContainer(): HTMLElement {
-  let app = document.querySelector<HTMLElement>(APP_ROOT);
-  if (!app) {
-    app = document.createElement("div");
-    app.id = "app";
-    document.body.appendChild(app);
-  }
-  app.innerHTML = "";
-  return app;
+const NAV_LINKS: Array<{ href: string; label: string; roles?: string[] }> = [
+  { href: "/tasks",   label: "Tasks" },
+  { href: "/submit",  label: "Submit",  roles: ["contributor"] },
+  { href: "/create",  label: "Create",  roles: ["host"] },
+  { href: "/reviews", label: "Reviews", roles: ["host"] },
+  { href: "/profile", label: "Profile" },
+  { href: "/settings",label: "Settings" },
+];
+
+function buildShell(role: string | null): string {
+  const links = NAV_LINKS.filter(l => !l.roles || (role && l.roles.includes(role)));
+  return `
+    <div class="ff-shell">
+      <header class="ff-topbar">
+        <div class="ff-brand">
+          <span class="ff-brand__name">FatedFortress</span>
+          <span class="ff-brand__badge">MVP</span>
+        </div>
+        <nav class="ff-topbar__user" style="display:flex;gap:16px;align-items:center">
+          ${links.map(l =>
+            `<a href="${l.href}" class="ff-nav-link" data-route="${l.href}"
+               style="font-family:var(--ff-font-mono);font-size:10px;text-transform:uppercase;
+                      letter-spacing:.08em;color:var(--ff-muted);text-decoration:none;
+                      font-weight:700;padding:4px 0;border-bottom:2px solid transparent"
+             >${l.label}</a>`
+          ).join("")}
+        </nav>
+      </header>
+      <div class="ff-shell__body">
+        <aside class="ff-sidenav" id="ff-sidenav">
+          <div class="ff-sidenav__header">
+            <div class="ff-sidenav__title">FF</div>
+            <div class="ff-sidenav__ver">v2</div>
+          </div>
+          <nav class="ff-nav" id="ff-nav">
+            ${links.map(l =>
+              `<a href="${l.href}" data-route="${l.href}">${l.label}</a>`
+            ).join("")}
+          </nav>
+        </aside>
+        <main class="ff-main" id="ff-main"></main>
+      </div>
+    </div>
+  `;
+}
+
+function setActiveNav(path: string) {
+  document.querySelectorAll("[data-route]").forEach((el) => {
+    const route = el.getAttribute("data-route") ?? "";
+    const isActive = path === route || (route !== "/" && path.startsWith(route));
+    if (el.tagName === "A") {
+      (el as HTMLAnchorElement).setAttribute("aria-current", isActive ? "page" : "");
+      // topbar inline links
+      if (el.classList.contains("ff-nav-link")) {
+        (el as HTMLElement).style.borderBottomColor = isActive ? "var(--ff-ink)" : "transparent";
+        (el as HTMLElement).style.color = isActive ? "var(--ff-ink)" : "var(--ff-muted)";
+      }
+    }
+  });
+}
+
+function getMain(): HTMLElement {
+  return document.getElementById("ff-main") as HTMLElement;
 }
 
 // ── Route registry ────────────────────────────────────────────────────────────
@@ -55,10 +109,9 @@ const routes: Record<string, RouteInitializer> = {
   "/create":          () => import("./pages/create.js").then(m => () => m.mountCreate),
   "/tasks":           () => import("./pages/tasks.js").then(m => () => m.mountTasks),
   "/reviews":         () => import("./pages/reviews.js").then(m => () => m.mountReviews),
-  "/profile":         () => import("./pages/profile.js").then(m => () => m.mountProfile),
-  "/settings":        () => import("./pages/settings.js").then(m => () => m.mountSettings),
-  "/github/callback": () => import("./pages/settings.js").then(m => () => m.mountGitHubCallback),
-  // submit and project are handled specially with params
+  "/profile":         () => import("./pages/profile.ts").then(m => () => m.mountProfile),
+  "/settings":        () => import("./pages/settings.ts").then(m => () => m.mountSettings),
+  "/github/callback": () => import("./pages/settings.ts").then(m => () => m.mountGitHubCallback),
 };
 
 type PageCleanup = (() => void) | void | Promise<() => void>;
@@ -74,15 +127,18 @@ async function route(path: string) {
     currentCleanup = null;
   }
 
-  // Global notification teardown
   if (notifChannel) {
     unsubscribeFromNotifications();
     notifChannel = null;
   }
 
-  const container = getContainer();
+  setActiveNav(path);
 
-  // Static routes — check before the submit param route
+  const container = getMain();
+  if (!container) return;
+  container.innerHTML = "";
+
+  // Static routes
   const routePath = "/" + path.split("/")[1];
   const routeInit = routes[routePath];
   if (routeInit) {
@@ -91,7 +147,7 @@ async function route(path: string) {
     return;
   }
 
-  // Handle /submit/:taskId specially (after static route check)
+  // /submit/:taskId
   const submitMatch = path.match(/^\/submit\/(.+)/);
   if (submitMatch) {
     const taskId = submitMatch[1];
@@ -100,7 +156,7 @@ async function route(path: string) {
     return;
   }
 
-  // Handle /project/:projectId specially
+  // /project/:projectId
   const projectMatch = path.match(/^\/project\/(.+)/);
   if (projectMatch) {
     const projectId = projectMatch[1];
@@ -109,11 +165,11 @@ async function route(path: string) {
     return;
   }
 
-  // 404 — no route matched
-  container.innerHTML = `<div class="not-found"><h1>404</h1><p>Page not found</p><a href="/">Home</a></div>`;
+  // 404
+  container.innerHTML = `<div class="ff-empty-state"><h1 class="ff-empty-state__title">404</h1><p class="ff-empty-state__description">Page not found.</p><a href="/tasks" class="ff-btn ff-btn--ghost ff-btn--sm" style="margin-top:16px">Back to Tasks</a></div>`;
 }
 
-// ── Auth guard ────────────────────────────────────────────────────────────────
+// ── Auth guard + init ─────────────────────────────────────────────────────────
 
 async function init() {
   const supabase = getSupabase();
@@ -126,18 +182,36 @@ async function init() {
     return;
   }
 
-  // Subscribe to notifications if logged in
+  // Fetch role for nav filtering
+  let role: string | null = null;
+  if (isLoggedIn && session.user) {
+    const { data: profile } = await supabase
+      .from("profiles")
+      .select("role")
+      .eq("id", session.user.id)
+      .single();
+    role = profile?.role ?? null;
+  }
+
+  // Render shell (skip on /login — no nav needed)
+  const isAuthPage = window.location.pathname === "/login";
+  if (!isAuthPage) {
+    document.body.innerHTML = buildShell(role);
+  } else {
+    // Auth page: plain container
+    let app = document.createElement("div");
+    app.id = "ff-main";
+    document.body.appendChild(app);
+  }
+
   if (isLoggedIn && session.user) {
     notifChannel = subscribeToNotifications(session.user.id);
   }
 
-  // Initial route
   await route(window.location.pathname);
 
-  // Navigation
   window.addEventListener("popstate", () => route(window.location.pathname));
 
-  // Intercept internal link clicks for SPA navigation
   document.addEventListener("click", (e) => {
     const target = (e.target as Element)?.closest("a");
     if (!target) return;
@@ -150,8 +224,6 @@ async function init() {
     }
   });
 }
-
-// ── Service worker ────────────────────────────────────────────────────────────
 
 if (import.meta.env.PROD && "serviceWorker" in navigator) {
   navigator.serviceWorker.register("/sw.js").catch(console.error);
