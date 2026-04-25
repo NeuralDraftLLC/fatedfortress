@@ -24,6 +24,15 @@
  *
  * Wrong type choices produce irreconcilable merge conflicts under concurrent
  * edits and cannot be migrated without invalidating all existing room docs.
+ *
+ * TEARDOWN CONTRACT (F1-F3 fix — 2026-04-25):
+ *   Every page/component that calls setActiveRoomDoc() MUST call
+ *   clearActiveRoomDoc() in its SPA teardown function. This destroys the
+ *   Y.Doc, releasing the GC, update encoder, and all Y.Map observers.
+ *
+ *   Every page that observes Y.Map/Y.Text fields MUST use the exported
+ *   observe* helpers (observePresence, observeParticipants, observeMeta,
+ *   observeOutput) which return a teardown fn — never call .observe() directly.
  */
 
 import * as Y from "yjs";
@@ -42,6 +51,16 @@ import { getMyPubkey } from "./identity.js";
 const PARTICIPANT_MAP_KEY = "participantMap";
 /** Legacy v0 — migrated once into participantMap (see migrateParticipantsFromLegacy). */
 const LEGACY_PARTICIPANTS_KEY = "participants";
+
+// F4: WeakMap migration cache — avoids repeated getArray() + transact() on every read.
+const _migratedDocs = new WeakMap<Y.Doc, boolean>();
+
+// ── Helper: guard transact() calls on docs that may have been destroyed ────────
+// F6: prevents Y.js internal errors when a host fires an action while the SPA
+// is simultaneously navigating away and clearActiveRoomDoc() races the write.
+function isDocAlive(doc: Y.Doc): boolean {
+  return !(doc as unknown as { _destroyed?: boolean })._destroyed;
+}
 
 export interface RoomMeta {
   id: RoomId;
@@ -142,7 +161,7 @@ export function createRoomDoc(initialMeta?: Partial<RoomMeta>): FortressRoomDoc 
   const doc = new Y.Doc();
 
   const meta         = doc.getMap<RoomMeta[keyof RoomMeta]>("meta");
-  const participants = doc.getMap<ParticipantEntry>(PARTICIPANT_MAP_KEY); // not LEGACY_PARTICIPANTS_KEY
+  const participants = doc.getMap<ParticipantEntry>(PARTICIPANT_MAP_KEY);
   const output       = doc.getText("output");
   const receiptIds   = doc.getArray<ReceiptId>("receiptIds");
   const templates    = doc.getArray<string>("templates");
@@ -184,14 +203,57 @@ export const getReceiptIds = (r: FortressRoomDoc): ReceiptId[]  => r.receiptIds.
 export const getTemplates  = (r: FortressRoomDoc): string[]     => r.templates.toArray();
 export const getPresence   = (r: FortressRoomDoc): PresenceEntry[] => Array.from(r.presence.values());
 export const getParticipants = (r: FortressRoomDoc): ParticipantEntry[] => {
-  migrateParticipantsFromLegacy(r); // OPFS/remote may still carry legacy array ops
+  migrateParticipantsFromLegacy(r);
   return Array.from(r.participants.values()).sort((a, b) => a.joinedAt - b.joinedAt);
 };
+
+// ─── F2: Observe helpers with guaranteed teardown ─────────────────────────────
+// Use these instead of room.*.observe() directly so teardown is never forgotten.
+// Each returns a zero-arg teardown fn — store it and call it in page teardown.
+
+/** Subscribe to presence changes. Returns a teardown fn. */
+export function observePresence(
+  room: FortressRoomDoc,
+  fn: Parameters<typeof room.presence.observe>[0]
+): () => void {
+  room.presence.observe(fn);
+  return () => room.presence.unobserve(fn);
+}
+
+/** Subscribe to participant map changes. Returns a teardown fn. */
+export function observeParticipants(
+  room: FortressRoomDoc,
+  fn: Parameters<typeof room.participants.observe>[0]
+): () => void {
+  room.participants.observe(fn);
+  return () => room.participants.unobserve(fn);
+}
+
+/** Subscribe to meta map changes. Returns a teardown fn. */
+export function observeMeta(
+  room: FortressRoomDoc,
+  fn: Parameters<typeof room.meta.observe>[0]
+): () => void {
+  room.meta.observe(fn);
+  return () => room.meta.unobserve(fn);
+}
+
+/** Subscribe to output text changes. Returns a teardown fn. */
+export function observeOutput(
+  room: FortressRoomDoc,
+  fn: Parameters<typeof room.output.observe>[0]
+): () => void {
+  room.output.observe(fn);
+  return () => room.output.unobserve(fn);
+}
+
+// ─── F1 + F3: Active doc singleton with proper destroy path ──────────────────
 
 export function setMeta(
   room: FortressRoomDoc,
   patch: Partial<Omit<RoomMeta, "id" | "createdAt" | "schemaVersion">>
 ): void {
+  if (!isDocAlive(room.doc)) return; // F6 guard
   room.doc.transact(() => {
     for (const k in patch) {
       if (Object.prototype.hasOwnProperty.call(patch, k)) {
@@ -202,6 +264,7 @@ export function setMeta(
 }
 
 export function appendOutput(room: FortressRoomDoc, chunk: string): void {
+  if (!isDocAlive(room.doc)) return;
   room.doc.transact(() => {
     room.output.insert(room.output.length, chunk);
   });
@@ -217,6 +280,7 @@ export function appendOutputItem(
   room: FortressRoomDoc,
   item: { type: "text"; text: string } | { type: "image"; url: string; alt?: string } | { type: "audio"; url: string; durationSeconds?: number }
 ): void {
+  if (!isDocAlive(room.doc)) return;
   const map = new Y.Map<unknown>();
   if (item.type === "text") {
     map.set("type", "text");
@@ -236,6 +300,7 @@ export function appendOutputItem(
 }
 
 export function clearOutput(room: FortressRoomDoc): void {
+  if (!isDocAlive(room.doc)) return;
   room.doc.transact(() => {
     if (room.output.length > 0) {
       room.output.delete(0, room.output.length);
@@ -244,12 +309,14 @@ export function clearOutput(room: FortressRoomDoc): void {
 }
 
 export function addReceiptId(room: FortressRoomDoc, id: ReceiptId): void {
+  if (!isDocAlive(room.doc)) return;
   room.doc.transact(() => {
     room.receiptIds.push([id]);
   });
 }
 
 export function addTemplate(room: FortressRoomDoc, template: string): void {
+  if (!isDocAlive(room.doc)) return;
   room.doc.transact(() => {
     room.templates.push([template]);
   });
@@ -279,6 +346,7 @@ export function saveRoomTemplate(
   room: FortressRoomDoc,
   opts: { name: string; modelRef: string; imageSettings: RoomTemplate["imageSettings"] }
 ): void {
+  if (!isDocAlive(room.doc)) return;
   const systemPrompt = getSystemPrompt(room);
   const category = getCategory(room);
   const template: RoomTemplate = {
@@ -290,7 +358,6 @@ export function saveRoomTemplate(
     imageSettings: opts.imageSettings,
     createdAt: Date.now(),
   };
-  // Persist as a JSON string in the templates Y.Array (opaque to Y.js)
   room.doc.transact(() => {
     room.templates.push([JSON.stringify(template)]);
   });
@@ -327,11 +394,11 @@ export function listRoomTemplates(room: FortressRoomDoc): RoomTemplate[] {
 
 /** Apply a template's settings to the current room (systemPrompt + modelRef + imageSettings). */
 export function applyRoomTemplate(room: FortressRoomDoc, template: RoomTemplate): void {
+  if (!isDocAlive(room.doc)) return;
   room.doc.transact(() => {
     if (template.systemPrompt !== undefined) {
       room.meta.set("systemPrompt", template.systemPrompt);
     }
-    // modelRef is applied by the ControlPane's model selector
   });
 }
 
@@ -341,21 +408,46 @@ export function applyRoomTemplate(room: FortressRoomDoc, template: RoomTemplate)
  * Concurrent writes from different peers never conflict — different keys.
  */
 export function upsertPresence(room: FortressRoomDoc, entry: PresenceEntry): void {
+  if (!isDocAlive(room.doc)) return;
   room.doc.transact(() => {
     room.presence.set(entry.pubkey, { ...entry, lastSeenAt: Date.now() });
   });
 }
 
 export function removePresence(room: FortressRoomDoc, pubkey: PublicKeyBase58): void {
+  if (!isDocAlive(room.doc)) return;
   room.doc.transact(() => {
     room.presence.delete(pubkey);
   });
 }
 
+// ─── Active doc singleton ─────────────────────────────────────────────────────
+
 let _activeRoomDoc: FortressRoomDoc | null = null;
 
 export function setActiveRoomDoc(doc: FortressRoomDoc): void {
   _activeRoomDoc = doc;
+}
+
+/**
+ * F1 + F3: Clears the active doc singleton and destroys the underlying Y.Doc.
+ *
+ * MUST be called in the SPA teardown fn of any page that called setActiveRoomDoc().
+ * Calling this:
+ *   1. Unregisters all Y.Map/Y.Text/Y.Array observers attached to this doc
+ *      (Y.Doc.destroy() fires 'destroy' event and clears internal state)
+ *   2. Releases the GC and update encoder allocations
+ *   3. Prevents getActiveRoomDocIfSet() from returning a stale, dead doc
+ *
+ * Safe to call multiple times — no-op if already cleared.
+ */
+export function clearActiveRoomDoc(): void {
+  if (_activeRoomDoc) {
+    if (isDocAlive(_activeRoomDoc.doc)) {
+      _activeRoomDoc.doc.destroy();
+    }
+    _activeRoomDoc = null;
+  }
 }
 
 /** Returns the active room doc without requiring a roomId — returns null if none is set */
@@ -375,21 +467,32 @@ export function getMyJoinedAt(doc: FortressRoomDoc): number {
 }
 
 /**
- * One-time copy from legacy Y.Array("participants") → Y.Map(participantMap), then clear the array.
+ * F4: WeakMap-cached migration — one-time copy from legacy Y.Array("participants")
+ * into Y.Map(participantMap), then clears the array.
+ *
+ * Previously called on every read path, triggering a getArray() allocation and
+ * transact() even after migration. Now bails immediately on cache hit.
+ *
  * Safe if multiple peers run concurrently — set-by-pubkey is last-write-wins per key.
  */
 export function migrateParticipantsFromLegacy(room: FortressRoomDoc): void {
+  if (_migratedDocs.get(room.doc)) return; // F4: already migrated
   const legacy = room.doc.getArray<ParticipantEntry>(LEGACY_PARTICIPANTS_KEY);
-  if (legacy.length === 0) return;
+  if (legacy.length === 0) {
+    _migratedDocs.set(room.doc, true); // cache: nothing to migrate
+    return;
+  }
+  if (!isDocAlive(room.doc)) return;
   room.doc.transact(() => {
     for (const entry of legacy.toArray()) {
       const k = entry.pubkey as string;
       if (!room.participants.has(k)) {
-        room.participants.set(k, entry); // first writer wins if races with another replica
+        room.participants.set(k, entry);
       }
     }
-    legacy.delete(0, legacy.length); // stop replaying duplicate array inserts on sync
+    legacy.delete(0, legacy.length);
   });
+  _migratedDocs.set(room.doc, true);
 }
 
 /**
@@ -397,6 +500,7 @@ export function migrateParticipantsFromLegacy(room: FortressRoomDoc): void {
  */
 export function addParticipant(room: FortressRoomDoc, participant: ParticipantEntry): void {
   migrateParticipantsFromLegacy(room);
+  if (!isDocAlive(room.doc)) return;
   room.doc.transact(() => {
     const k = participant.pubkey as string;
     if (!room.participants.has(k)) {
@@ -410,6 +514,7 @@ export function addParticipant(room: FortressRoomDoc, participant: ParticipantEn
  */
 export function updateParticipant(room: FortressRoomDoc, pubkey: string, patch: Partial<ParticipantEntry>): void {
   migrateParticipantsFromLegacy(room);
+  if (!isDocAlive(room.doc)) return;
   room.doc.transact(() => {
     const existing = room.participants.get(pubkey as PublicKeyBase58);
     if (!existing) return;
@@ -425,6 +530,9 @@ export function serializeDoc(room: FortressRoomDoc): Uint8Array {
 /**
  * Hydrates a FortressRoomDoc from a binary update.
  * Used in fork flow: fetch(here.now url) → hydrateDoc(bytes)
+ *
+ * NOTE: The caller is responsible for calling doc.destroy() when done
+ * (this doc is NOT set as _activeRoomDoc automatically).
  */
 export function hydrateDoc(update: Uint8Array): FortressRoomDoc {
   const doc = new Y.Doc();
@@ -449,8 +557,9 @@ export function hydrateDoc(update: Uint8Array): FortressRoomDoc {
  * Y.js guarantees this is conflict-free regardless of application order.
  */
 export function applyRemoteUpdate(room: FortressRoomDoc, update: Uint8Array): void {
+  if (!isDocAlive(room.doc)) return;
   Y.applyUpdate(room.doc, update);
-  migrateParticipantsFromLegacy(room); // peer may still emit old "participants" array CRDT ops
+  migrateParticipantsFromLegacy(room);
 }
 
 // ─── PRIORITY 2: Host-Only Key Mode ───────────────────────────────────────────
@@ -469,11 +578,15 @@ export function getAllowCommunityKeys(doc: FortressRoomDoc): boolean {
  * Toggles the allowCommunityKeys flag. Only the active host may call this.
  * Guard is enforced here rather than at the CRDT layer (Y.js has no ACL).
  * Non-host callers get a thrown error — the UI should hide the toggle for non-hosts.
+ *
+ * F6: Short-circuits if the Y.Doc has already been destroyed (SPA teardown race).
  */
 export function setAllowCommunityKeys(
   doc: FortressRoomDoc,
   value: boolean,
 ): void {
+  if (!isDocAlive(doc.doc)) return; // F6: destroyed-doc guard
+
   const meta = doc.meta;
   const activeHost = meta.get("activeHostPubkey");
   const myPubkey = getMyPubkey();
@@ -486,7 +599,6 @@ export function setAllowCommunityKeys(
 
   doc.doc.transact(() => {
     meta.set("allowCommunityKeys", value);
-    // Mark a policy-change timestamp so participants can be prompted to re-consent
     meta.set("keyPolicyChangedAt", Date.now());
   });
 }
@@ -514,11 +626,17 @@ export function needsKeyPolicyConsent(
   return consentedAt < changedAt;
 }
 
-/** Records consent after the user accepts the community-key consent modal. */
+/**
+ * Records consent after the user accepts the community-key consent modal.
+ * F5: migrateParticipantsFromLegacy called first so legacy entries are
+ * promoted before any write — prevents silent overwrites of unmigrated data.
+ */
 export function recordKeyPolicyConsent(
   doc: FortressRoomDoc,
   participantPubkey: string,
 ): void {
+  migrateParticipantsFromLegacy(doc); // F5: guard
+  if (!isDocAlive(doc.doc)) return;  // F6: guard
   const participants = doc.participants;
   const existing = participants.get(participantPubkey as PublicKeyBase58) ?? {} as ParticipantEntry;
   participants.set(participantPubkey as PublicKeyBase58, {
