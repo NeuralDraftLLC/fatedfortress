@@ -1,90 +1,154 @@
 /**
- * apps/web/src/pages/login.ts — Supabase Auth login page.
+ * apps/web/src/pages/login.ts — Supabase Auth login / signup page.
  *
- * Reads ?intent from the URL to personalise the post-auth redirect:
- *   ?intent=post  →  /create   (host flow)
- *   ?intent=work  →  /tasks    (contributor flow)
- *   (default)     →  /tasks
+ * URL params accepted (all optional, all composable):
+ *
+ *   ?mode=signup          → show "Create account" framing
+ *   ?role=host            → host-first copy + post-auth redirect to /create
+ *   ?role=contributor     → contributor copy + post-auth redirect to /tasks
+ *   ?intent=post          → legacy alias for role=host
+ *   ?intent=work          → legacy alias for role=contributor
+ *
+ * Persisted through magic-link round-trip via sessionStorage:
+ *   ff_login_role         → "host" | "contributor" | null
+ *   ff_login_intent       → "post" | "work" | null (legacy)
+ *
+ * On sign-in (session detected at mount or on callback):
+ *   1. upsertProfileRole(role) patches profiles.role if still null
+ *   2. Redirect → /create (host) or /tasks (contributor)
  */
 
-import { getSupabase } from "../auth/index.js";
-import {
-  signInWithEmailMagicLink,
-  signInWithGoogle,
-  signInWithPassword,
-} from "../auth/index.js";
+import { getSupabase, signInWithEmailMagicLink, signInWithGoogle, signInWithPassword, upsertProfileRole } from "../auth/index.js";
 
 const showE2EPassword = import.meta.env.VITE_E2E_PASSWORD_LOGIN === "true";
 
-/** Derive the post-auth destination from ?intent, falling back to /tasks. */
-function resolveRedirect(): string {
-  const params = new URLSearchParams(window.location.search);
-  const intent = params.get("intent");
-  if (intent === "post") return "/create";
-  if (intent === "work") return "/tasks";
-  return "/tasks";
-}
-
-/** Persist intent through magic-link round-trip via localStorage key. */
+// ─── Session-storage keys ────────────────────────────────────────────────────
+const ROLE_KEY   = "ff_login_role";
 const INTENT_KEY = "ff_login_intent";
 
-function saveIntent() {
-  const params = new URLSearchParams(window.location.search);
-  const intent = params.get("intent");
+// ─── Param parsing ───────────────────────────────────────────────────────────
+
+function parseParams(): { mode: string; role: "host" | "contributor" | null } {
+  const p    = new URLSearchParams(window.location.search);
+  const mode = p.get("mode") ?? "";
+
+  // ?role= takes precedence; fall back to legacy ?intent=
+  let role: "host" | "contributor" | null = null;
+  const rawRole   = p.get("role");
+  const rawIntent = p.get("intent");
+
+  if (rawRole === "host" || rawIntent === "post")           role = "host";
+  else if (rawRole === "contributor" || rawIntent === "work") role = "contributor";
+
+  return { mode, role };
+}
+
+// ─── Persist / pop role + intent through magic-link round-trip ───────────────
+
+function persistParams(role: "host" | "contributor" | null, intent: string | null) {
+  if (role)   sessionStorage.setItem(ROLE_KEY, role);
   if (intent) sessionStorage.setItem(INTENT_KEY, intent);
 }
 
-function popIntent(): string {
-  const intent = sessionStorage.getItem(INTENT_KEY);
-  sessionStorage.removeItem(INTENT_KEY);
-  if (intent === "post") return "/create";
-  if (intent === "work") return "/tasks";
-  return "/tasks";
+export function popRole(): "host" | "contributor" | null {
+  const v = sessionStorage.getItem(ROLE_KEY) as "host" | "contributor" | null;
+  sessionStorage.removeItem(ROLE_KEY);
+  return v;
 }
+
+function popIntent(): string | null {
+  const v = sessionStorage.getItem(INTENT_KEY);
+  sessionStorage.removeItem(INTENT_KEY);
+  return v;
+}
+
+// ─── Redirect resolution ─────────────────────────────────────────────────────
+
+function roleToRedirect(role: "host" | "contributor" | null): string {
+  return role === "host" ? "/create" : "/tasks";
+}
+
+// ─── Apply role + redirect after a successful sign-in ────────────────────────
+
+async function applyRoleAndRedirect(role: "host" | "contributor" | null): Promise<void> {
+  if (role) await upsertProfileRole(role).catch(() => {/* non-fatal */});
+  window.location.href = roleToRedirect(role);
+}
+
+// ─── Page mount ──────────────────────────────────────────────────────────────
 
 export async function mountLogin(container: HTMLElement): Promise<() => void> {
   const supabase = getSupabase();
   const { data: { session } } = await supabase.auth.getSession();
 
-  // Already logged in — honour any saved intent from a previous magic-link send
+  // Already logged in — apply any saved role and redirect
   if (session?.user) {
-    window.location.href = popIntent();
+    const savedRole = popRole();
+    // consume legacy intent key too
+    popIntent();
+    await applyRoleAndRedirect(savedRole);
     return () => {};
   }
 
-  // Persist intent so magic-link callback can pick it up
-  saveIntent();
+  // Parse current URL params
+  const { mode, role } = parseParams();
+  const isSignup = mode === "signup";
 
-  const redirect = resolveRedirect();
-  const intentLabel = redirect === "/create" ? "post a job" : "find work";
-  const tagline = redirect === "/create"
-    ? "Post a job. AI scopes it. Specialists deliver."
-    : "Browse scoped tasks. Claim. Get paid automatically.";
+  // Persist role + legacy intent through magic-link round-trip
+  const legacyIntent = role === "host" ? "post" : role === "contributor" ? "work" : null;
+  persistParams(role, legacyIntent);
 
+  // ─── Copy resolved from role ─────────────────────────────────────────────
+  const tagline = role === "host"
+    ? "Post a project. AI scopes it. Specialists deliver."
+    : role === "contributor"
+    ? "Browse funded tasks. Claim one. Get paid automatically."
+    : "The structured task marketplace for serious builders.";
+
+  const intentLabel = role === "host"
+    ? "post a project"
+    : role === "contributor"
+    ? "find work"
+    : "get started";
+
+  const ctaLabel = isSignup ? "Create account" : "Sign in";
+  const switchHref = isSignup
+    ? `/login${role ? `?role=${role}` : ""}`
+    : `/login?mode=signup${role ? `&role=${role}` : ""}`;
+  const switchLabel = isSignup
+    ? "Already have an account? <a href=\"/login\">Sign in</a>"
+    : "New here? <a href=\"/login?mode=signup\">Create account</a>";
+
+  // ─── Render ──────────────────────────────────────────────────────────────
   container.innerHTML = `
     <div class="login-page">
       <div class="login-card">
+
         <div class="login-logo">
           <a href="/" class="login-brand" style="text-decoration:none;color:inherit">FatedFortress</a>
           <p class="login-tagline">${tagline}</p>
         </div>
 
-        <div class="login-divider"><span>Sign in to ${intentLabel}</span></div>
+        ${role ? `<div class="login-role-badge login-role-badge--${role}">
+          ${role === "host" ? "⚡ Posting as Host" : "🛠 Joining as Contributor"}
+        </div>` : ""}
+
+        <div class="login-divider"><span>${ctaLabel} to ${intentLabel}</span></div>
 
         <form class="login-form" id="magic-form">
           <div class="form-field">
             <label for="email">Email</label>
             <input type="email" id="email" required placeholder="you@example.com" autocomplete="email" />
           </div>
-          <button type="submit" class="btn btn--primary btn--lg btn--full" id="magic-btn">
+          <button type="submit" class="ff-btn" id="magic-btn" style="width:100%;margin-top:8px">
             Send magic link
           </button>
-          <p class="login-hint">No password needed — you’ll get an email with a secure link.</p>
+          <p class="login-hint">No password needed — check your inbox for a secure link.</p>
         </form>
 
         <div class="login-divider"><span>or</span></div>
 
-        <button class="btn btn--secondary btn--lg btn--full" id="google-btn">
+        <button class="ff-btn" id="google-btn" style="width:100%;background:var(--ff-paper);color:var(--ff-ink);border:1px solid var(--ff-ink)">
           Continue with Google
         </button>
 
@@ -99,12 +163,16 @@ export async function mountLogin(container: HTMLElement): Promise<() => void> {
             <label for="e2e-password">Password</label>
             <input type="password" id="e2e-password" data-testid="e2e-password" autocomplete="current-password" />
           </div>
-          <button type="submit" class="btn btn--primary btn--lg btn--full" id="e2e-signin-btn" data-testid="e2e-signin-btn">
+          <button type="submit" class="ff-btn" id="e2e-signin-btn" data-testid="e2e-signin-btn" style="width:100%;margin-top:8px">
             Sign in with password
           </button>
           <p class="login-hint">Only when VITE_E2E_PASSWORD_LOGIN=true.</p>
         </form>
         ` : ""}
+
+        <p class="login-switch" style="text-align:center;font-size:12px;margin-top:16px;font-family:var(--ff-font-mono);color:var(--ff-muted)">
+          ${switchLabel}
+        </p>
 
         <p class="login-legal">
           By signing in, you agree to our
@@ -115,38 +183,43 @@ export async function mountLogin(container: HTMLElement): Promise<() => void> {
     </div>
   `;
 
-  // Magic link — intent already saved to sessionStorage above
+  // ─── Magic link submit ────────────────────────────────────────────────────
   container.querySelector("#magic-form")?.addEventListener("submit", async (e) => {
     e.preventDefault();
     const email = (container.querySelector("#email") as HTMLInputElement).value.trim();
-    const btn = container.querySelector("#magic-btn") as HTMLButtonElement;
-    btn.disabled = true;
+    const btn   = container.querySelector("#magic-btn") as HTMLButtonElement;
+    btn.disabled    = true;
     btn.textContent = "Sending...";
     try {
       await signInWithEmailMagicLink(email);
       container.querySelector(".login-form")!.innerHTML = `
-        <p style="text-align:center;line-height:1.6">
-          Check your email for a magic link.<br>
-          <span style="font-size:.875rem;opacity:.6">You’ll be taken straight to ${intentLabel}.</span>
-        </p>
+        <div style="text-align:center;padding:16px 0;font-family:var(--ff-font-mono);line-height:1.7">
+          <div style="font-size:20px;margin-bottom:8px">📬</div>
+          <strong>Check your email.</strong><br/>
+          <span style="font-size:12px;color:var(--ff-muted)">
+            Click the link to ${intentLabel}. Tab stays open.
+          </span>
+        </div>
       `;
     } catch (err: any) {
-      btn.disabled = false;
+      btn.disabled    = false;
       btn.textContent = "Send magic link";
       alert(`Failed to send: ${err.message}`);
     }
   });
 
+  // ─── E2E password submit ──────────────────────────────────────────────────
   if (showE2EPassword) {
     container.querySelector("#e2e-password-form")?.addEventListener("submit", async (e) => {
       e.preventDefault();
-      const email = (container.querySelector("#e2e-email") as HTMLInputElement).value.trim();
+      const email    = (container.querySelector("#e2e-email") as HTMLInputElement).value.trim();
       const password = (container.querySelector("#e2e-password") as HTMLInputElement).value;
-      const btn = container.querySelector("#e2e-signin-btn") as HTMLButtonElement;
+      const btn      = container.querySelector("#e2e-signin-btn") as HTMLButtonElement;
       btn.disabled = true;
       try {
         await signInWithPassword(email, password);
-        window.location.href = popIntent();
+        const savedRole = popRole(); popIntent();
+        await applyRoleAndRedirect(savedRole);
       } catch (err: unknown) {
         btn.disabled = false;
         alert(`Sign-in failed: ${err instanceof Error ? err.message : "Unknown error"}`);
@@ -154,16 +227,18 @@ export async function mountLogin(container: HTMLElement): Promise<() => void> {
     });
   }
 
-  // Google OAuth — intent persisted in sessionStorage, picked up on callback
+  // ─── Google OAuth ─────────────────────────────────────────────────────────
+  // Role is already in sessionStorage — picked up by popRole() when the
+  // OAuth redirect returns and mountLogin() re-runs (session detected above).
   container.querySelector("#google-btn")?.addEventListener("click", async () => {
     const btn = container.querySelector("#google-btn") as HTMLButtonElement;
-    btn.disabled = true;
+    btn.disabled    = true;
+    btn.textContent = "Redirecting...";
     try {
       await signInWithGoogle();
-      // signInWithGoogle redirects away; popIntent() fires on return in the
-      // session-check at the top of mountLogin.
     } catch (err: any) {
-      btn.disabled = false;
+      btn.disabled    = false;
+      btn.textContent = "Continue with Google";
       alert(`Google sign-in failed: ${err.message}`);
     }
   });

@@ -15,16 +15,13 @@ let _client: SupabaseClient | null = null;
 
 export function getSupabase(): SupabaseClient {
   if (!_client) {
-    const url = import.meta.env.VITE_SUPABASE_URL as string;
+    const url     = import.meta.env.VITE_SUPABASE_URL as string;
     const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
     if (!url || !anonKey) {
       throw new Error("VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY must be set");
     }
     _client = createClient(url, anonKey, {
-      auth: {
-        persistSession: true,
-        autoRefreshToken: true,
-      },
+      auth: { persistSession: true, autoRefreshToken: true },
     });
   }
   return _client;
@@ -135,3 +132,54 @@ export async function updateMyProfile(updates: Partial<Profile>): Promise<Profil
   return data as Profile;
 }
 
+// ---------------------------------------------------------------------------
+// Role upsert — called once after first sign-in
+// ---------------------------------------------------------------------------
+
+/**
+ * Write `role` to profiles for the current user, but ONLY if the existing
+ * profile row has role = null (i.e. never overwrite a role already set).
+ *
+ * Safe to call on every sign-in; idempotent for existing users.
+ */
+export async function upsertProfileRole(
+  role: "host" | "contributor"
+): Promise<void> {
+  const user = await getCurrentUser();
+  if (!user) return;
+
+  const supabase = getSupabase();
+
+  // Check existing role first — never overwrite
+  const { data: existing } = await supabase
+    .from("profiles")
+    .select("id, role")
+    .eq("id", user.id)
+    .single();
+
+  // Profile doesn't exist yet → insert with role
+  if (!existing) {
+    await supabase.from("profiles").insert({
+      id:           user.id,
+      display_name: user.email?.split("@")[0] ?? "Anonymous",
+      role,
+      review_reliability:        1.0,
+      approval_rate:             1.0,
+      avg_revision_count:        0,
+      avg_response_time_minutes: 0,
+      total_approved:            0,
+      total_submitted:           0,
+      total_rejected:            0,
+    });
+    return;
+  }
+
+  // Profile exists but role not yet set → patch it
+  if (!existing.role) {
+    await supabase
+      .from("profiles")
+      .update({ role, updated_at: new Date().toISOString() })
+      .eq("id", user.id);
+  }
+  // If role is already set → no-op (never overwrite)
+}
