@@ -14,6 +14,7 @@
  *   /reviews           — Host: review queue (MVP moat)
  *   /project/:id       — Project detail + activity feed
  *   /profile           — Profile + review_reliability
+ *   /herenow/publish   — HereNow room publish flow (gated: reliability >= 0.70)
  *   /settings          — GitHub + Stripe Connect onboarding
  *
  * ?next= preservation:
@@ -142,16 +143,17 @@ type PageLoader       = (container: HTMLElement) => Promise<() => void>;
 type RouteInitializer = () => Promise<() => PageLoader>;
 
 const routes: Record<string, RouteInitializer> = {
-  "/login":           () => import("./pages/login.js").then(m => () => m.mountLogin),
-  "/auth/callback":   () => import("./pages/callback.js").then(m => () => m.mountCallback),
-  "/create":          () => import("./pages/create.js").then(m => () => m.mountCreate),
-  "/tasks":           () => import("./pages/tasks.js").then(m => () => m.mountTasks),
-  "/reviews":         () => import("./pages/reviews.js").then(m => () => m.mountReviews),
-  "/profile":         () => import("./pages/profile.js").then(m => () => m.mountProfile),
-  "/settings":        () => import("./pages/settings.js").then(m => () => m.mountSettings),
-  "/github/callback": () => import("./pages/settings.js").then(m => () => m.mountGitHubCallback),
-  "/terms":           () => Promise.resolve(() => (c: HTMLElement) => { c.innerHTML = `<div class="ff-panel" style="max-width:640px;margin:40px auto;padding:32px"><h1 class="ff-h1">Terms of Service</h1><p class="ff-subtitle" style="margin-top:16px">Coming soon.</p></div>`; return Promise.resolve(() => {}); }),
-  "/privacy":         () => Promise.resolve(() => (c: HTMLElement) => { c.innerHTML = `<div class="ff-panel" style="max-width:640px;margin:40px auto;padding:32px"><h1 class="ff-h1">Privacy Policy</h1><p class="ff-subtitle" style="margin-top:16px">Coming soon.</p></div>`; return Promise.resolve(() => {}); }),
+  "/login":             () => import("./pages/login.js").then(m => () => m.mountLogin),
+  "/auth/callback":     () => import("./pages/callback.js").then(m => () => m.mountCallback),
+  "/create":            () => import("./pages/create.js").then(m => () => m.mountCreate),
+  "/tasks":             () => import("./pages/tasks.js").then(m => () => m.mountTasks),
+  "/reviews":           () => import("./pages/reviews.js").then(m => () => m.mountReviews),
+  "/profile":           () => import("./pages/profile.js").then(m => () => m.mountProfile),
+  "/settings":          () => import("./pages/settings.js").then(m => () => m.mountSettings),
+  "/github/callback":   () => import("./pages/settings.js").then(m => () => m.mountGitHubCallback),
+  "/herenow/publish":   () => import("./pages/herenow-publish.js").then(m => () => m.mountHereNowPublish),
+  "/terms":             () => Promise.resolve(() => (c: HTMLElement) => { c.innerHTML = `<div class="ff-panel" style="max-width:640px;margin:40px auto;padding:32px"><h1 class="ff-h1">Terms of Service</h1><p class="ff-subtitle" style="margin-top:16px">Coming soon.</p></div>`; return Promise.resolve(() => {}); }),
+  "/privacy":           () => Promise.resolve(() => (c: HTMLElement) => { c.innerHTML = `<div class="ff-panel" style="max-width:640px;margin:40px auto;padding:32px"><h1 class="ff-h1">Privacy Policy</h1><p class="ff-subtitle" style="margin-top:16px">Coming soon.</p></div>`; return Promise.resolve(() => {}); }),
 };
 
 type PageCleanup = (() => void) | void | Promise<() => void>;
@@ -215,7 +217,14 @@ async function route(path: string, isLoggedIn: boolean) {
     return;
   }
 
-  // Static routes
+  // /herenow/* — prefix match so sub-routes resolve correctly
+  if (path === "/herenow/publish" || path.startsWith("/herenow/publish")) {
+    const mod = await import("./pages/herenow-publish.js");
+    currentCleanup = await mod.mountHereNowPublish(container);
+    return;
+  }
+
+  // Static routes (exact prefix match on first segment)
   const routePath  = "/" + path.split("/")[1];
   const routeInit  = routes[routePath];
   if (routeInit) {
@@ -269,7 +278,7 @@ async function init() {
     currentPath.startsWith("/tasks") ||
     currentPath.startsWith("/auth/");
 
-  // ── ?next= redirect ──────────────────────────────────────────────────────
+  // ── ?next= redirect
   if (isLoggedIn && !isPublic) {
     const next = consumeNextParam();
     if (next && next !== currentPath) {
@@ -287,7 +296,7 @@ async function init() {
     }
   }
 
-  // ── Fetch profile: role + display_name ────────────────────────────────────
+  // ── Fetch profile: role + display_name
   let role: string | null = null;
 
   if (isLoggedIn && session.user) {
@@ -309,7 +318,7 @@ async function init() {
     setProfileDisplayName(null);
   }
 
-  // ── Render shell ───────────────────────────────────────────────────────────
+  // ── Render shell
   if (currentPath === "/") {
     const main = document.createElement("main");
     main.id = "ff-main";
@@ -349,7 +358,7 @@ async function init() {
     shellNotifTeardown = mountShellNotifications(session!.user.id);
   }
 
-  // ── Realtime notifications channel ─────────────────────────────────────
+  // ── Realtime notifications channel
   if (isLoggedIn && session!.user) {
     notifChannel = subscribeToNotifications(session!.user.id);
   }
@@ -379,7 +388,7 @@ async function init() {
   });
 }
 
-// ── Auth state change ──────────────────────────────────────────────────────
+// ── Auth state change
 // Re-run init on sign-in / sign-out so display name, nav role filter,
 // and notification badge all update without requiring a hard reload.
 getSupabase().auth.onAuthStateChange((event) => {
