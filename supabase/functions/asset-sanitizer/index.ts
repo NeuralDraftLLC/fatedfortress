@@ -120,10 +120,10 @@ async function scanWithVirusTotal(fileBuffer: ArrayBuffer, filename: string): Pr
 
 // ─── Railway worker calls ─────────────────────────────────────────────────────
 
-async function renderGLBTurntable(glbBuffer: ArrayBuffer): Promise<string> {
-  if (!RAILWAY_GLBTURNTABLE_URL) {
-    throw new Error("RAILWAY_GLBTURNTABLE_URL not configured");
-  }
+// Perplexity: GLB worker now returns { success, data: number[], contentType }
+// We reconstruct the bytes and upload to Supabase Storage here (edge function has the service role key)
+async function renderGLBTurntable(glbBuffer: ArrayBuffer): Promise<ArrayBuffer> {
+  if (!RAILWAY_GLBTURNTABLE_URL) throw new Error("RAILWAY_GLBTURNTABLE_URL not configured");
 
   const res = await fetch(RAILWAY_GLBTURNTABLE_URL, {
     method: "POST",
@@ -131,13 +131,12 @@ async function renderGLBTurntable(glbBuffer: ArrayBuffer): Promise<string> {
     body: glbBuffer,
   });
 
-  if (!res.ok) {
-    throw new Error(`GLB turntable worker failed: ${res.status} ${await res.text().then(t => t.slice(0, 100))}`);
-  }
+  if (!res.ok) throw new Error(`GLB turntable worker failed: ${res.status}`);
+  const json = await res.json() as { success: boolean; data?: number[]; error?: string };
+  if (!json.success) throw new Error(`GLB worker error: ${json.error}`);
 
-  // Worker returns { videoUrl: string }
-  const { videoUrl } = await res.json() as { videoUrl: string };
-  return videoUrl;
+  // Perplexity: Reconstruct MP4 bytes from JSON-safe number[] and return for upload
+  return new Uint8Array(json.data as number[]).buffer;
 }
 
 async function reencodeFile(buffer: ArrayBuffer, mimeType: string): Promise<ArrayBuffer> {
@@ -208,15 +207,19 @@ Deno.serve(async (req: Request) => {
     let proxyVideoUrl: string | undefined;
 
     if (fileType === "3d_model") {
-      // Re-encode GLB through turntable worker → MP4
-      proxyVideoUrl = await renderGLBTurntable(fileBuffer);
-      // The worker uploads to storage and returns the public URL
-      // We store it in the submission row below
+      // Perplexity: GLB worker returns MP4 bytes → upload to Supabase Storage here
+      const mp4Buffer = await renderGLBTurntable(fileBuffer);
+      const mp4Name = `proxy_${submissionId}.mp4`;
+      const { error: mp4Error } = await storage.storage
+        .from(SUBMISSION_BUCKET).upload(mp4Name, mp4Buffer, { contentType: "video/mp4" });
+      if (mp4Error) throw new Error(`MP4 upload failed: ${mp4Error.message}`);
+      const { data: mp4UrlData } = storage.storage.from(SUBMISSION_BUCKET).getPublicUrl(mp4Name);
+      proxyVideoUrl = mp4UrlData.publicUrl;
     } else if (fileType === "image") {
       // Re-encode PNG through Railway to strip EXIF + steganography
       const cleaned = await reencodeFile(fileBuffer, "image/png");
       // Upload cleaned file back to storage
-      const cleanName = `cleaned_${filename}`;
+      const cleanName = `clean_${submissionId}.png`;
       const { error: uploadError } = await storage.storage
         .from(SUBMISSION_BUCKET)
         .upload(cleanName, cleaned, { contentType: "image/png" });
@@ -226,7 +229,7 @@ Deno.serve(async (req: Request) => {
     } else if (fileType === "audio") {
       // Re-encode WAV through Railway to strip any embedded artifacts
       const cleaned = await reencodeFile(fileBuffer, "audio/wav");
-      const cleanName = `cleaned_${filename}`;
+      const cleanName = `clean_${submissionId}.wav`;
       const { error: uploadError } = await storage.storage
         .from(SUBMISSION_BUCKET)
         .upload(cleanName, cleaned, { contentType: "audio/wav" });

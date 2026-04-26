@@ -136,6 +136,26 @@ test("GLB submission — asset-sanitizer sets proxy_video_url on the submissions
   await admin.from("submissions").delete().eq("id", submissionId).catch(() => {});
 });
 
+test("Railway GLB turntable worker — direct HTTP integration", async ({ request }) => {
+  const workerUrl = process.env.RAILWAY_GLBTURNTABLE_URL;
+  if (!workerUrl) { test.skip(true, "RAILWAY_GLBTURNTABLE_URL not set"); return; }
+
+  // Perplexity: Build a valid minimal GLB with a cube mesh so Three.js has something to render
+  const glb = buildMinimalGlbWithCube();
+
+  const res = await request.fetch(workerUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/octet-stream" },
+    body: glb,
+  });
+
+  expect(res.status(), "worker should return 200").toBe(200);
+  const json = await res.json() as { success: boolean; data?: number[]; contentType?: string; error?: string };
+  expect(json.success, `worker error: ${json.error}`).toBe(true);
+  expect(json.contentType).toBe("video/mp4");
+  expect(json.data?.length ?? 0, "MP4 data must be non-empty").toBeGreaterThan(0);
+});
+
 /** Builds a valid minimal GLB binary (empty scene, no geometry) */
 function buildMinimalGlb(): Uint8Array {
   const jsonStr = JSON.stringify({
@@ -169,6 +189,79 @@ function buildMinimalGlb(): Uint8Array {
   // BIN chunk (empty)
   view.setUint32(offset, 0, true); offset += 4;          // length 0
   view.setUint32(offset, 0x004E4942, true); offset += 4; // 'BIN\0'
+
+  return bytes;
+}
+
+/** Builds a valid GLB containing a single unit cube — Three.js can render this */
+function buildMinimalGlbWithCube(): Uint8Array {
+  // Perplexity: A GLB with positions, normals, and indices for one cube
+  const gltf = {
+    asset: { version: "2.0", generator: "E2E test" },
+    scene: 0,
+    scenes: [{ nodes: [0] }],
+    nodes: [{ mesh: 0 }],
+    meshes: [{
+      primitives: [{
+        attributes: { POSITION: 0, NORMAL: 1 },
+        indices: 2,
+      }],
+    }],
+    accessors: [
+      // 0: POSITION — 8 vertices of unit cube
+      { bufferView: 0, componentType: 5126, count: 8, type: "VEC3", max: [1,1,1], min: [0,0,0] },
+      // 1: NORMAL — all (0,1,0)
+      { bufferView: 1, componentType: 5126, count: 8, type: "VEC3" },
+      // 2: INDICES — 36 triangle indices
+      { bufferView: 2, componentType: 5123, count: 36, type: "SCALAR" },
+    ],
+    bufferViews: [
+      { buffer: 0, byteOffset: 0, byteLength: 8 * 3 * 4 },      // POSITION
+      { buffer: 0, byteOffset: 8 * 3 * 4, byteLength: 8 * 3 * 4 }, // NORMAL
+      { buffer: 0, byteOffset: 16 * 3 * 4, byteLength: 36 * 2 },   // INDICES
+    ],
+    buffers: [{ byteLength: 16 * 3 * 4 + 36 * 2 }],
+  };
+
+  // Perplexity: Build the binary buffer: positions + normals + indices
+  const positions = new Float32Array([
+    0,0,0, 1,0,0, 1,1,0, 0,1,0,  // bottom face
+    0,0,1, 1,0,1, 1,1,1, 0,1,1,  // top face
+  ]);
+  const normals = new Float32Array(8 * 3); // zeroed — flat shading
+  const indices = new Uint16Array([
+    0,1,2, 0,2,3,   // bottom
+    4,6,5, 4,7,6,   // top
+    0,4,5, 0,5,1,   // front
+    2,6,7, 2,7,3,   // back
+    0,3,7, 0,7,4,   // left
+    1,5,6, 1,6,2,   // right
+  ]);
+
+  const binLen = positions.byteLength + normals.byteLength + indices.byteLength;
+  const jsonStr = JSON.stringify(gltf);
+  const jsonBytes = new TextEncoder().encode(jsonStr);
+  const jsonPadded = padTo4Bytes(jsonBytes);
+
+  const totalSize = 12 + 8 + jsonPadded.length + 8 + binLen;
+  const buf = new ArrayBuffer(totalSize);
+  const view = new DataView(buf);
+  const bytes = new Uint8Array(buf);
+
+  let off = 0;
+  view.setUint32(off, 0x46546C67, true); off += 4;         // glTF magic
+  view.setUint32(off, 2, true); off += 4;                  // version 2
+  view.setUint32(off, totalSize, true); off += 4;           // length
+
+  view.setUint32(off, jsonPadded.length, true); off += 4;
+  view.setUint32(off, 0x4A534F4E, true); off += 4;          // JSON chunk
+  bytes.set(jsonPadded, off); off += jsonPadded.length;
+
+  view.setUint32(off, binLen, true); off += 4;
+  view.setUint32(off, 0x004E4942, true); off += 4;           // BIN\0 chunk
+  new Float32Array(buf, off).set(positions); off += positions.byteLength;
+  new Float32Array(buf, off).set(normals); off += normals.byteLength;
+  new Uint16Array(buf, off).set(indices);
 
   return bytes;
 }

@@ -1,0 +1,12 @@
+{
+  "name": "glb-turntable",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "three": "^0.170.0",
+    "mp4-muxer": "^5.1.3"
+  }
+}

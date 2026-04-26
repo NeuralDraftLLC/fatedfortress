@@ -45,9 +45,9 @@ Stripe Connect Express
           │                                                              │
           ▼                                                              ▼
 apps/relay                                          Railway (railway/)
-Cloudflare Workers + Durable Objects                GLB turntable renderer · PNG/WAV re-encoder
-Y.js WebRTC signaling · TURN credentials            Offloads heavy encoding from Deno isolates
-RelayDO alarm heartbeat (5-min sliding window)
+Cloudflare Workers + Durable Objects                glb-turntable: headless Three.js → MP4
+Y.js WebRTC signaling · TURN credentials            reencode: sharp PNG + WAV re-encode
+RelayDO alarm heartbeat (5-min sliding window)     Offloads heavy encoding from Deno isolates
 ```
 
 ---
@@ -71,7 +71,8 @@ fatedfortress/
 │   ├── protocol/               # Shared TypeScript types
 │   └── sentry-utils/          # PII scrubber
 ├── railway/
-│   └── glb-turntable/         # Railway worker: GLB → MP4 turntable
+│   ├── glb-turntable/         # Railway worker: GLB → MP4 turntable (headless Three.js)
+│   └── reencode/              # Railway worker: PNG/WAV re-encode — strips EXIF and stego
 ├── supabase/
 │   ├── functions/             # 18 Edge Functions
 │   ├── migrations/            # Apply in order
