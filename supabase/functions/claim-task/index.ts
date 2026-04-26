@@ -7,7 +7,9 @@
  *   1. Validate contributor profile (role = 'contributor', stripe account present)
  *   2. Fetch task + project + current version
  *   3. Optimistic version check — reject BEFORE Stripe PI is created
- *      (prevents User B card hold when User A already won the race)
+ *      (best-effort early exit on a non-locking read; prevents card hold in the
+ *      common non-racy case. The authoritative gate is the RPC's FOR UPDATE
+ *      SKIP LOCKED + p_expected_version check inside the transaction.)
  *   4. Create Stripe PaymentIntent (manual capture, 10% platform fee)
  *   5. Call claim_task_atomic RPC with expected_version
  *      → if RPC fails, cancel the PI immediately (no orphaned holds)
@@ -126,8 +128,14 @@ Deno.serve(async (req: Request) => {
   const project = t.project as Record<string, unknown>;
   const host    = project?.host as Record<string, unknown>;
 
-  // ── Pillar 1: Optimistic version check BEFORE Stripe PI is created ──
-  // This prevents User B's card from getting a hold when User A already won the race.
+  // ── Pillar 1: Advisory pre-Stripe version check (best-effort early exit) ──
+  // This read is NON-LOCKING — a concurrent claimer may have already incremented
+  // the version between this select and the Stripe PI creation below.
+  // This check short-circuits the obvious non-racy case to avoid unnecessary
+  // card holds; it is NOT the authoritative concurrency gate.
+  // The authoritative gate is claim_task_atomic (FOR UPDATE SKIP LOCKED +
+  // p_expected_version check inside the transaction). If this check passes but
+  // the RPC returns version_mismatch, the PI is cancelled immediately (Step 5).
   if (expectedVersion !== undefined && expectedVersion !== (t.version as number)) {
     return Response.json(
       {
@@ -192,6 +200,9 @@ Deno.serve(async (req: Request) => {
   const clientSecret   = pi.client_secret as string;
 
   // ── Step 4: Atomically claim the task in Postgres ───────────────────────
+  // This is the authoritative gate: FOR UPDATE SKIP LOCKED ensures only one
+  // caller can hold the row lock; p_expected_version provides a second layer
+  // inside the transaction. On any non-"ok" result the PI is cancelled.
   const { data: claimResult, error: claimErr } = await admin
     .rpc("claim_task_atomic", {
       p_task_id:              taskId,
@@ -226,8 +237,8 @@ Deno.serve(async (req: Request) => {
   }
 
   // ── Step 5: Return claimed task + PI client secret to frontend ─────────
-// Frontend calls stripe.confirmPayment({ clientSecret, confirmParams: { return_url } })
-// to authorise the hold. Card is NOT charged until host approves.
+  // Frontend calls stripe.confirmPayment({ clientSecret, confirmParams: { return_url } })
+  // to authorise the hold. Card is NOT charged until host approves.
 
   const { data: claimedTask } = await admin
     .from("tasks")

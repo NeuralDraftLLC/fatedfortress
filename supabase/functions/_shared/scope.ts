@@ -11,10 +11,35 @@ const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY")!;
 const SENTRY_DSN = Deno.env.get("SENTRY_DSN");
 const MODEL = "gpt-4o";
 
+/**
+ * Derives the Sentry store endpoint from the SENTRY_DSN env var.
+ *
+ * DSN format: https://<key>@<host>/<projectId>
+ * Store URL:  https://<host>/api/<projectId>/store/
+ *
+ * Returns null if DSN is absent or malformed — callers treat null as
+ * "Sentry not configured" and skip reporting (non-fatal).
+ */
+function parseDsnToStoreUrl(dsn: string): string | null {
+  try {
+    const url = new URL(dsn);
+    const projectId = url.pathname.replace(/^\//, "").replace(/\/$/, "");
+    if (!projectId) return null;
+    return `${url.protocol}//${url.hostname}/api/${projectId}/store/`;
+  } catch {
+    return null;
+  }
+}
+
 async function sendSentry({ message, extra }: { message: string; extra: Record<string, unknown> }): Promise<void> {
   if (!SENTRY_DSN) return;
+  const storeUrl = parseDsnToStoreUrl(SENTRY_DSN);
+  if (!storeUrl) {
+    console.warn("sendSentry: SENTRY_DSN is set but could not be parsed — skipping event");
+    return;
+  }
   try {
-    await fetch(`https://o447370.ingest.sentry.io/api/1/store/`, {
+    await fetch(storeUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
