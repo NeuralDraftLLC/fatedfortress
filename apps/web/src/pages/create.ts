@@ -132,9 +132,12 @@ export async function mountCreate(container: HTMLElement): Promise<() => void> {
             <div class="ff-subtitle" style="margin-top:8px" id="forge-progress-text">0%</div>
           </div>
 
-          <button class="ff-btn" id="scope-btn" type="button" style="margin-top:auto">
+          <button class="ff-btn" id="scope-btn" type="button">
             <span class="btn-text">FORGE_BLUEPRINT</span>
             <span class="btn-loading hidden">FORGING...</span>
+          </button>
+          <button class="ff-btn" id="save-draft-btn" type="button" style="background:var(--ff-paper);color:var(--ff-ink)">
+            SAVE_AS_DRAFT
           </button>
         </section>
       </div>
@@ -168,6 +171,26 @@ export async function mountCreate(container: HTMLElement): Promise<() => void> {
           <button class="ff-btn" style="background: var(--ff-paper); color: var(--ff-ink); flex:1" id="re-scope-btn">REGENERATE</button>
           <button class="ff-btn" style="flex:1" id="fund-step-btn">
             REVIEW_FUNDING →
+          </button>
+        </div>
+      </div>
+
+      <!-- ── Retry-exhausted fallback (Pillar 2) — shown when AI fails all 3 retries ── -->
+      <div class="ff-panel hidden" id="ai-fallback-panel" style="margin-top:16px; border:2px solid var(--ff-warning);">
+        <div class="ff-kpi__label" style="margin-bottom:16px;">AI_SCOPING_FAILED</div>
+        <p class="ff-subtitle" id="ai-fallback-warning" style="
+          font-family:var(--ff-font-mono);font-size:12px;line-height:1.7;
+          margin-bottom:16px;padding:12px;border:1px solid var(--ff-warning);">
+        </p>
+        <p class="ff-subtitle" style="margin-bottom:16px;line-height:1.7;">
+          You can still create this project manually:
+        </p>
+        <div style="display:flex;gap:10px;">
+          <button class="ff-btn" id="manual-continue-btn" type="button" style="flex:1">
+            ADD_TASKS_MANUALLY
+          </button>
+          <button class="ff-btn" style="flex:1;background:var(--ff-paper);color:var(--ff-ink)" id="ai-fallback-discard-btn">
+            DISCARD_PROJECT
           </button>
         </div>
       </div>
@@ -259,6 +282,7 @@ export async function mountCreate(container: HTMLElement): Promise<() => void> {
   const $btnLoading = container.querySelector(".btn-loading") as HTMLElement;
   const $preview = container.querySelector("#scoped-preview") as HTMLElement;
   const $fundPanel = container.querySelector("#fund-project-panel") as HTMLElement;
+  const $fallbackPanel = container.querySelector("#ai-fallback-panel") as HTMLElement;
   const $taskList = container.querySelector("#scoped-tasks") as HTMLElement;
   const $readme = container.querySelector("#scoped-readme") as HTMLElement;
   const $structure = container.querySelector("#scoped-structure") as HTMLElement;
@@ -284,6 +308,20 @@ export async function mountCreate(container: HTMLElement): Promise<() => void> {
   // ── Publish (from fund step) ─────────────────────────────────────
   container.querySelector("#publish-btn")?.addEventListener("click", handlePublish);
 
+  // ── Save as Draft (Pillar 2) ─────────────────────────────────────
+  container.querySelector("#save-draft-btn")?.addEventListener("click", handleSaveDraft);
+
+  // ── AI fallback: manual continue ─────────────────────────────────
+  container.querySelector("#manual-continue-btn")?.addEventListener("click", () => {
+    $fallbackPanel.classList.add("hidden");
+    $fundPanel.classList.remove("hidden");
+  });
+
+  // ── AI fallback: discard ───────────────────────────────────────
+  container.querySelector("#ai-fallback-discard-btn")?.addEventListener("click", () => {
+    window.location.href = "/dashboard";
+  });
+
   // ── Regenerate ───────────────────────────────────────────────────
   container.querySelector("#re-scope-btn")?.addEventListener("click", handleScope);
 
@@ -307,6 +345,46 @@ export async function mountCreate(container: HTMLElement): Promise<() => void> {
     $fileList.textContent = references.length ? references.join(", ") : "";
     $refInput.value = "";
   });
+
+  // ── Handle SCOPE ─────────────────────────────────────────────────
+  // Called when "FORGE_BLUEPRINT" is clicked.
+
+  // ── Save as Draft (Pillar 2) ──────────────────────────────────────
+  // Saves the form inputs as a draft project without running AI scoping.
+  // Project stays in 'draft' status until host publishes manually.
+  async function handleSaveDraft(): Promise<void> {
+    const title = ($form.querySelector("#project-title") as HTMLInputElement).value.trim();
+    const description = ($descTextarea as HTMLTextAreaElement).value.trim();
+    const projectType = ($form.querySelector("#project-type") as HTMLSelectElement).value;
+    const budgetMin = parseFloat(($form.querySelector("#budget-min") as HTMLInputElement).value);
+    const budgetMax = parseFloat(($form.querySelector("#budget-max") as HTMLInputElement).value);
+    const targetTimeline = ($form.querySelector("#target-timeline") as HTMLInputElement).value.trim();
+
+    if (!title || !description || !projectType || isNaN(budgetMin) || isNaN(budgetMax) || budgetMin <= 0 || budgetMax < budgetMin) {
+      alert("Please fill in all required fields correctly");
+      return;
+    }
+
+    try {
+      projectId = crypto.randomUUID();
+      const { error: persistErr } = await supabase.rpc("persist_scoped_project", {
+        p_project_id: projectId,
+        p_host_id: user.id,
+        p_title: title,
+        p_description: description,
+        p_references_urls: references,
+        p_readme_draft: "",
+        p_folder_structure: [],
+        p_tasks: [],  // No tasks yet — draft only
+      });
+
+      if (persistErr) throw new Error(`Save draft failed: ${persistErr.message}`);
+
+      window.location.href = `/project/${projectId}?draft=1`;
+    } catch (err: unknown) {
+      alert(`Save draft failed: ${err instanceof Error ? err.message : "Unknown error"}`);
+    }
+  }
 
   // ── Handle SCOPE ─────────────────────────────────────────────────
   async function handleScope(): Promise<void> {
@@ -342,9 +420,19 @@ export async function mountCreate(container: HTMLElement): Promise<() => void> {
         targetTimeline: targetTimeline || undefined,
       });
 
-      generatedTasks = result.tasks;
+      generatedTasks = result.tasks ?? [];
       generatedReadme = result.readmeDraft;
-      generatedFolderStructure = result.folderStructure;
+      generatedFolderStructure = result.folderStructure ?? [];
+
+      // ── Pillar 2: AI failed all retries — show fallback UI ─────────────────
+      if (!result.scoped) {
+        const $warning = container.querySelector("#ai-fallback-warning") as HTMLElement;
+        if ($warning) $warning.textContent = result.warning ?? "AI task generation failed after 3 attempts.";
+        stopForgeOverlay();
+        setLoading(false);
+        $fallbackPanel.classList.remove("hidden");
+        return;
+      }
 
       if (generatedTasks.length === 0) {
         throw new Error("No tasks generated");

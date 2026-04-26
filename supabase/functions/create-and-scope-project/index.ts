@@ -3,10 +3,16 @@
  *
  * Single-call Stage 1 orchestrator:
  *   1. Insert project as status='draft'
- *   2. Invoke runScope (GPT-4o) from _shared/scope.ts
- *   3. Call persist_scoped_project RPC (inserts tasks)
- *   4. DB trigger promotes project to 'open' on first task insert
- *   5. Return { project, tasks } — or 'draft' if 0 tasks generated
+ *   2. Invoke runScope (GPT-4o) from _shared/scope.ts — with max 3 retries,
+ *      decaying temperature (0.3 → 0.15 → 0.075), and Zod error appended to prompt on retry
+ *   3. Insert tasks as status='draft' (host reviews and publishes to 'open')
+ *   4. Return { project, tasks, scoped } — or { scoped: false, warning } if AI failed
+ *
+ * Changes (2026-04-26 — Pillar 2):
+ *   - Retry loop: max 3 attempts, Zod validation error appended to prompt on retry
+ *   - Temperature decay: 0.3 × (0.5 ^ attempt) on each retry
+ *   - Tasks inserted as 'draft', not 'open' (host reviews before publishing)
+ *   - If all 3 attempts fail, returns { scoped: false, warning } — frontend shows fallback UI
  *
  * POST body:
  * {
@@ -21,7 +27,7 @@
  */
 
 import { resolveAuth, serviceRoleClient } from "../_shared/auth.ts";
-import { runScope, ScopeIntent } from "../_shared/scope.ts";
+import { runScope, buildUserPrompt, ScopeIntent, ScopeResult } from "../_shared/scope.ts";
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -89,17 +95,80 @@ Deno.serve(async (req: Request) => {
       throw new Error(`Failed to create project: ${projectErr?.message}`);
     }
 
-    // ── Step 2: Scope via GPT-4o ─────────────────────────────────────────
-    const scopeResult = await runScope({
-      projectId: project.id,
-      title,
-      description,
-      projectType,
-      referenceUrls,
-      budgetRange,
-      targetTimeline,
-      architectureDiagram,
-    });
+    // ── Step 2: Scope via GPT-4o — with max 3 retries ─────────────────────────
+    const MAX_RETRIES = 3;
+    let scopeResult: ScopeResult | null = null;
+    let lastValidationError: string | undefined;
+    let lastScopeError: string | undefined;
+
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      try {
+        // Build user prompt — on retry, append the validation error so GPT knows what to fix
+        const userPrompt = buildUserPrompt({
+          projectId: project.id,
+          title,
+          description,
+          projectType,
+          referenceUrls,
+          budgetRange,
+          targetTimeline,
+          architectureDiagram,
+        }) + (lastValidationError
+          ? `\n\n[Previous attempt failed. Fix this specific error]: ${lastValidationError}`
+          : "");
+
+        // Decaying temperature: 0.3 → 0.15 → 0.075
+        const temperature = 0.3 * Math.pow(0.5, attempt);
+
+        // Build prompt with optional error context from previous retry
+        const basePrompt = buildUserPrompt({
+          projectId: project.id,
+          title,
+          description,
+          projectType,
+          referenceUrls,
+          budgetRange,
+          targetTimeline,
+          architectureDiagram,
+        });
+        const finalPrompt = lastValidationError
+          ? `${basePrompt}\n\n[Previous attempt failed. Fix this specific error]: ${lastValidationError}`
+          : basePrompt;
+
+        scopeResult = await runScope({
+          projectId: project.id,
+          title,
+          description,
+          projectType,
+          referenceUrls,
+          budgetRange,
+          targetTimeline,
+          architectureDiagram,
+        }, temperature, finalPrompt);
+        break; // success
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        // Extract the validation error prefix if present
+        const match = msg.match(/^GPT-4o output failed validation: (.+)/);
+        lastValidationError = match ? match[1] : msg;
+        lastScopeError = msg;
+
+        if (attempt === MAX_RETRIES - 1) {
+          // Exhausted all retries — return draft project with failure warning
+          return new Response(
+            JSON.stringify({
+              project,
+              tasks: [],
+              scoped: false,
+              task_count: 0,
+              warning: `AI task generation failed after ${MAX_RETRIES} attempts: ${lastScopeError}`,
+            }),
+            { headers: { ...CORS_HEADERS, "Content-Type": "application/json" } }
+          );
+        }
+        // Will retry with lower temperature and error context
+      }
+    }
 
     // ── Step 3: Persist (RPC handles auth.uid() check) ───────────────────
     // We use the service role client here, but persist_scoped_project is

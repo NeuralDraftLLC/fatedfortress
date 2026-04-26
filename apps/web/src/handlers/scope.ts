@@ -10,6 +10,14 @@
  *
  * Tasks are written to Supabase with status = 'draft'.
  * Host reviews and publishes.
+ *
+ * Changes (2026-04-26 — Pillar 2):
+ *   - Now calls `create-and-scope-project` instead of the deprecated `scope-tasks`.
+ *     The deprecated function always returned 410 Gone.
+ *   - `create-and-scope-project` inserts the project + tasks in a single call
+ *     and returns { project, tasks, scoped }. Tasks have status='draft'.
+ *   - If AI generation fails (scoped=false), returns partial data so the frontend
+ *     can show the retry-exhausted fallback UI.
  */
 
 import { getSupabase } from "../auth/index.js";
@@ -34,28 +42,65 @@ interface ScopeProjectIntent {
 
 /**
  * Generate scoped tasks + readme draft + folder structure from a project brief.
- * Calls the `scope-tasks` edge function.
+ * Calls the `create-and-scope-project` edge function which inserts a draft project
+ * and tasks in one call. On AI failure, returns { scoped: false, warning } so
+ * the caller can show the fallback UI.
  */
 export async function generateScopedTasks(
   intent: ScopeProjectIntent
 ): Promise<ScopeProjectResult> {
   const supabase = getSupabase();
 
-  const { data, error } = await supabase.functions.invoke<ScopeProjectResult>("scope-tasks", {
-    body: intent,
+  // create-and-scope-project inserts a draft project and runs GPT-4o scoping.
+  // It returns { project, tasks, scoped, task_count, warning? }.
+  // Tasks are inserted as status='draft' — host reviews before publishing.
+  const { data, error } = await supabase.functions.invoke("create-and-scope-project", {
+    body: {
+      title: intent.title,
+      description: intent.description,
+      projectType: intent.projectType,
+      referenceUrls: intent.referenceUrls,
+      budgetRange: intent.budgetRange,
+      targetTimeline: intent.targetTimeline,
+    },
   });
 
-  if (error || !data) {
-    throw new Error(error?.message ?? "SCOPE failed");
+  if (error) {
+    throw new Error(error.message ?? "SCOPE failed");
   }
 
-  // Normalize and cap at HARD_MAX_TASKS
+  const result = data as {
+    project?: { id: string };
+    tasks?: Array<Record<string, unknown>>;
+    scoped: boolean;
+    task_count: number;
+    warning?: string;
+  };
+
+  if (!result.scoped || !result.tasks || result.task_count === 0) {
+    // AI failed after all retries — return partial result with warning
+    // so create.ts can show the retry-exhausted fallback UI
+    return {
+      tasks: [],
+      readmeDraft: "",
+      folderStructure: [],
+      totalPayoutMin: intent.budgetRange.min,
+      totalPayoutMax: intent.budgetRange.max,
+      scoped: false,
+      warning: result.warning ?? "AI task generation failed. Try a more detailed description.",
+    };
+  }
+
+  // Normalize tasks from the edge function format to the frontend ScopedTask format
+  const normalized = normalizeScopedTasks(result.tasks, intent.budgetRange.min, intent.budgetRange.max);
+
   return {
-    tasks: normalizeScopedTasks(data.tasks ?? [], intent.budgetRange.min, intent.budgetRange.max),
-    readmeDraft: data.readmeDraft ?? "",
-    folderStructure: Array.isArray(data.folderStructure) ? data.folderStructure.slice(0, 20) : [],
-    totalPayoutMin: data.totalPayoutMin ?? intent.budgetRange.min,
-    totalPayoutMax: data.totalPayoutMax ?? intent.budgetRange.max,
+    tasks: normalized,
+    readmeDraft: "",
+    folderStructure: [],
+    totalPayoutMin: intent.budgetRange.min,
+    totalPayoutMax: intent.budgetRange.max,
+    scoped: true,
   };
 }
 
