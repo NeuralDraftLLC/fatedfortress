@@ -26,8 +26,14 @@
  *     TURN_KEY_ID and TURN_KEY_API_TOKEN stored as Wrangler secrets (never in source).
  *     WEB_ORIGIN in [vars] locks the CORS header to the SPA origin.
  *
+ * Surface Verification (VERIFY-1):
+ *   - POST /verify-submission — pre-review surface checks (MIME, size, PR existence, Figma URL).
+ *     Runs before the Supabase Edge Function deep-spec gate. GITHUB_TOKEN wrangler secret.
+ *
  * Invariants (#2, #9): JSON.parse guarded; reconnect replaces same peerId without leaking peerCount.
  */
+
+import { handleVerifySubmission } from "./verify-submission.js";
 
 export interface Env {
   RELAY: DurableObjectNamespace;
@@ -38,6 +44,8 @@ export interface Env {
   TURN_KEY_API_TOKEN: string;
   /** [vars] — SPA origin for CORS lock, e.g. "https://fatedfortress.com" */
   WEB_ORIGIN: string;
+  /** Wrangler secret — GitHub token for PR-existence check in verify-submission. */
+  GITHUB_TOKEN: string;
 }
 
 /** Stable relay URL used internally for shard registration and forward calls. */
@@ -147,6 +155,11 @@ export default {
     // GET /turn-credentials — short-lived Cloudflare TURN credentials for the SPA.
     if (url.pathname === "/turn-credentials") {
       return handleTurnCredentials(request, env);
+    }
+
+    // POST /verify-submission — surface-level pre-review checks (MIME, size, PR, Figma).
+    if (url.pathname === "/verify-submission") {
+      return handleVerifySubmission(request, env);
     }
 
     // GET /rooms — HTTP endpoint returning live room metadata for the lobby grid.
@@ -391,9 +404,7 @@ export class RelayRegistryDO implements DurableObject {
   }
 }
 
-// RelayDO class must also be exported for Wrangler DO binding — kept identical to original.
-// (Restored full RelayDO implementation so wrangler can deploy DO bindings.)
-
+// RelayDO class must also be exported for Wrangler DO binding.
 export class RelayDO implements DurableObject {
   private peers = new Map<string, WebSocket>();
   /** Live distinct peerIds on this DO */
@@ -432,7 +443,7 @@ export class RelayDO implements DurableObject {
       return new Response("ok");
     }
 
-    // DO stub → deliver JSON to a peerId connected on *this* instance (HTTP because WS has no inbound from sibling DOs).
+    // DO stub → deliver JSON to a peerId connected on *this* instance.
     if (request.method === "POST" && url.pathname === "/_relay/forward") {
       let body: { targetPeerId?: unknown; payload?: unknown };
       try {
@@ -559,7 +570,6 @@ export class RelayDO implements DurableObject {
 
       const targetPeerId = msg.targetPeerId;
       const tFirst = typeof msg.type === "string" ? msg.type : "";
-      // Room-wide CRDT frames: no targetPeerId — spectators must still receive sync (only WebRTC is gated below).
       if (typeof targetPeerId !== "string" || targetPeerId.length === 0) {
         if (tFirst === "sync" || msg.broadcast === true) {
           const payload = JSON.stringify({ ...msg, fromPeerId: peerId });
@@ -572,7 +582,6 @@ export class RelayDO implements DurableObject {
       }
 
       const t = typeof msg.type === "string" ? msg.type : "";
-      // HANDOFF / chat / etc. always route; SDP-like types skip if either side is spectating (zero WebRTC budget).
       if (SIGNALING_TYPES.has(t)) {
         if (this.spectatorPeers.has(peerId) || this.spectatorPeers.has(targetPeerId)) {
           return;
@@ -588,7 +597,6 @@ export class RelayDO implements DurableObject {
         this.peerCount--;
       }
       this.spectatorPeers.delete(peerId);
-      // Deregister room when the last non-spectator participant leaves.
       if (!isSpectator && this.peerCount === 0) {
         this.ctx.waitUntil(this.cleanupRoom(roomParam));
       }
@@ -621,7 +629,6 @@ export class RelayDO implements DurableObject {
     );
   }
 
-  /** Register this room in the global lobby registry (called once per room on first participant join). */
   private async ensureRegistered(roomId: string): Promise<void> {
     if (this.registeredRoom || this.shardIndex !== null) return;
     this.registeredRoom = true;
@@ -655,9 +662,7 @@ export class RelayDO implements DurableObject {
           fuelFraction: 1.0,
         }),
       })
-      .catch(() => {
-        /* ignore */
-      });
+      .catch(() => { /* ignore */ });
     this.heartbeatTimer = this.ctx.storage.setTimeout(() => this.sendHeartbeat(roomId), 30_000) as unknown as number;
   }
 
@@ -674,13 +679,10 @@ export class RelayDO implements DurableObject {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ roomId }),
       })
-      .catch(() => {
-        /* ignore */
-      });
+      .catch(() => { /* ignore */ });
     this.registeredRoom = false;
   }
 
-  /** WS message routing: local delivery, parent forward map, or escalate shard → parent. */
   private async routeWsMessage(
     roomId: string,
     fromPeerId: string,
@@ -695,7 +697,6 @@ export class RelayDO implements DurableObject {
 
     const rid = this.roomId ?? roomId;
 
-    // Parent: deliver to shard stub if registered
     if (this.shardIndex === null) {
       const shardIdx = this.peerToShard.get(targetPeerId);
       if (shardIdx !== undefined) {
@@ -715,7 +716,6 @@ export class RelayDO implements DurableObject {
       return;
     }
 
-    // Shard: escalate to parent for peers on parent or another shard
     await this.env.RELAY.get(this.env.RELAY.idFromName(rid)).fetch(
       new Request("http://relay/internal/deliver", {
         method: "POST",
@@ -725,7 +725,6 @@ export class RelayDO implements DurableObject {
     );
   }
 
-  /** Parent resolves /internal/deliver — local WS or forward to a shard DO. */
   private async parentDeliver(
     roomId: string,
     fromPeerId: string,

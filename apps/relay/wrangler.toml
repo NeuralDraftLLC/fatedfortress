@@ -22,6 +22,11 @@ new_sqlite_classes = ["RelayDO", "RelayRegistryDO"]
 #   wrangler secret put TURN_KEY_ID
 #   wrangler secret put TURN_KEY_API_TOKEN
 
+# ── Submission surface checker ────────────────────────────────────────────────
+# GITHUB_TOKEN is a Wrangler secret used by POST /verify-submission to check PR existence.
+# Run:
+#   wrangler secret put GITHUB_TOKEN
+
 [vars]
-# Lock /turn-credentials CORS to the SPA origin.
+# Lock /turn-credentials and /verify-submission CORS to the SPA origin.
 WEB_ORIGIN = "https://fatedfortress.com"
