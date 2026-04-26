@@ -284,7 +284,7 @@ Handled as Stripe **`application_fee_amount`** on capture where the Connect mode
 | Stripe webhook | Complete — `payment_intent.succeeded/failed`, `transfer.created`, `account.updated` |
 | Auto-release + 24h/48h | Complete — cron with `release_wallet_lock` RPC |
 | Expire-claims + unlock | Complete — cron with `unlock_wallet` RPC |
-| Y.js live review | Scaffolded — `state/ydoc.ts` + `relay/index.ts` wired |
+| Y.js live review | Complete — real-time editor, live cursors, presence avatars |
 | publishToHereNow | Stub — deferred until portfolio is populated |
 | GitHub OAuth | Complete |
 
