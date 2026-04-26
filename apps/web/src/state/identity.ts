@@ -91,6 +91,13 @@ function b64urlDecode(str: string): Uint8Array {
   return bytes;
 }
 
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  if (bytes.buffer.byteLength === bytes.byteLength) {
+    return bytes.buffer as ArrayBuffer;
+  }
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+}
+
 /**
  * AES-256-GCM wrapping key from device seed (HKDF-SHA-256). Derived each session;
  * not stored. Seed lives in IndexedDB next to ciphertext (same trust boundary as before).
@@ -98,7 +105,7 @@ function b64urlDecode(str: string): Uint8Array {
 async function deriveWrappingKey(deviceSeedBytes: Uint8Array): Promise<CryptoKey> {
   const seedKey = await crypto.subtle.importKey(
     "raw",
-    deviceSeedBytes,
+    toArrayBuffer(deviceSeedBytes),
     { name: "HKDF" },
     false,
     ["deriveKey"]
@@ -172,9 +179,9 @@ async function loadPersistedIdentity(db: IDBDatabase): Promise<{ keyPair: Crypto
 
     const privateKey = await crypto.subtle.unwrapKey(
       "pkcs8",
-      wrappedBytes,
+      toArrayBuffer(wrappedBytes),
       wrappingKey,
-      { name: "AES-GCM", iv: wrapIvBytes },
+      { name: "AES-GCM", iv: toArrayBuffer(wrapIvBytes) },
       { name: "Ed25519" },
       false,
       ["sign"]
@@ -182,7 +189,7 @@ async function loadPersistedIdentity(db: IDBDatabase): Promise<{ keyPair: Crypto
 
     const publicKey = await crypto.subtle.importKey(
       "raw",
-      fromBase58(stored.pubkey),
+      toArrayBuffer(fromBase58(stored.pubkey)),
       { name: "Ed25519" },
       true,
       ["verify"]
@@ -319,7 +326,7 @@ export async function exportIdentity(passphrase: string): Promise<IdentityExport
   // Derive the device-unique master key from the stored seed
   const masterKeyMaterial = await crypto.subtle.importKey(
     "raw",
-    deviceSeedBytes,
+    toArrayBuffer(deviceSeedBytes),
     { name: "HKDF" },
     false,
     ["deriveKey"],
@@ -340,9 +347,9 @@ export async function exportIdentity(passphrase: string): Promise<IdentityExport
   // Unwrap the PKCS#8 private key
   const rawPrivateKey = await crypto.subtle.unwrapKey(
     "pkcs8",
-    wrappedKeyBytes,
+    toArrayBuffer(wrappedKeyBytes),
     masterKey,
-    { name: "AES-GCM", iv: wrapIvBytes },
+    { name: "AES-GCM", iv: toArrayBuffer(wrapIvBytes) },
     { name: "Ed25519" },
     false,
     ["sign"],
@@ -398,9 +405,9 @@ export async function importIdentity(
   let rawPrivateKeyBytes: ArrayBuffer;
   try {
     rawPrivateKeyBytes = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv },
+      { name: "AES-GCM", iv: toArrayBuffer(iv) },
       wrappingKey,
-      ciphertext,
+      toArrayBuffer(ciphertext),
     );
   } catch {
     throw new Error("Incorrect passphrase or corrupted export file");
@@ -471,7 +478,7 @@ async function derivePbkdf2Key(passphrase: string, salt: Uint8Array): Promise<Cr
   return crypto.subtle.deriveKey(
     {
       name: "PBKDF2",
-      salt,
+      salt: toArrayBuffer(salt),
       iterations: PBKDF2_ITERATIONS,
       hash: "SHA-256",
     },

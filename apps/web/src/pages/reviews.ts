@@ -36,8 +36,8 @@ import {
   upsertPresence,
   removePresence,
   observePresence,
-  getMyPubkey,
 } from "../state/ydoc.js";
+import { getMyPubkey } from "../state/identity.js";
 import type { FortressRoomDoc, PresenceEntry } from "../state/ydoc.js";
 import { WebrtcProvider } from "y-webrtc";
 import { EditorView, basicSetup } from "codemirror";

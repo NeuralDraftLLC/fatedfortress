@@ -15,7 +15,7 @@
 import { getSupabase, signOut } from "../auth/index.js";
 import { requireAuth } from "../auth/middleware.js";
 import { createConnectAccountLink, fundProjectWallet } from "../handlers/payout.js";
-import { initiateGitHubOAuth, exchangeGitHubCode } from "../net/github.ts";
+import { initiateGitHubOAuth, exchangeGitHubCode } from "../net/github.js";
 
 // ---------------------------------------------------------------------------
 // Helpers

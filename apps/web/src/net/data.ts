@@ -167,7 +167,7 @@ export async function getTasks(opts: {
 
   const { data, error } = await q;
   if (error) throw normalizeError(error, "getTasks");
-  return (data ?? []) as TaskDetail[];
+  return (data ?? []) as unknown as TaskDetail[];
 }
 
 export async function getOpenTasks(): Promise<TaskDetail[]> {
@@ -463,10 +463,10 @@ export async function getProfile(userId: string): Promise<Profile | null> {
     .single();
 
   if (error) {
-    if ((error as Record<string, unknown>).code === "PGRST116") return null;
+    if ((error as unknown as Record<string, unknown>).code === "PGRST116") return null;
     throw normalizeError(error, "getProfile");
   }
-  return data as Profile;
+  return data as unknown as Profile;
 }
 
 export async function updateProfile(userId: string, updates: Partial<Profile>): Promise<Profile> {
@@ -478,7 +478,7 @@ export async function updateProfile(userId: string, updates: Partial<Profile>): 
     .single();
 
   if (error) throw normalizeError(error, "updateProfile");
-  return data as Profile;
+  return data as unknown as Profile;
 }
 
 // ---------------------------------------------------------------------------

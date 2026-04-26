@@ -238,12 +238,12 @@ function renderContractorSidebar(profile: Profile | null, userId: string): strin
     : reliability >= 0.5
     ? "var(--ff-warning, #f57c00)"
     : "var(--ff-error, #c62828)";
-  const payoutStatus = (profile as Record<string, unknown>)?.stripe_charges_enabled
+  const payoutStatus = (profile as unknown as Record<string, unknown>)?.stripe_charges_enabled
     ? `<span style="color:var(--ff-success,#2e7d32);font-weight:700">✓ PAYOUTS_ENABLED</span>`
     : `<span style="color:var(--ff-muted)">⚠ <a href="/settings" style="color:inherit">CONNECT_STRIPE</a></span>`;
 
-  const skillTags = Array.isArray((profile as Record<string, unknown>)?.skills)
-    ? ((profile as Record<string, unknown>).skills as string[])
+  const skillTags = Array.isArray((profile as unknown as Record<string, unknown>)?.skills)
+    ? ((profile as unknown as Record<string, unknown>).skills as string[])
         .map(s => Badge({ label: escHtml(s), variant: "neutral" }))
         .join(" ")
     : "";
@@ -359,7 +359,7 @@ export async function mountTasksGuest(container: HTMLElement): Promise<() => voi
 
   try {
     const openTasks = await getOpenTasks();
-    const publicTasks = openTasks.filter(t => (t as Record<string, unknown>).task_access === "public" || t.status === "open");
+    const publicTasks = openTasks.filter(t => (t as unknown as Record<string, unknown>).task_access === "public" || t.status === "open");
 
     if (publicTasks.length === 0) {
       list.innerHTML = `

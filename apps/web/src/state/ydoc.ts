@@ -204,7 +204,7 @@ export const getTemplates  = (r: FortressRoomDoc): string[]     => r.templates.t
 export const getPresence   = (r: FortressRoomDoc): PresenceEntry[] => Array.from(r.presence.values());
 export const getParticipants = (r: FortressRoomDoc): ParticipantEntry[] => {
   migrateParticipantsFromLegacy(r);
-  return Array.from(r.participants.values()).sort((a, b) => a.joinedAt - b.joinedAt);
+  return Array.from(r.participants.values() as unknown as ParticipantEntry[]).sort((a, b) => a.joinedAt - b.joinedAt);
 };
 
 // ─── F2: Observe helpers with guaranteed teardown ─────────────────────────────

@@ -239,7 +239,7 @@ export async function mountProfile(container: HTMLElement): Promise<() => void> 
 
       const valid = validateFile(file, 10, ["image/jpeg", "image/png", "image/webp", "image/gif", "application/pdf"]);
       if (!valid.ok) {
-        portfolioBanner.innerHTML = inlineBanner("error", valid.error);
+        portfolioBanner.innerHTML = inlineBanner("error", (valid as { ok: false; error: string }).error);
         return;
       }
       if (portfolioUrls.length >= MAX_PORTFOLIO) {
