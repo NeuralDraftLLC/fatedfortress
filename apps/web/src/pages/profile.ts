@@ -6,7 +6,7 @@
  *   - Reliability signals: score, approval rate, avg revisions, response time, totals
  *   - Completed Work: approved audit_log entries joined with task title + payout
  *   - Portfolio: up to 3 pieces; file picker -> supabase-storage-upload -> thumbnail chip
- *   - HereNow CTA: only visible when reliability >= 0.70 AND total_approved >= 1
+ *   - HereNow CTA: shows live link if published, publish CTA if eligible, gate hint otherwise
  */
 
 import { getSupabase } from "../auth/index.js";
@@ -74,9 +74,64 @@ export async function mountProfile(container: HTMLElement): Promise<() => void> 
   // Use reliability_score — the canonical DB column name.
   const reliability   = (profile as Record<string, unknown>)?.reliability_score as number | null;
   const totalApproved = (profile as Record<string, unknown>)?.total_approved as number | null ?? 0;
+  const hereNowUrl    = (profile as Record<string, unknown>)?.herenow_url as string | null ?? null;
   const hereNowEligible =
     (reliability ?? 0) >= HERENOW_MIN_RELIABILITY &&
     totalApproved >= HERENOW_MIN_APPROVED;
+
+  // ── HereNow section: 3 states
+  //   1. Already published → show live link + option to re-publish
+  //   2. Eligible but not yet published → show publish CTA
+  //   3. Not yet eligible → show gate progress hint
+  function hereNowSection(): string {
+    if (hereNowUrl) {
+      return `
+        <section style="margin-bottom:32px;border-bottom:1px solid var(--ff-outline-variant);padding-bottom:28px">
+          <h2 class="ff-section-label" style="margin-bottom:8px">HERENOW ROOM</h2>
+          <p style="font-family:var(--ff-font-mono);font-size:11px;color:var(--ff-muted);margin-bottom:10px">
+            Your public portfolio room is live.
+          </p>
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+            <a href="${escHtml(hereNowUrl)}" target="_blank" rel="noopener noreferrer"
+               style="font-family:var(--ff-font-mono);font-size:11px;color:var(--ff-primary);
+                      word-break:break-all">${escHtml(hereNowUrl)}</a>
+            <button class="ff-btn ff-btn--ghost ff-btn--sm" id="copy-herenow-btn"
+                    data-url="${escHtml(hereNowUrl)}">Copy link</button>
+          </div>
+          <div style="margin-top:12px">
+            <a href="/herenow/publish" class="ff-btn ff-btn--ghost ff-btn--sm">Update room &rarr;</a>
+          </div>
+        </section>`;
+    }
+    if (hereNowEligible) {
+      return `
+        <section style="margin-bottom:32px;border-bottom:1px solid var(--ff-outline-variant);padding-bottom:28px">
+          <h2 class="ff-section-label" style="margin-bottom:8px">PUBLISH TO HERENOW</h2>
+          <p style="font-family:var(--ff-font-mono);font-size:11px;color:var(--ff-muted);margin-bottom:14px">
+            Your reliability qualifies you to publish work to the HereNow marketplace.
+          </p>
+          <a href="/herenow/publish" class="ff-btn ff-btn--primary ff-btn--sm">Publish to HereNow &rarr;</a>
+        </section>`;
+    }
+    const pct     = Math.round((reliability ?? 0) * 100);
+    const needed  = Math.round(HERENOW_MIN_RELIABILITY * 100);
+    const barPct  = Math.min(100, Math.round(((reliability ?? 0) / HERENOW_MIN_RELIABILITY) * 100));
+    return `
+      <section style="margin-bottom:32px;border-bottom:1px solid var(--ff-outline-variant);padding-bottom:28px">
+        <h2 class="ff-section-label" style="margin-bottom:8px">PUBLISH TO HERENOW</h2>
+        <p style="font-family:var(--ff-font-mono);font-size:11px;color:var(--ff-muted);margin-bottom:12px">
+          Requires reliability &ge; ${needed}% and at least ${HERENOW_MIN_APPROVED} approved task.
+        </p>
+        <div style="display:flex;align-items:center;gap:10px">
+          <div style="flex:1;height:4px;background:var(--ff-outline-variant);border-radius:2px;overflow:hidden">
+            <div style="height:100%;width:${barPct}%;background:var(--ff-primary);border-radius:2px;
+                        transition:width .4s ease"></div>
+          </div>
+          <span style="font-family:var(--ff-font-mono);font-size:10px;color:var(--ff-muted);
+                       white-space:nowrap">${pct}% / ${needed}% &bull; ${totalApproved} approved</span>
+        </div>
+      </section>`;
+  }
 
   container.innerHTML = `
     <div class="profile-page" style="max-width:680px;margin:0 auto;padding:32px 16px">
@@ -150,23 +205,8 @@ export async function mountProfile(container: HTMLElement): Promise<() => void> 
         }
       </section>
 
-      <!-- HereNow CTA (gated) -->
-      ${hereNowEligible
-        ? `<section style="margin-bottom:32px;border-bottom:1px solid var(--ff-outline-variant);padding-bottom:28px">
-             <h2 class="ff-section-label" style="margin-bottom:8px">PUBLISH TO HERENOW</h2>
-             <p style="font-family:var(--ff-font-mono);font-size:11px;color:var(--ff-muted);margin-bottom:14px">
-               Your reliability qualifies you to publish work to the HereNow marketplace.
-             </p>
-             <a href="/herenow/publish" class="ff-btn ff-btn--primary ff-btn--sm">Publish to HereNow &rarr;</a>
-           </section>`
-        : `<section style="margin-bottom:32px;border-bottom:1px solid var(--ff-outline-variant);padding-bottom:28px">
-             <h2 class="ff-section-label" style="margin-bottom:8px">PUBLISH TO HERENOW</h2>
-             <p style="font-family:var(--ff-font-mono);font-size:11px;color:var(--ff-muted)">
-               Requires reliability &ge; 70% and at least 1 approved task.
-               Current: ${fmt(reliability, "pct")} reliability, ${totalApproved} approved.
-             </p>
-           </section>`
-      }
+      <!-- HereNow (3-state: published / eligible / gated) -->
+      ${hereNowSection()}
 
       <!-- Portfolio -->
       <section>
@@ -194,6 +234,24 @@ export async function mountProfile(container: HTMLElement): Promise<() => void> 
   // ── Event listeners ──────────────────────────────────────────────────────
   const teardowns: Array<() => void> = [];
   const portfolioUrls = [...portfolioItems];
+
+  // Copy HereNow link button
+  const copyBtn = container.querySelector("#copy-herenow-btn") as HTMLButtonElement | null;
+  if (copyBtn) {
+    const url = copyBtn.dataset.url ?? "";
+    const handler = async () => {
+      try {
+        await navigator.clipboard.writeText(url);
+        copyBtn.textContent = "Copied!";
+        setTimeout(() => { copyBtn.textContent = "Copy link"; }, 2000);
+      } catch {
+        copyBtn.textContent = "Copy failed";
+        setTimeout(() => { copyBtn.textContent = "Copy link"; }, 2000);
+      }
+    };
+    copyBtn.addEventListener("click", handler);
+    teardowns.push(() => copyBtn.removeEventListener("click", handler));
+  }
 
   // Save profile
   const saveBtn    = container.querySelector("#save-profile-btn") as HTMLButtonElement;
