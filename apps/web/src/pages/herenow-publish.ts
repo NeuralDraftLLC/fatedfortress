@@ -36,6 +36,8 @@ export async function mountHereNowPublish(container: HTMLElement): Promise<() =>
   if (!user) return () => {};
 
   // Fetch profile to check gate + get existing URL
+  // reliability_score is a generated column (= review_reliability) added in migration 032.
+  // herenow_url stores the linked here.now room URL, also added in migration 032.
   const { data: profile } = await supabase
     .from("profiles")
     .select("reliability_score, total_approved, herenow_url, display_name")
