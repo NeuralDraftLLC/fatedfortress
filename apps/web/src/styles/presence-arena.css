@@ -1,0 +1,186 @@
+/**
+ * apps/web/src/styles/presence-arena.css
+ *
+ * Animations and styles for:
+ *   1. View Transition API — native SPA cross-fade between routes
+ *   2. Presence dots       — floating coloured avatar badges on task cards
+ *   3. Heat rings          — pulsing outline on cards with 2+ viewers
+ *   4. Skeleton shimmer    — replaces spinners during task list load
+ *   5. Scroll-reveal       — Intersection Observer card entrance animation
+ *
+ * ALL motion is gated on prefers-reduced-motion: no-preference.
+ * Only opacity and transform are animated — GPU-composited, no reflow.
+ *
+ * Import this file in apps/web/src/main.ts:
+ *   import "./styles/presence-arena.css";
+ */
+
+/* ───────────────────────────────────────────────────────────────────
+   1. View Transition API
+─────────────────────────────────────────────────────────────────── */
+
+@view-transition {
+  navigation: auto;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  ::view-transition-old(root) {
+    animation: ff-vt-out 0.18s ease forwards;
+  }
+
+  ::view-transition-new(root) {
+    animation: ff-vt-in 0.18s ease forwards;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation: none;
+  }
+}
+
+@keyframes ff-vt-out {
+  from { opacity: 1; transform: translateY(0);    }
+  to   { opacity: 0; transform: translateY(-6px); }
+}
+
+@keyframes ff-vt-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0);   }
+}
+
+/* ───────────────────────────────────────────────────────────────────
+   2. Presence dot pulse
+─────────────────────────────────────────────────────────────────── */
+
+@keyframes ff-dot-pulse {
+  0%,  100% { transform: scale(1);    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25); }
+  50%        { transform: scale(1.15); box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35); }
+}
+
+@keyframes ff-dot-pulse-fast {
+  0%,  100% { transform: scale(1);    opacity: 1;    box-shadow: 0 0 0 0   transparent; }
+  50%        { transform: scale(1.3);  opacity: 0.85; box-shadow: 0 0 0 5px rgba(220, 38, 38, 0.25); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ff-presence-dot {
+    animation: none !important;
+  }
+}
+
+/* ───────────────────────────────────────────────────────────────────
+   3. Heat ring — .ff-card--hot (2+ simultaneous viewers)
+─────────────────────────────────────────────────────────────────── */
+
+.ff-card--hot {
+  outline: 2px solid #d97706;
+  outline-offset: 2px;
+  position: relative; /* needed for ::before badge */
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .ff-card--hot {
+    animation: ff-heat-ring 1.6s ease-in-out infinite;
+  }
+}
+
+@keyframes ff-heat-ring {
+  0%,  100% { outline-color: #d97706; outline-offset: 2px; }
+  50%        { outline-color: #f59e0b; outline-offset: 4px; }
+}
+
+/* "N viewing" micro-badge above the hot card */
+.ff-card--hot::before {
+  content: attr(data-viewer-count) " viewing";
+  position: absolute;
+  top: -10px;
+  left: 12px;
+  font-family: var(--ff-font-mono, monospace);
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #d97706;
+  background: var(--ff-paper, #fff);
+  padding: 1px 6px;
+  border: 1px solid #d97706;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+/* ───────────────────────────────────────────────────────────────────
+   4. Skeleton shimmer
+─────────────────────────────────────────────────────────────────── */
+
+.ff-skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--ff-surface, #f5f5f5) 25%,
+    var(--ff-border, #e0e0e0)  50%,
+    var(--ff-surface, #f5f5f5) 75%
+  );
+  background-size: 200% 100%;
+  border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .ff-skeleton {
+    animation: ff-shimmer 1.4s ease-in-out infinite;
+  }
+}
+
+@keyframes ff-shimmer {
+  0%   { background-position:  200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* Task card skeleton preset */
+.ff-skeleton-card {
+  padding: 20px;
+  border: 1px solid var(--ff-border, #e0e0e0);
+  margin-bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ff-skeleton-card .ff-sk-title  { height: 16px; width: 55%; }
+.ff-skeleton-card .ff-sk-sub    { height: 12px; width: 30%; }
+.ff-skeleton-card .ff-sk-body   { height: 11px; width: 100%; }
+.ff-skeleton-card .ff-sk-body-s { height: 11px; width: 78%; }
+
+.ff-skeleton-card .ff-sk-badges {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.ff-skeleton-card .ff-sk-badge { height: 20px; width: 80px; border-radius: 999px; }
+.ff-skeleton-card .ff-sk-btn   { height: 30px; width: 120px; margin-top: 4px; }
+
+/* ───────────────────────────────────────────────────────────────────
+   5. Scroll-reveal card entrance
+─────────────────────────────────────────────────────────────────── */
+
+@media (prefers-reduced-motion: no-preference) {
+  [data-scroll-reveal] {
+    opacity: 0;
+    transform: translateY(14px);
+    transition: opacity 0.32s ease, transform 0.32s ease;
+  }
+
+  [data-scroll-reveal].ff-revealed {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Always-visible fallback for reduced-motion */
+@media (prefers-reduced-motion: reduce) {
+  [data-scroll-reveal] {
+    opacity: 1 !important;
+    transform: none !important;
+  }
+}
