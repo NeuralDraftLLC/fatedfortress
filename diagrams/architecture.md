@@ -14,7 +14,7 @@ graph TD
     classDef zone     fill:#0d1b2a,stroke:#ef476f,stroke-width:2px,color:#ef476f
     classDef ext      fill:#000000,stroke:#737373,stroke-width:1px,color:#737373
     classDef state    fill:#1a1a2e,stroke:#a78bfa,stroke-width:1px,color:#a78bfa
-    classDef legacy   fill:#111111,stroke:#525252,stroke-width:1px,color:#525252,stroke-dasharray:4 4
+    classDef zone     fill:#0d1b2a,stroke:#ef476f,stroke-width:2px,color:#ef476f
 
     %% ============================================================
     %% ZONE 1: BROWSER MAIN THREAD
@@ -44,6 +44,7 @@ graph TD
 
         subgraph State["Client State"]
             identity_s["state/identity.ts<br/>Ed25519 Keys - Audit Signing"]:::state
+            yroom_mgr["state/yroom-manager.ts<br/>createYRoom / destroyYRoom / destroyAllRooms"]:::state
             ydoc_s["state/ydoc.ts<br/>Y.js - Review Sessions Only"]:::state
             handoff_s["state/handoff.ts<br/>Task Handoff State"]:::state
         end
@@ -80,9 +81,7 @@ graph TD
 
         subgraph EdgeFunctions["Edge Functions"]
             claim_task["claim-task<br/>Active claim path — invoked from tasks.ts<br/>Locks wallet + updates task state"]:::edgefn
-            %% create-payment-intent: LEGACY — no active callers in codebase.
-            %% tasks.ts invokes claim-task directly. Retained for audit reference only.
-            create_pi["create-payment-intent<br/>Stripe PI manual capture<br/>LEGACY — no active callers"]:::legacy
+            asset_sanitizer["asset-sanitizer<br/>VirusTotal scan → PNG/WAV re-encode → GLB turntable<br/>proxy_video_url written to submissions"]:::edgefn
             stripe_wh["stripe-webhook<br/>PI succeeded/failed<br/>transfer.created - account.updated"]:::edgefn
             asset_scan["asset-scanner<br/>9-sub-pass layered engine<br/>deterministic to heuristic to gap"]:::edgefn
             verify_fn["verify-submission<br/>Deep-Spec Gate<br/>GLB / WAV / MP3 / PNG / JPEG"]:::edgefn
@@ -153,10 +152,6 @@ graph TD
     claim_task -->|"Update claim state"| tasks
     claim_task -->|"Lock funds / claim RPC"| wallet
     claim_task -->|"Create PI manual capture"| Stripe
-
-    %% create-payment-intent — LEGACY, dashed reference only, no active callers
-    create_pi -.->|"(legacy) PI manual capture"| Stripe
-    create_pi -.->|"(legacy) Store payment_intent_id"| tasks
 
     %% Submit
     submit_p -->|"Upload asset"| storage_fn
@@ -243,29 +238,29 @@ flowchart LR
 
 ```mermaid
 sequenceDiagram
-    participant C as Browser
-    participant RDO as RelayDO (Durable Object)
+    participant C as Browser (yroom-manager.ts)
+    participant RDO as RelayDO (Cloudflare Durable Object)
     participant REG as RelayRegistryDO
 
-    Note over RDO: DO instantiated<br/>(may have been evicted)
+    Note over RDO: DO instantiated<br/>(may have been evicted and respawned)
 
     C->>RDO: WebSocket connect<br/>?roomId=X&peerId=Y
     RDO->>RDO: ensureRegistered(roomId)
-    RDO->>RDO: this.roomId = roomId
     RDO->>REG: POST /register {roomId, name, ...}
     RDO->>RDO: ctx.storage.setAlarm(now + 5min)
     RDO-->>C: 101 Switching Protocols
 
-    loop Every 5 minutes (alarm)
-        RDO->>RDO: alarm() fires
-        RDO->>REG: POST /heartbeat<br/>{participantCount, spectatorCount}
+    loop Every 30 seconds (browser heartbeat)
+        C->>RDO: "ping" WebSocket message
+        RDO->>RDO: lastPingMs = now()
         RDO->>RDO: ctx.storage.setAlarm(now + 5min)
     end
 
+    Note over RDO: If no ping for 5min,<br/>alarm() fires → destroy room
+
     C->>RDO: WebSocket close
-    RDO->>RDO: peerCount === 0?
-    RDO->>REG: POST /deregister {roomId}
     RDO->>RDO: ctx.storage.setAlarm(null)<br/>(cancel future alarms)
+    RDO->>REG: POST /deregister {roomId}
 ```
 
 ---
