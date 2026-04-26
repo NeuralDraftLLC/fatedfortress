@@ -2,7 +2,7 @@
 
 **AI-orchestrated task marketplace for scoped digital work — 3D assets, audio, code, design.**
 
-Hosts post a project brief. An AI engine decomposes it into precise tasks with machine-readable specs and payouts. Contributors claim knowing exactly what to deliver. An automated deep-spec gate validates submissions before human review. Payment is pre-authorized at claim time and captured only on approval.
+Hosts post a project brief. An AI engine decomposes it into precise tasks with machine-readable specs and payouts. Contributors claim knowing exactly what to deliver. A deep-spec gate validates submissions automatically before human review. Payment is pre-authorized at claim time and captured only on approval.
 
 ---
 
@@ -27,38 +27,27 @@ Host posts a project brief
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  Browser (apps/web)                                         │
-│  Single-page app · Vite · TypeScript · Supabase client      │
-│  Y.js CRDT over WebRTC (y-webrtc)                         │
-│  CodeMirror 6 for collaborative review                      │
-└──────────────────────┬──────────────────────────────────────┘
-                       │ Supabase Realtime / REST
-                       ▼
-┌─────────────────────────────────────────────────────────────┐
-│  Supabase                                                  │
-│  PostgreSQL + RLS · Edge Functions (Deno) · Storage       │
-│  Cron jobs (pg_cron) · Realtime postgres_changes          │
-└──────────────────────┬──────────────────────────────────────┘
-                       │ Webhook / RPC
-                       ▼
-┌─────────────────────────────────────────────────────────────┐
-│  Stripe Connect Express                                    │
-│  PaymentIntent (manual capture) at claim                   │
-│  10% platform fee · Auto-capture on approval               │
-└─────────────────────────────────────────────────────────────┘
-                       │
-┌─────────────────────────────────────────────────────────────┐
-│  apps/relay — Cloudflare Workers + Durable Objects         │
-│  Y.js WebRTC signaling · TURN credential endpoint          │
-│  RelayDO alarm heartbeat (5-min sliding window)          │
-└─────────────────────────────────────────────────────────────┘
-                       │
-┌─────────────────────────────────────────────────────────────┐
-│  Railway (railway/)                                        │
-│  GLB turntable renderer · PNG/WAV re-encoder               │
-│  (avoids Deno isolate 150MB memory limit for heavy assets) │
-└─────────────────────────────────────────────────────────────┘
+Browser (apps/web)
+  Single-page app — Vite · TypeScript · Supabase client
+  Y.js CRDT over WebRTC (y-webrtc) + CodeMirror 6 for collaborative review
+          │ Supabase Realtime / REST
+          ▼
+Supabase
+  PostgreSQL + RLS · Edge Functions (Deno) · Storage
+  Cron jobs (pg_cron) · Realtime postgres_changes
+          │ Webhook / RPC
+          ▼
+Stripe Connect Express
+  PaymentIntent (manual capture) at claim · 10% platform fee
+  Auto-capture on approval
+          │
+          ├─────────────────────────────────────────────────────────────┐
+          │                                                              │
+          ▼                                                              ▼
+apps/relay                                          Railway (railway/)
+Cloudflare Workers + Durable Objects                GLB turntable renderer · PNG/WAV re-encoder
+Y.js WebRTC signaling · TURN credentials            Offloads heavy encoding from Deno isolates
+RelayDO alarm heartbeat (5-min sliding window)
 ```
 
 ---
@@ -68,28 +57,29 @@ Host posts a project brief
 ```
 fatedfortress/
 ├── apps/
-│   ├── web/                      # SPA — Vite + TypeScript
+│   ├── web/                     # SPA — Vite + TypeScript
 │   │   └── src/
-│   │       ├── auth/            # Supabase client, route guards
-│   │       ├── handlers/        # Scope, review, payout logic
-│   │       ├── net/             # Storage, GitHub, notifications
-│   │       ├── pages/           # Route entrypoints
-│   │       ├── state/           # Y.js CRDT, identity, yroom-manager
+│   │       ├── auth/           # Supabase client, route guards
+│   │       ├── handlers/       # Scope, review, payout logic
+│   │       ├── net/            # Storage, GitHub, notifications
+│   │       ├── pages/          # Route entrypoints
+│   │       ├── state/          # Y.js CRDT, identity, yroom-manager
 │   │       └── ui/             # Shell, shared components
-│   └── relay/                   # Cloudflare Workers + Durable Objects
-│                                #   Y.js signaling · TURN credentials
+│   └── relay/                  # Cloudflare Workers + Durable Objects
+│                                #   Y.js signaling, TURN credentials
 ├── packages/
-│   ├── protocol/                # Shared TypeScript types
-│   └── sentry-utils/           # PII scrubber
+│   ├── protocol/               # Shared TypeScript types
+│   └── sentry-utils/          # PII scrubber
 ├── railway/
-│   └── glb-turntable/          # Railway worker: GLB → MP4 turntable
+│   └── glb-turntable/         # Railway worker: GLB → MP4 turntable
 ├── supabase/
-│   ├── functions/               # 18 Edge Functions
-│   ├── migrations/              # Apply in order
-│   └── schema.sql             # Reference schema + RLS policies
-├── e2e/                        # Playwright end-to-end tests
-├── diagrams/                    # Architecture Mermaid diagrams
-└── env-vars.md                 # Full environment variable reference
+│   ├── functions/             # 18 Edge Functions
+│   ├── migrations/            # Apply in order
+│   └── schema.sql            # Reference schema + RLS policies
+├── e2e/                       # Playwright end-to-end tests
+├── diagrams/                  # Architecture Mermaid diagrams
+├── scripts/                   # Dev utilities
+└── env-vars.md               # Full environment variable reference
 ```
 
 ---
@@ -114,20 +104,20 @@ fatedfortress/
 | Function | Trigger | Description |
 |----------|---------|-------------|
 | `create-and-scope-project` | POST | GPT-4o task decomposition + project creation |
-| `scope-tasks` | — | **Deprecated** (410 Gone). Use `create-and-scope-project`. |
+| `scope-tasks` | — | **Deprecated** (410 Gone). Use `create-and-scope-project` instead. |
 | `claim-task` | POST | Validates claim, creates Stripe PaymentIntent, calls `claim_task_atomic` RPC |
 | `submit-task` | POST | Persists submission, triggers `verify-submission` |
 | `verify-submission` | Called by `submit-task` | Binary header parsing against `spec_constraints`; auto-rejects mismatches |
-| `review-submission` | POST | Host verdict (approve / reject / revision) + Stripe capture/cancel |
+| `review-submission` | POST | Host verdict (approve / reject / revision) + Stripe capture or cancel |
 | `stripe-webhook` | Stripe events | Handles `payment_intent.succeeded`, `transfer.created`, `account.updated` |
 | `stripe-payment` | POST | Capture / cancel / refund / transfer |
 | `stripe-connect-onboard` | POST | Stripe Connect Express onboarding |
 | `stripe-connect-link` | POST | Dashboard link + reauth URL |
 | `github-oauth` | GET | Server-side GitHub token exchange |
 | `get-stripe-status` | GET | Read `charges_enabled` / `payouts_enabled` for a Stripe account |
-| `get-public-stats` | GET | Public project/task counts for landing page |
+| `get-public-stats` | GET | Public project and task counts for the landing page |
 | `supabase-storage-upload` | POST | Generates presigned PUT URLs for Supabase Storage |
-| `asset-scanner` | POST | 9-sub-pass layered analysis: magic-byte → heuristic → gap bounty |
+| `asset-scanner` | POST | 9-sub-pass layered analysis: magic-byte, heuristic inference, gap bounty |
 | `asset-sanitizer` | POST | VirusTotal malware scan + Railway re-encode (PNG, WAV, GLB turntable) |
 | `auto-release` | Cron (30 min) | 24h warning → 48h auto-approve + Stripe capture |
 | `expire-claims` | Cron (5 min) | Reclaims expired soft-locks via `unlock_wallet` RPC |
@@ -139,7 +129,8 @@ fatedfortress/
 ```
 projects
   └─ tasks
-       payout_range · deliverable_type · spec_constraints · status · version
+       payout_range · deliverable_type · status · version
+       spec_constraints (JSONB) · payment_intent_id · accepted_roles[]
          └─ submissions
               deliverable_url · revision_count · proxy_video_url
                 └─ decisions
@@ -160,12 +151,12 @@ projects
 
 ## Migrations
 
-Apply in order with `supabase db push` or `supabase migrations apply`. The 8 empty `20260501_*` files are stubs superseded by earlier migrations — they can be safely deleted.
+Apply in order with `supabase db push` or `supabase migrations apply`. The 8 empty `20260501_*` files are stubs superseded by earlier migrations and can be safely deleted.
 
 ```
-20250421_post_refactor_v1.sql    projects, tasks, submissions, profiles, audit_log
+20250421_post_refactor_v1.sql     projects, tasks, submissions, profiles, audit_log
 20260422_persist_blueprint.sql    readme_draft, folder_structure; persist_scoped_project RPC
-20260424_009–028                 Schema additions and hardening (see schema.sql comments)
+20260424_009–028                  Schema additions and hardening
 20260425_028_profiles_fk_join_fix.sql  Fixes profiles FK join
 ```
 
@@ -179,7 +170,7 @@ Apply in order with `supabase db push` or `supabase migrations apply`. The 8 emp
 - A Supabase project (apply migrations in order)
 - Stripe account with Connect enabled
 - Cloudflare account (for relay deployment)
-- Railway account (for GLB turntable worker, optional in development)
+- Railway account (for GLB turntable worker; optional in development)
 
 ### Local development
 
