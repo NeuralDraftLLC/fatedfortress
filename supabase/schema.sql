@@ -141,7 +141,7 @@ create policy "Hosts can manage wallet"
 --          spec_constraints (jsonb), reviewed_at, payment_intent_id,
 --          approved_payout (denorm, source of truth = decisions.approved_payout)
 -- See: migrations/20260424_009_project_brief_columns.sql,
---      migrations/20260501_008_spec_constraints.sql,
+--      migrations/20260424_022_spec_constraints.sql,
 --      migrations/20260424_010_claim_task_atomic.sql,
 --      migrations/20260424_012_review_submission.sql
 -- ============================================================================

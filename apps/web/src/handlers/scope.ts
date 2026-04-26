@@ -59,51 +59,6 @@ export async function generateScopedTasks(
   };
 }
 
-/**
- * Write generated tasks to Supabase with status = 'draft'.
- * Caller is responsible for creating the project_wallet row on publish.
- */
-export async function writeScopedTasks(
-  projectId: string,
-  tasks: ScopedTask[],
-  hostId: string
-): Promise<Task[]> {
-  const supabase = getSupabase();
-
-  const rows = tasks.map((t) => ({
-    project_id: projectId,
-    title: t.title,
-    description: t.description,
-    deliverable_type: t.deliverableType,
-    payout_min: t.payoutMin,
-    payout_max: t.payoutMax,
-    ambiguity_score: t.ambiguityScore,
-    estimated_minutes: t.estimatedMinutes,
-    status: "draft",
-    task_access: "invite",
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-  }));
-
-  const { data, error } = await supabase
-    .from("tasks")
-    .insert(rows as unknown as Record<string, unknown>)
-    .select();
-
-  if (error || !data) {
-    throw new Error(`Failed to write tasks: ${error?.message}`);
-  }
-
-  await supabase.from("audit_log").insert({
-    actor_id: hostId,
-    task_id: null,
-    action: "task_created",
-    payload: { projectId, count: tasks.length },
-  } as Record<string, unknown>);
-
-  return data as unknown as Task[];
-}
-
 // ---------------------------------------------------------------------------
 // Task normalization
 // ---------------------------------------------------------------------------
