@@ -276,7 +276,11 @@ Requires a real Supabase dev project. See [`e2e/README.md`](e2e/README.md).
 | Expire-claims cron | ✅ Complete |
 | Y.js live review | ✅ Complete — real-time editor, live cursors, presence avatars |
 | GitHub OAuth | ✅ Complete |
-| publishToHereNow | 🔲 Deferred — pending portfolio population |
+| publishToHereNow | ✅ Complete — profile surfaces live link, CTA, and gate progress |
+| **Concurrency: distributed lock + CRDT claim presence** | 🔲 Hardening — [#1](https://github.com/NeuralDraftLLC/fatedfortress/issues/1) version hash + Y.js intent broadcast before Stripe fires |
+| **AI scoping: Zod validation + retry-with-decay + draft state** | 🔲 Hardening — [#2](https://github.com/NeuralDraftLLC/fatedfortress/issues/2) schema gate, 3-retry decay, human-in-loop publish |
+| **File security: ClamAV scan + EXIF strip + GLB proxy render** | 🔲 Hardening — [#3](https://github.com/NeuralDraftLLC/fatedfortress/issues/3) decontamination chamber before host review queue |
+| **Y.js lifecycle: router teardown + server heartbeat** | 🔲 Hardening — [#4](https://github.com/NeuralDraftLLC/fatedfortress/issues/4) automated CRDT cleanup, ghost connection prevention |
 
 ---
 
