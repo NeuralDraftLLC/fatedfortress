@@ -648,17 +648,16 @@ export class RelayDO implements DurableObject {
   }
 
   /**
-   * Pillar 4: alarm-based heartbeat (survives DO eviction).
+   * Pillar 4: alarm-based heartbeat — called by the Cloudflare runtime when the alarm fires.
    *
-   * Cloudflare DurableObject Alarm API:
-   *   - this.ctx.storage.setAlarm(Date.now() + timeoutMs) — schedules next alarm
-   *   - alarm() is called automatically by the runtime when the alarm fires
+   * MUST be public: the DurableObject interface declares alarm(): Promise<void> as a public
+   * method. TypeScript strict mode rejects a private override because private methods are
+   * not visible through the interface contract.
    *
-   * The heartbeat sends a /heartbeat ping to RELAY_REGISTRY so the lobby grid
-   * stays in sync with actual peer counts. Without this, the DO could be evicted
-   * and re-instantiated, losing the in-memory peer map and causing ghost rooms.
+   * The heartbeat sends a /heartbeat ping to RELAY_REGISTRY so the lobby grid stays in sync
+   * with actual peer counts. Without this, DO eviction would cause ghost rooms.
    */
-  private async alarm(): Promise<void> {
+  async alarm(): Promise<void> {
     if (this.roomId === null || this.shardIndex !== null) return;
     const stub = this.env.RELAY_REGISTRY.get(this.env.RELAY_REGISTRY.idFromName("global-registry"));
     await stub
