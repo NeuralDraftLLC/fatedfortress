@@ -21,6 +21,12 @@
  *   requireAuth() appends ?next=<encoded-path> when redirecting to /login.
  *   After sign-in, the router reads ?next= and navigates there instead of
  *   the default role-based redirect.
+ *
+ * Changes (2026-04-26 — View Transition API):
+ *   Wrap every route() call in document.startViewTransition() for native
+ *   SPA cross-fade. Falls back to plain await route() on unsupported browsers.
+ *   presence-arena.css imported for global @view-transition rule +
+ *   skeleton shimmer + scroll-reveal animations.
  */
 
 import * as Sentry from "@sentry/browser";
@@ -34,6 +40,7 @@ import { mountShellNotifications } from "./ui/shell.js";
 import "./styles/design-system.css";
 import "./styles/ff.css";
 import "./styles/landing.css";
+import "./styles/presence-arena.css";
 
 Sentry.init({
   dsn: typeof __SENTRY_DSN_WEB__ !== "undefined" ? __SENTRY_DSN_WEB__ : "",
@@ -171,6 +178,22 @@ function teardownShellNotif(): void {
   if (shellNotifTeardown) {
     shellNotifTeardown();
     shellNotifTeardown = null;
+  }
+}
+
+// ── View Transition helper ──────────────────────────────────────────────────
+/**
+ * Run a navigation callback wrapped in document.startViewTransition() when
+ * the API is available. Falls back to a plain await on older browsers.
+ *
+ * The callback must return a Promise (async function) so the transition
+ * waits for the new DOM to be ready before snapshotting the "new" state.
+ */
+async function withViewTransition(callback: () => Promise<void>): Promise<void> {
+  if (typeof document.startViewTransition === "function") {
+    await document.startViewTransition(callback).finished;
+  } else {
+    await callback();
   }
 }
 
@@ -369,9 +392,12 @@ async function init() {
     notifChannel = subscribeToNotifications(session!.user.id);
   }
 
-  await route(currentPath, isLoggedIn);
+  // ── Route with View Transition
+  await withViewTransition(() => route(currentPath, isLoggedIn));
 
-  window.addEventListener("popstate", () => route(window.location.pathname, isLoggedIn));
+  window.addEventListener("popstate", () => {
+    withViewTransition(() => route(window.location.pathname, isLoggedIn));
+  });
 
   document.addEventListener("click", (e) => {
     const target = (e.target as Element)?.closest("a");
@@ -388,7 +414,7 @@ async function init() {
       if (nextIsPublic !== isPublic) {
         init();
       } else {
-        route(nextPath, isLoggedIn);
+        withViewTransition(() => route(nextPath, isLoggedIn));
       }
     }
   });
