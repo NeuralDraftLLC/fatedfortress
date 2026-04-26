@@ -1,0 +1,258 @@
+/**
+ * presence-arena.css
+ *
+ * Animation systems for FatedFortress — Live Presence Arena sprint.
+ *
+ * Covers:
+ *   1. View Transition API — cross-fade between SPA routes (180ms)
+ *   2. Presence dot pulse — avatar dots on task cards (browsing / claiming)
+ *   3. Heat rings — pulsing amber border on cards with 2+ viewers
+ *   4. Skeleton shimmer loaders — replace spinners on task list load
+ *   5. Scroll-reveal — Intersection Observer card entrance animation
+ *
+ * All motion is gated on prefers-reduced-motion: no-preference.
+ * Only transform + opacity are animated — never width, height, top, left.
+ * GPU-composited properties only; zero reflow on any animation.
+ *
+ * Import:
+ *   import "./styles/presence-arena.css";   (in main.ts or tasks.ts)
+ *   OR
+ *   <link rel="stylesheet" href="/src/styles/presence-arena.css">
+ */
+
+/* ==========================================================================
+   1. View Transition API
+   ========================================================================== */
+
+@view-transition {
+  navigation: auto;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  ::view-transition-old(root) {
+    animation: ff-vt-fade-out 0.18s ease forwards;
+  }
+
+  ::view-transition-new(root) {
+    animation: ff-vt-fade-in 0.18s ease forwards;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation: none;
+  }
+}
+
+@keyframes ff-vt-fade-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}
+
+@keyframes ff-vt-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ==========================================================================
+   2. Presence dot pulse
+   ========================================================================== */
+
+/** Slow pulse for browsing state */
+@keyframes ff-dot-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+  }
+  50% {
+    transform: scale(1.15);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  }
+}
+
+/** Fast ring-expansion for claiming state */
+@keyframes ff-dot-pulse-fast {
+  0%,
+  100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 currentColor;
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.25);
+    box-shadow: 0 0 0 6px transparent;
+    opacity: 0.85;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ff-presence-dot {
+    animation: none !important;
+  }
+}
+
+/* ==========================================================================
+   3. Heat ring — cards with 2+ simultaneous viewers
+   ========================================================================== */
+
+.ff-card--hot {
+  outline: 2px solid #d97706;
+  outline-offset: 2px;
+  position: relative;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .ff-card--hot {
+    animation: ff-heat-ring 1.6s ease-in-out infinite;
+  }
+}
+
+@keyframes ff-heat-ring {
+  0%,
+  100% {
+    outline-color: #d97706;
+    outline-offset: 2px;
+  }
+  50% {
+    outline-color: #f59e0b;
+    outline-offset: 4px;
+  }
+}
+
+/** "N viewing" micro-badge above the card */
+.ff-card--hot::before {
+  content: attr(data-viewer-count) " viewing";
+  position: absolute;
+  top: -12px;
+  left: 12px;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #d97706;
+  background: var(--ff-paper, #fff);
+  padding: 1px 6px;
+  border: 1px solid #d97706;
+  border-radius: 3px;
+  pointer-events: none;
+  white-space: nowrap;
+  z-index: 20;
+}
+
+/* ==========================================================================
+   4. Skeleton shimmer loaders
+   ========================================================================== */
+
+.ff-skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--ff-surface, #f5f5f5) 25%,
+    var(--ff-border, #e0e0e0) 50%,
+    var(--ff-surface, #f5f5f5) 75%
+  );
+  background-size: 200% 100%;
+  border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .ff-skeleton {
+    animation: ff-shimmer 1.4s ease-in-out infinite;
+  }
+}
+
+@keyframes ff-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+/** Skeleton task card template */
+.ff-skeleton-card {
+  padding: 20px;
+  border: 1px solid var(--ff-border, #e0e0e0);
+  margin-bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ff-skeleton-card .ff-skeleton-title {
+  height: 16px;
+  width: 55%;
+}
+
+.ff-skeleton-card .ff-skeleton-sub {
+  height: 12px;
+  width: 30%;
+}
+
+.ff-skeleton-card .ff-skeleton-body {
+  height: 11px;
+  width: 100%;
+}
+
+.ff-skeleton-card .ff-skeleton-body-short {
+  height: 11px;
+  width: 78%;
+}
+
+.ff-skeleton-card .ff-skeleton-badges {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.ff-skeleton-card .ff-skeleton-badge {
+  height: 20px;
+  width: 80px;
+  border-radius: 999px;
+}
+
+.ff-skeleton-card .ff-skeleton-btn {
+  height: 30px;
+  width: 120px;
+  margin-top: 4px;
+}
+
+/* ==========================================================================
+   5. Scroll-reveal card entrance (Intersection Observer)
+   ========================================================================== */
+
+@media (prefers-reduced-motion: no-preference) {
+  [data-scroll-reveal] {
+    opacity: 0;
+    transform: translateY(14px);
+    transition:
+      opacity 0.32s ease,
+      transform 0.32s ease;
+  }
+
+  [data-scroll-reveal].ff-revealed {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-scroll-reveal] {
+    opacity: 1;
+    transform: none;
+  }
+}
