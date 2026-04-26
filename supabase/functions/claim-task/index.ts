@@ -3,13 +3,17 @@
  *
  * Stage 2 orchestrator — the ONLY path to claiming a task.
  *
- * Flow:
+ * Flow (Pillar 1 hardening — optimistic concurrency):
  *   1. Validate contributor profile (role = 'contributor', stripe account present)
- *   2. Fetch task + project for payout amount
- *   3. Create Stripe PaymentIntent (manual capture, 10% platform fee)
- *   4. Call claim_task_atomic RPC (SELECT FOR UPDATE SKIP LOCKED)
+ *   2. Fetch task + project + current version
+ *   3. Optimistic version check — reject BEFORE Stripe PI is created
+ *      (best-effort early exit on a non-locking read; prevents card hold in the
+ *      common non-racy case. The authoritative gate is the RPC's FOR UPDATE
+ *      SKIP LOCKED + p_expected_version check inside the transaction.)
+ *   4. Create Stripe PaymentIntent (manual capture, 10% platform fee)
+ *   5. Call claim_task_atomic RPC with expected_version
  *      → if RPC fails, cancel the PI immediately (no orphaned holds)
- *   5. Return { task, paymentIntentClientSecret } to frontend
+ *   6. Return { task, paymentIntentClientSecret } to frontend
  *
  * The frontend uses paymentIntentClientSecret with stripe.confirmCardPayment()
  * to authorise the hold. The card is NOT charged until host approves.
@@ -17,6 +21,7 @@
  * POST body:
  * {
  *   taskId: string (uuid)
+ *   expectedVersion?: number  — client-known version for optimistic concurrency
  * }
  */
 
@@ -97,8 +102,8 @@ Deno.serve(async (req: Request) => {
     );
   }
 
-  // ── Step 2: Fetch task + payout amount ─────────────────────────────────────
-  const { taskId } = await req.json() as { taskId: string };
+  // ── Step 2: Fetch task + payout amount + version ─────────────────────────────────
+  const { taskId, expectedVersion } = await req.json() as { taskId: string; expectedVersion?: number };
 
   if (!taskId) {
     return Response.json({ error: "taskId is required" }, { status: 400, headers: CORS });
@@ -107,7 +112,7 @@ Deno.serve(async (req: Request) => {
   const { data: task, error: taskErr } = await admin
     .from("tasks")
     .select(`
-      id, status, payout_min, payout_max, task_access, title, description,
+      id, status, version, payout_min, payout_max, task_access, title, description,
       project_id, spec_constraints,
       project:projects ( id, host_id, title,
         host:profiles!projects_host_id_fkey ( stripe_account_id ) )
@@ -122,6 +127,25 @@ Deno.serve(async (req: Request) => {
   const t = task as Record<string, unknown>;
   const project = t.project as Record<string, unknown>;
   const host    = project?.host as Record<string, unknown>;
+
+  // ── Pillar 1: Advisory pre-Stripe version check (best-effort early exit) ──
+  // This read is NON-LOCKING — a concurrent claimer may have already incremented
+  // the version between this select and the Stripe PI creation below.
+  // This check short-circuits the obvious non-racy case to avoid unnecessary
+  // card holds; it is NOT the authoritative concurrency gate.
+  // The authoritative gate is claim_task_atomic (FOR UPDATE SKIP LOCKED +
+  // p_expected_version check inside the transaction). If this check passes but
+  // the RPC returns version_mismatch, the PI is cancelled immediately (Step 5).
+  if (expectedVersion !== undefined && expectedVersion !== (t.version as number)) {
+    return Response.json(
+      {
+        error: "already_claimed",
+        message: "Another contributor claimed this task. Please refresh and try a different one.",
+        currentVersion: t.version,
+      },
+      { status: 409, headers: CORS }
+    );
+  }
 
   if (t.status !== "open") {
     return Response.json(
@@ -176,12 +200,16 @@ Deno.serve(async (req: Request) => {
   const clientSecret   = pi.client_secret as string;
 
   // ── Step 4: Atomically claim the task in Postgres ───────────────────────
+  // This is the authoritative gate: FOR UPDATE SKIP LOCKED ensures only one
+  // caller can hold the row lock; p_expected_version provides a second layer
+  // inside the transaction. On any non-"ok" result the PI is cancelled.
   const { data: claimResult, error: claimErr } = await admin
     .rpc("claim_task_atomic", {
       p_task_id:              taskId,
       p_contributor_id:       auth.user.id,
       p_payment_intent_id:    piId,
       p_claim_duration_hours: CLAIM_HOURS,
+      p_expected_version:      expectedVersion ?? null,
     });
 
   const resultCode = claimResult as string | null;
@@ -191,16 +219,17 @@ Deno.serve(async (req: Request) => {
     await cancelPaymentIntent(piId);
 
     const userMessages: Record<string, string> = {
-      already_claimed: "Another contributor just claimed this task. Try a different one.",
-      not_open:        "This task is no longer available.",
-      invite_only:     "This task requires an invitation.",
-      wallet_error:    "The project wallet has insufficient funds for this task.",
-      not_found:       "Task not found.",
+      version_mismatch: "This task was claimed by another contributor. Please refresh.",
+      already_claimed:   "Another contributor just claimed this task. Try a different one.",
+      not_open:         "This task is no longer available.",
+      invite_only:      "This task requires an invitation.",
+      wallet_error:     "The project wallet has insufficient funds for this task.",
+      not_found:        "Task not found.",
     };
 
     const code    = resultCode ?? "unknown";
     const message = userMessages[code] ?? "Claim failed. Please try again.";
-    const status  = code === "already_claimed" ? 409 :
+    const status  = code === "version_mismatch" || code === "already_claimed" ? 409 :
                     code === "invite_only"     ? 403 :
                     code === "wallet_error"    ? 402 : 400;
 
@@ -208,8 +237,8 @@ Deno.serve(async (req: Request) => {
   }
 
   // ── Step 5: Return claimed task + PI client secret to frontend ─────────
-// Frontend calls stripe.confirmPayment({ clientSecret, confirmParams: { return_url } })
-// to authorise the hold. Card is NOT charged until host approves.
+  // Frontend calls stripe.confirmPayment({ clientSecret, confirmParams: { return_url } })
+  // to authorise the hold. Card is NOT charged until host approves.
 
   const { data: claimedTask } = await admin
     .from("tasks")

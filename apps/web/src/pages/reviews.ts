@@ -7,6 +7,12 @@
  *   RIGHT  (320px) — contributor info, reliability, AI summary, decision panel
  *
  * CHANGES (wave 7 — REVIEW-COLLAB-001):
+ * Changes (2026-04-26 — Pillar 4):
+ *   - COLLAB 5: `destroyYRoom()` added to `teardownCollab()` — room is now tracked in
+ *     yroom-manager.ts so main.ts can call `destroyAllRooms()` on every navigation,
+ *     preventing Y.Doc accumulation leaks. Reviews.ts teardown now calls both
+ *     `teardownCollab()` (provider/editor/presence) AND `destroyYRoom()` (room manager).
+ *
  *  - COLLAB 1: Y.js transport wired — createRoomDoc() + WebrtcProvider per review_session
  *  - COLLAB 2: CodeMirror 6 editor bound to room.output (Y.Text) for code/text deliverables
  *  - COLLAB 3: Live cursors via upsertPresence() on CM6 selectionSet + remote overlays
@@ -37,6 +43,7 @@ import {
   removePresence,
   observePresence,
 } from "../state/ydoc.js";
+import { createYRoom, destroyYRoom } from "../state/yroom-manager.js";
 import { getMyPubkey } from "../state/identity.js";
 import type { FortressRoomDoc, PresenceEntry } from "../state/ydoc.js";
 import { WebrtcProvider } from "y-webrtc";
@@ -274,6 +281,7 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
 
   // ── Collab state (per selected item) ──────────────────────────────────────
   let activeRoom: FortressRoomDoc | null = null;
+let activeRoomId: string | null = null;
   let activeProvider: WebrtcProvider | null = null;
   let activeEditor: EditorView | null = null;
   let teardownPresenceObserver: (() => void) | null = null;
@@ -288,6 +296,11 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
     if (activeProvider) { activeProvider.destroy(); activeProvider = null; }
     clearActiveRoomDoc();
     activeRoom = null;
+    // ── Pillar 4: deregister from yroom-manager ──────────────────────────
+    if (activeRoomId) {
+      destroyYRoom(activeRoomId);
+      activeRoomId = null;
+    }
     $presenceChips.innerHTML = "";
   }
 
@@ -543,6 +556,7 @@ export async function mountReviews(container: HTMLElement): Promise<() => void> 
       const room = createRoomDoc();
       setActiveRoomDoc(room);
       activeRoom = room;
+      activeRoomId = reviewSessionId;
 
       const provider = new WebrtcProvider(reviewSessionId, room.doc, {
         signaling: [RELAY_URL],

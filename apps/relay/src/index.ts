@@ -418,7 +418,9 @@ export class RelayDO implements DurableObject {
   /** Non-null when this stub is a shard (`roomId-shard-n` binding) */
   private shardIndex: number | null = null;
   private registeredRoom = false;
-  private heartbeatTimer: number | null = null;
+
+  /** Pillar 4: heartbeat alarm interval — 5 minutes, sliding (resets on each alarm fire) */
+  private static readonly HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
 
   constructor(
     private readonly ctx: DurableObjectState,
@@ -632,6 +634,7 @@ export class RelayDO implements DurableObject {
   private async ensureRegistered(roomId: string): Promise<void> {
     if (this.registeredRoom || this.shardIndex !== null) return;
     this.registeredRoom = true;
+    this.roomId = roomId;
     const name = `Room ${roomId}`;
     const category = "open";
     const stub = this.env.RELAY_REGISTRY.get(this.env.RELAY_REGISTRY.idFromName("global-registry"));
@@ -640,38 +643,43 @@ export class RelayDO implements DurableObject {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ roomId, name, category }),
     });
-    this.startHeartbeat(roomId);
+    // ── Pillar 4: set alarm-based heartbeat (survives DO eviction) ──
+    await this.ctx.storage.setAlarm(Date.now() + RelayDO.HEARTBEAT_INTERVAL_MS);
   }
 
-  private startHeartbeat(roomId: string): void {
-    if (this.heartbeatTimer !== null) return;
-    this.heartbeatTimer = this.ctx.storage.setTimeout(() => this.sendHeartbeat(roomId), 30_000) as unknown as number;
-  }
-
-  private async sendHeartbeat(roomId: string): Promise<void> {
-    if (this.shardIndex !== null) return;
+  /**
+   * Pillar 4: alarm-based heartbeat — called by the Cloudflare runtime when the alarm fires.
+   *
+   * MUST be public: the DurableObject interface declares alarm(): Promise<void> as a public
+   * method. TypeScript strict mode rejects a private override because private methods are
+   * not visible through the interface contract.
+   *
+   * The heartbeat sends a /heartbeat ping to RELAY_REGISTRY so the lobby grid stays in sync
+   * with actual peer counts. Without this, DO eviction would cause ghost rooms.
+   */
+  async alarm(): Promise<void> {
+    if (this.roomId === null || this.shardIndex !== null) return;
     const stub = this.env.RELAY_REGISTRY.get(this.env.RELAY_REGISTRY.idFromName("global-registry"));
     await stub
       .fetch("http://relay/heartbeat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          roomId,
+          roomId: this.roomId,
           participantCount: this.peerCount - this.spectatorPeers.size,
           spectatorCount: this.spectatorPeers.size,
           fuelFraction: 1.0,
         }),
       })
-      .catch(() => { /* ignore */ });
-    this.heartbeatTimer = this.ctx.storage.setTimeout(() => this.sendHeartbeat(roomId), 30_000) as unknown as number;
+      .catch(() => { /* ignore — non-fatal */ });
+    // Reschedule the next alarm (sliding 5-minute window)
+    await this.ctx.storage.setAlarm(Date.now() + RelayDO.HEARTBEAT_INTERVAL_MS);
   }
 
   private async cleanupRoom(roomId: string): Promise<void> {
     if (this.shardIndex !== null) return;
-    if (this.heartbeatTimer !== null) {
-      this.ctx.storage.clearTimeout(this.heartbeatTimer as unknown as ReturnType<typeof setTimeout>);
-      this.heartbeatTimer = null;
-    }
+    // Cancel any pending alarm so a re-evicted DO doesn't fire after cleanup
+    await this.ctx.storage.setAlarm(null);
     const stub = this.env.RELAY_REGISTRY.get(this.env.RELAY_REGISTRY.idFromName("global-registry"));
     await stub
       .fetch("http://relay/deregister", {

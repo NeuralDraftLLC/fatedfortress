@@ -202,3 +202,92 @@ graph TD
 
     %% Error tracking
     SPA -.->|"Sentry PII scrubbed"| Sentry
+
+---
+
+## Pillar 3: Asset Sanitization Pipeline
+
+```mermaid
+flowchart LR
+    %%{init: {"theme": "dark", "themeVariables": {"fontFamily": "Geist Mono, monospace", "fontSize": "12px"}}}%%
+    subgraph SubmitFlow["Submission Upload Flow"]
+        submit_p["submit/:taskId<br/>pages/submit.ts"] --> storage_fn["supabase-storage-upload<br/>Edge Function"]
+        storage_fn --> SB["Supabase Storage<br/>submissions/ bucket"]
+        SB --> sanitizer["asset-sanitizer<br/>Edge Function"]
+    end
+
+    subgraph VirusTotal["VirusTotal Scan"]
+        sanitizer -->|"file buffer"| vt["VirusTotal API<br/>POST /files → /analyses/:id"]
+        vt -->|malicious=true| REJECT["Reject submission<br/>Return 422 MALWARE_DETECTED"]
+        vt -->|malicious=false| Route["Route by fileType"]
+    end
+
+    subgraph Route["Type Routing"]
+        Route -->|"3d_model"| GLB["Railway GLB Turntable Worker<br/>Three.js headless → MP4"]
+        Route -->|"image"| PNG["Railway Re-encode Worker<br/>FFmpeg/MUI → clean PNG"]
+        Route -->|"audio"| WAV["Railway Re-encode Worker<br/>Re-encode WAV → clean WAV"]
+        Route -->|"other"| Pass["Pass-through<br/>No re-encode"]
+    end
+
+    GLB -->|"MP4 URL| mp4[( "proxy_video_url<br/>submissions row" )]
+    PNG -->|"clean PNG URL| clean_img[( "clean PNG<br/>Supabase Storage" )]
+    WAV -->|"clean WAV URL| clean_aud[( "clean WAV<br/>Supabase Storage" )]
+
+    sanitizer -->|"update proxy_video_url"| DB["submissions table<br/>proxy_video_url column"]
+    sanitizer -->|"cleanUrl| Reviews["reviews.ts<br/>proxy MP4 in preview"]
+```
+
+---
+
+## Pillar 4: DurableObject Alarm Heartbeat
+
+```mermaid
+sequenceDiagram
+    participant C as Browser
+    participant RDO as RelayDO (Durable Object)
+    participant REG as RelayRegistryDO
+
+    Note over RDO: DO instantiated<br/>(may have been evicted)
+
+    C->>RDO: WebSocket connect<br/>?roomId=X&peerId=Y
+    RDO->>RDO: ensureRegistered(roomId)
+    RDO->>RDO: this.roomId = roomId
+    RDO->>REG: POST /register {roomId, name, ...}
+    RDO->>RDO: ctx.storage.setAlarm(now + 5min)
+    RDO-->>C: 101 Switching Protocols
+
+    loop Every 5 minutes (alarm)
+        RDO->>RDO: alarm() fires
+        RDO->>REG: POST /heartbeat<br/>{participantCount, spectatorCount}
+        RDO->>RDO: ctx.storage.setAlarm(now + 5min)
+    end
+
+    C->>RDO: WebSocket close
+    RDO->>RDO: peerCount === 0?
+    RDO->>REG: POST /deregister {roomId}
+    RDO->>RDO: ctx.storage.setAlarm(null)<br/>(cancel future alarms)
+```
+
+---
+
+## Draft State Transitions
+
+```mermaid
+stateDiagram-v2
+    [*] --> draft: Host creates project
+    draft --> open: Host publishes tasks
+    draft --> draft: Host saves draft
+    open --> claimed: Contributor claims task
+    claimed --> submitted: Contributor submits
+    submitted --> under_review: Auto on submit
+    under_review --> approved: Host approves
+    under_review --> revision_requested: Host requests revision
+    revision_requested --> submitted: Contributor re-submits
+    approved --> paid: Auto after Stripe capture
+    submitted --> under_review: Host approves after revision_requested
+    under_review --> rejected: Host rejects
+
+    draft --> [*]: Host discards
+    open --> expired: 48h without claim<br/>(auto-release cron)
+    claimed --> open: Soft lock expires<br/>(expire-claims cron)
+

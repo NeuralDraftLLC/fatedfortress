@@ -24,6 +24,7 @@
  */
 
 import * as Sentry from "@sentry/browser";
+import { destroyAllRooms } from "./state/yroom-manager.js";
 import { scrubEvent } from "@fatedfortress/sentry-utils";
 import { getSupabase } from "./auth/index.js";
 import { getRedirectPath } from "./auth/middleware.js";
@@ -174,7 +175,7 @@ function teardownShellNotif(): void {
 }
 
 async function route(path: string, isLoggedIn: boolean) {
-  // Teardown previous page
+  // ── Teardown previous page ─────────────────────────────────────────────
   if (currentCleanup) {
     const cleanup = await currentCleanup;
     cleanup?.();
@@ -185,6 +186,11 @@ async function route(path: string, isLoggedIn: boolean) {
     unsubscribeFromNotifications();
     notifChannel = null;
   }
+
+  // ── Pillar 4: destroy all Y.Docs on every navigation ───────────────────
+  // Prevents memory leaks: Y.Docs accumulate if users navigate away and back.
+  // Reviews.ts creates rooms on mount; main.ts must clean them up on teardown.
+  destroyAllRooms();
 
   setActiveNav(path);
 

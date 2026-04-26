@@ -40,6 +40,13 @@
  *     [data-claiming] attribute during flight for visual feedback + pointer
  *     suppression. Attribute is always cleared on exit (success, error, or
  *     early return).
+ *
+ * Changes (2026-04-26 — Pillar 1: optimistic concurrency):
+ *   - Claim invoke passes `expectedVersion` so the edge function can short-circuit
+ *     before Stripe PI creation (prevents card holds on race losses).
+ *   - Supabase Realtime broadcast channel for `claim_intent` events — when any
+ *     user initiates a claim, all other browsers dim that task's button
+ *     immediately without waiting for the server round-trip.
  */
 
 import { requireAuth } from "../auth/middleware.js";
@@ -419,6 +426,7 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
   let allTasks: (Task & { project?: { title?: string; host_id?: string; host?: { display_name?: string; review_reliability?: number } } })[] = [];
   let pollInterval: ReturnType<typeof setInterval>;
   let realtimeChannel: RealtimeChannel | null = null;
+  let claimIntentChannel: RealtimeChannel | null = null;
 
   // ── Sidebar: profile ──────────────────────────────────────────────────────
   async function loadSidebar(): Promise<void> {
@@ -596,8 +604,24 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
       }
 
       const supabase = getSupabase();
+
+      // ── Pillar 1: find current task version for optimistic concurrency ──
+      // The task is in allTasks from the last fetch — use it to short-circuit before Stripe
+      const knownTask = allTasks.find(t => t.id === taskId);
+      const expectedVersion = knownTask
+        ? ((knownTask as unknown as Record<string, unknown>).version as number) ?? undefined
+        : undefined;
+
+      // ── Pillar 1: broadcast claim intent to all other browsers immediately ──
+      // This grays out the button for all competitors before the server round-trip
+      await claimIntentChannel?.send({
+        type: "broadcast",
+        event: "claim_intent",
+        payload: { taskId, userId, ts: Date.now() },
+      });
+
       const { data: claimResult, error: claimError } = await supabase.functions.invoke("claim-task", {
-        body: { taskId },
+        body: { taskId, expectedVersion },
       });
 
       if (claimError) {
@@ -623,6 +647,9 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
             clearGuard();
             window.location.href = payload.onboarding_url ?? "/settings/stripe-connect";
             return;
+          case "version_mismatch":
+            alert(payload.message ?? "This task was claimed by another contributor. Please refresh.");
+            break;
           case "already_claimed":
             alert(payload.message ?? "Another contributor just claimed this task.");
             break;
@@ -750,6 +777,27 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
   ]);
 
   realtimeChannel = subscribeActivityFeed();
+
+  // ── Pillar 1: Supabase Realtime claim-intent broadcast ──────────────────
+  // When any user initiates a claim, all other browsers dim that task's
+  // button immediately — faster than waiting for the server round-trip.
+  claimIntentChannel = getSupabase()
+    .channel("claim-intents")
+    .on("broadcast", { event: "claim_intent" }, (payload) => {
+      const { taskId, userId: claimantId } = payload.payload as { taskId: string; userId: string; ts: number };
+      // Don't dim the button for the user who initiated the claim
+      if (claimantId === userId) return;
+      const $btn = document.querySelector<HTMLElement>(
+        `[data-task-id="${taskId}"][data-action="claim"]`
+      );
+      if ($btn && !$btn.hasAttribute("data-claiming")) {
+        $btn.setAttribute("data-claiming", "1");
+        $btn.style.opacity = "0.45";
+        $btn.style.pointerEvents = "none";
+      }
+    })
+    .subscribe();
+
   pollInterval = setInterval(fetchTasks, 30_000);
 
   // ── Teardown ──────────────────────────────────────────────────────────────
@@ -758,6 +806,10 @@ export async function mountTasks(container: HTMLElement): Promise<() => void> {
     if (realtimeChannel) {
       realtimeChannel.unsubscribe();
       realtimeChannel = null;
+    }
+    if (claimIntentChannel) {
+      claimIntentChannel.unsubscribe();
+      claimIntentChannel = null;
     }
     feedEvents = [];
     _claimingTasks.clear();

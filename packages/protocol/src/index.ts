@@ -366,9 +366,11 @@ export interface ScopedTask {
 export interface ScopeProjectResult {
   tasks: ScopedTask[];           // 1-10 atomic tasks
   readmeDraft: string;            // markdown
-  folderStructure: string[];       // placeholder file paths
+  folderStructure: string[];      // placeholder file paths
   totalPayoutMin: number;
   totalPayoutMax: number;
+  scoped?: boolean;               // true if AI succeeded; false if all retries exhausted
+  warning?: string;               // present when scoped=false
 }
 
 export interface ClaimTaskIntent {
